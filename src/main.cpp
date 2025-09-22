@@ -3,50 +3,70 @@
 #include <ArduinoOTA.h>
 #include <WiFi.h>
 #include <TelnetStream.h>
-//defino la conexion a WiFi
+
+// Defino la conexión a WiFi
 const char* ssid = ("ESPcuatri");
 const char* contrasena = ("teamcit2024");
-//PWM Pins
+
+// PWM Pins
 #define ACCEL_PWM 17
+#define PWM_CHANNEL 0       // Canal 0 de PWM
+#define PWM_FREQ 5000       // Frecuencia 5kHz
+#define PWM_RESOLUTION 8    // Resolución de 8 bits (0-255)
+
 void setup() {
-  InicializaUart();  // Inicializa UART0 con 115200 baudios
-  InicializaWiFi(ssid,contrasena); //hago el llamado desde el main para que se conecte al WiFi
+  InicializaUart();  
+  InicializaWiFi(ssid, contrasena);
   InicializaOTA();
   delay(1000);
-  InicializaTelnet(); // Inicia Telnet
+  InicializaTelnet();
   EnviarMensaje("ESP32 conectado y listo para comunicación");
-  pinMode(ACCEL_PWM, OUTPUT);
-  analogWrite(ACCEL_PWM, 0);
+
+  // Configuro PWM en ESP32
+  ledcSetup(PWM_CHANNEL, PWM_FREQ, PWM_RESOLUTION);
+  ledcAttachPin(ACCEL_PWM, PWM_CHANNEL);
+
+  // Duty inicial en 0
+  ledcWrite(PWM_CHANNEL, 0);
 }
 
 void loop() {
   String mensaje;
   if (RecibirMensaje(mensaje)) {
-    // Procesar el mensaje recibido
     EnviarMensaje("Mensaje recibido: " + mensaje);
     EnviarMensajeTelnet("UART: " + mensaje);
   }
-  
-  // Enviar mensaje periódico por Telnet para verificar conexión
+
   static unsigned long lastTelnetMsg = 0;
-  if (millis() - lastTelnetMsg > 5000) { // Cada 5 segundos
+  if (millis() - lastTelnetMsg > 5000) {
     EnviarMensajeTelnet("ESP32 activo - " + String(millis()/1000) + "s");
     lastTelnetMsg = millis();
   }
-  
-  ArduinoOTA.handle(); //Importante para el funcionamiento del OTA llama a la ESP a revisar el estado
-  delay(100);
-  float pwm=61;
-  analogWrite(ACCEL_PWM, pwm);
-  EnviarMensaje("offset");
-  delay(2000);
-  for (int i = 61; i < 227; i++)
-  {
-    analogWrite(ACCEL_PWM, pwm=pwm++);
-    delay(250);
-    EnviarMensaje("a");
-  }
-  
-  
-}
 
+  // Siempre revisar OTA
+  ArduinoOTA.handle();
+
+  // PWM inicial
+  float pwm = 61;
+  ledcWrite(PWM_CHANNEL, pwm);
+  EnviarMensaje("offset");
+
+  // Espera de 2 segundos pero sin bloquear OTA
+  unsigned long start = millis();
+  while (millis() - start < 2000) {
+    ArduinoOTA.handle();
+    delay(10);
+  }
+
+  // Barrido de PWM con OTA activo
+  for (int i = 61; i < 227; i++) {
+    ledcWrite(PWM_CHANNEL, i);
+    EnviarMensaje("a");
+
+    unsigned long stepStart = millis();
+    while (millis() - stepStart < 250) {
+      ArduinoOTA.handle();
+      delay(10);
+    }
+  }
+}
