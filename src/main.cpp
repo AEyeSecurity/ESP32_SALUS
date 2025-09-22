@@ -6,6 +6,8 @@
 //defino la conexion a WiFi
 const char* ssid = ("ESPcuatri");
 const char* contrasena = ("teamcit2024");
+//PWM Pins
+#define ACCEL_PWM 17
 void setup() {
   InicializaUart();  // Inicializa UART0 con 115200 baudios
   InicializaWiFi(ssid,contrasena); //hago el llamado desde el main para que se conecte al WiFi
@@ -13,6 +15,8 @@ void setup() {
   delay(1000);
   InicializaTelnet(); // Inicia Telnet
   EnviarMensaje("ESP32 conectado y listo para comunicación");
+  pinMode(ACCEL_PWM, OUTPUT);
+  analogWrite(ACCEL_PWM, 0);
 }
 
 void loop() {
@@ -32,5 +36,17 @@ void loop() {
   
   ArduinoOTA.handle(); //Importante para el funcionamiento del OTA llama a la ESP a revisar el estado
   delay(100);
+  float pwm=61;
+  analogWrite(ACCEL_PWM, pwm);
+  EnviarMensaje("offset");
+  delay(2000);
+  for (int i = 61; i < 227; i++)
+  {
+    analogWrite(ACCEL_PWM, pwm=pwm++);
+    delay(250);
+    EnviarMensaje("a");
+  }
+  
+  
 }
 
