@@ -2,10 +2,15 @@
 #include "ota_telnet.h"
 #include <ArduinoOTA.h>
 #include "fs_ia6.h"
+#include "hall_sensor.h"
 
 //defino la conexion a WiFi
 const char* ssid = ("ESPcuatri");
 const char* contrasena = ("teamcit2024");
+
+// Create hall sensor instance for pin 15
+HallSensor hallSensor(15);
+
 void setup() {
   InicializaUart();  // Inicializa UART0 con 115200 baudios
   InicializaWiFi(ssid,contrasena); //hago el llamado desde el main para que se conecte al WiFi
@@ -13,6 +18,9 @@ void setup() {
   delay(1000);
   InicializaTelnet(); // Inicia Telnet
   EnviarMensaje("ESP32 conectado y listo para comunicación");
+
+  // Initialize hall sensor
+  hallSensor.begin();
 
   // Inicializar pines usados por el control remoto (asumimos canales en GPIO 14 y 16)
   // Nota: la librerda proporciona initFS_IA6 que puede inicializar 6 pines;
@@ -27,6 +35,14 @@ void loop() {
     // Procesar el mensaje recibido
     EnviarMensaje("Mensaje recibido: " + mensaje);
     EnviarMensajeTelnet("UART: " + mensaje);
+  }
+  
+  // Read and send hall sensor angle
+  if (hallSensor.isAngleReady()) {
+    float angle = hallSensor.getAngle();
+    String angleMsg = "Hall Sensor Angle: " + String(angle, 2) + " degrees";
+    EnviarMensaje(angleMsg);
+    EnviarMensajeTelnet(angleMsg);
   }
   
   // Enviar mensaje periódico por Telnet para verificar conexión
