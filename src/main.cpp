@@ -3,8 +3,10 @@
 #include <ArduinoOTA.h>
 #include "fs_ia6.h"
 #include "h_bridge.h"
+#include "pwm_steering.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <math.h>
 
 const char* ssid = "ESPcuatri";
 const char* contrasena = "teamcit2024";
@@ -13,6 +15,8 @@ constexpr uint16_t STACK_OTA = 4096;
 constexpr uint16_t STACK_BRIDGE = 4096;
 constexpr uint16_t STACK_RC = 2048;
 constexpr uint16_t STACK_PID = 2048;
+constexpr uint16_t STACK_STEERING = 2048;
+constexpr uint16_t STACK_STEERING_MONITOR = 2048;
 
 constexpr TickType_t OTA_PERIOD = pdMS_TO_TICKS(20);
 constexpr TickType_t PID_PERIOD = pdMS_TO_TICKS(30);
@@ -24,6 +28,7 @@ constexpr bool kLogOta = false;
 constexpr bool kLogBridge = false;
 constexpr bool kLogLoop = false;
 constexpr bool kLogRc = true;
+constexpr bool kLogSteering = true;
 constexpr bool kEnableBridgeTask = false;
 }  // namespace debug
 
@@ -50,6 +55,7 @@ static void taskOtaTelnet(void* parameter);
 static void taskBridgeTest(void* parameter);
 static void taskRcMonitor(void* parameter);
 static void taskPid(void* parameter);
+static void taskSteeringMonitor(void* parameter);
 
 static bool startTaskPinned(TaskFunction_t task,
                             const char* name,
@@ -82,6 +88,8 @@ void setup() {
   pinMode(4, INPUT);
   pinMode(16, INPUT);
 
+  pwm_steering::init(15);
+
   if (debug::kEnableBridgeTask) {
     init_h_bridge();
     broadcastIf(debug::kLogBridge, "Inicializado H-bridge (pins 21 enable, 19 left PWM, 18 right PWM)");
@@ -92,6 +100,8 @@ void setup() {
     startTaskPinned(taskBridgeTest, "BridgeTest", STACK_BRIDGE, nullptr, 2, nullptr, 1);
   }
   startTaskPinned(taskRcMonitor, "RCMonitor", STACK_RC, nullptr, 1, nullptr, 1);
+  startTaskPinned(pwm_steering::task, "SteeringPWM", STACK_STEERING, nullptr, 2, nullptr, 1);
+  startTaskPinned(taskSteeringMonitor, "SteeringMon", STACK_STEERING_MONITOR, nullptr, 1, nullptr, 1);
   startTaskPinned(taskPid, "PID", STACK_PID, nullptr, 2, nullptr, 1);
 }
 
@@ -201,8 +211,50 @@ static void taskRcMonitor(void* parameter) {
 static void taskPid(void* parameter) {
   TickType_t last = xTaskGetTickCount();
   for (;;) {
+    pwm_steering::SteeringState steeringState{};
+    pwm_steering::getState(steeringState);
+    if (steeringState.signalValid) {
+      // El valor de angulo queda disponible para el control PID.
+    }
     vTaskDelayUntil(&last, PID_PERIOD);
   }
 }
 
 
+static void taskSteeringMonitor(void* parameter) {
+  TickType_t lastWake = xTaskGetTickCount();
+  float lastAngle = 0.0f;
+  bool lastAngleValid = false;
+  const TickType_t period = pdMS_TO_TICKS(50);
+  for (;;) {
+    pwm_steering::SteeringState state{};
+    const bool valid = pwm_steering::getState(state);
+    if (debug::kLogSteering) {
+      bool shouldReport = false;
+      if (valid != lastAngleValid) {
+        shouldReport = true;
+      } else if (valid && lastAngleValid) {
+        if (fabsf(state.angleDegrees - lastAngle) >= 1.0f) {
+          shouldReport = true;
+        }
+      }
+      if (shouldReport) {
+        String message;
+        if (valid) {
+          message = String("PWM steering -> angle: ") + String(state.angleDegrees, 2) +
+                    " deg | duty: " + String(state.dutyCycle * 100.0f, 2) + "%";
+        } else {
+          message = "PWM steering -> signal lost";
+        }
+        broadcastIf(debug::kLogSteering, message);
+      }
+      if (valid) {
+        lastAngle = state.angleDegrees;
+        lastAngleValid = true;
+      } else {
+        lastAngleValid = false;
+      }
+    }
+    vTaskDelayUntil(&lastWake, period);
+  }
+}
