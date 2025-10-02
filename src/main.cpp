@@ -1,4 +1,4 @@
-﻿#include <Arduino.h>
+#include <Arduino.h>
 #include "ota_telnet.h"
 #include <ArduinoOTA.h>
 #include "fs_ia6.h"
@@ -17,6 +17,34 @@ constexpr uint16_t STACK_PID = 2048;
 constexpr TickType_t OTA_PERIOD = pdMS_TO_TICKS(20);
 constexpr TickType_t PID_PERIOD = pdMS_TO_TICKS(30);
 constexpr TickType_t RC_PERIOD = pdMS_TO_TICKS(100);
+
+namespace debug {
+constexpr bool kLogSystem = false;
+constexpr bool kLogOta = false;
+constexpr bool kLogBridge = false;
+constexpr bool kLogLoop = false;
+constexpr bool kLogRc = true;
+constexpr bool kEnableBridgeTask = false;
+}  // namespace debug
+
+static void serialIf(bool enabled, const String& message) {
+  if (!enabled) {
+    return;
+  }
+  EnviarMensaje(message);
+}
+
+static void telnetIf(bool enabled, const String& message) {
+  if (!enabled) {
+    return;
+  }
+  EnviarMensajeTelnet(message);
+}
+
+static void broadcastIf(bool enabled, const String& message) {
+  serialIf(enabled, message);
+  telnetIf(enabled, message);
+}
 
 static void taskOtaTelnet(void* parameter);
 static void taskBridgeTest(void* parameter);
@@ -46,23 +74,30 @@ void setup() {
   InicializaOTA();
   delay(1000);
   InicializaTelnet();
-  EnviarMensaje("ESP32 conectado y listo para comunicacion");
 
-  pinMode(14, INPUT);
+  broadcastIf(debug::kLogRc, "Iniciando pruebas FS-iA6 (GPIO0, GPIO2, GPIO4 y GPIO16)");
+
+  pinMode(0, INPUT);
+  pinMode(2, INPUT);
+  pinMode(4, INPUT);
   pinMode(16, INPUT);
 
-  init_h_bridge();
-  EnviarMensaje("Inicializado H-bridge (pins 21 enable, 19 left PWM, 18 right PWM)");
+  if (debug::kEnableBridgeTask) {
+    init_h_bridge();
+    broadcastIf(debug::kLogBridge, "Inicializado H-bridge (pins 21 enable, 19 left PWM, 18 right PWM)");
+  }
 
   startTaskPinned(taskOtaTelnet, "OTA", STACK_OTA, nullptr, 3, nullptr, 0);
-  startTaskPinned(taskBridgeTest, "BridgeTest", STACK_BRIDGE, nullptr, 2, nullptr, 1);
+  if (debug::kEnableBridgeTask) {
+    startTaskPinned(taskBridgeTest, "BridgeTest", STACK_BRIDGE, nullptr, 2, nullptr, 1);
+  }
   startTaskPinned(taskRcMonitor, "RCMonitor", STACK_RC, nullptr, 1, nullptr, 1);
   startTaskPinned(taskPid, "PID", STACK_PID, nullptr, 2, nullptr, 1);
 }
 
 void loop() {
   String mensaje;
-  if (RecibirMensaje(mensaje)) {
+  if (RecibirMensaje(mensaje) && debug::kLogLoop) {
     EnviarMensaje("Mensaje recibido: " + mensaje);
     EnviarMensajeTelnet("UART: " + mensaje);
   }
@@ -74,7 +109,7 @@ static void taskOtaTelnet(void* parameter) {
   TickType_t lastHeartbeat = lastWake;
   for (;;) {
     ArduinoOTA.handle();
-    if (xTaskGetTickCount() - lastHeartbeat >= pdMS_TO_TICKS(5000)) {
+    if (debug::kLogOta && (xTaskGetTickCount() - lastHeartbeat >= pdMS_TO_TICKS(5000))) {
       EnviarMensajeTelnet("ESP32 activo - " + String(millis() / 1000) + "s");
       lastHeartbeat = xTaskGetTickCount();
     }
@@ -84,8 +119,7 @@ static void taskOtaTelnet(void* parameter) {
 
 static void reportDuty(const char* label, int duty) {
   String msg = String("H-bridge ") + label + " duty: " + duty + "%";
-  EnviarMensaje(msg);
-  EnviarMensajeTelnet(msg);
+  broadcastIf(debug::kLogBridge, msg);
 }
 
 static void taskBridgeTest(void* parameter) {
@@ -96,12 +130,11 @@ static void taskBridgeTest(void* parameter) {
 
   for (;;) {
     enable_bridge_h();
-    EnviarMensaje("Iniciando prueba H-bridge: izquierda subir/bajar, derecha subir/bajar");
-    EnviarMensajeTelnet("Iniciando prueba H-bridge");
+    broadcastIf(debug::kLogBridge, "Iniciando prueba H-bridge: izquierda subir/bajar, derecha subir/bajar");
 
     for (int d = 0; d <= 100; d += 5) {
       bridge_turn_left(static_cast<uint8_t>(d));
-      if (d % 20 == 0 || d == 0 || d == 100) {
+      if (debug::kLogBridge && (d % 20 == 0 || d == 0 || d == 100)) {
         reportDuty("LEFT", d);
       }
       vTaskDelay(rampUpStepDelay);
@@ -109,7 +142,7 @@ static void taskBridgeTest(void* parameter) {
 
     for (int d = 100; d >= 0; d -= 5) {
       bridge_turn_left(static_cast<uint8_t>(d));
-      if (d % 20 == 0 || d == 0 || d == 100) {
+      if (debug::kLogBridge && (d % 20 == 0 || d == 0 || d == 100)) {
         reportDuty("LEFT", d);
       }
       vTaskDelay(rampDownStepDelay);
@@ -120,7 +153,7 @@ static void taskBridgeTest(void* parameter) {
 
     for (int d = 0; d <= 100; d += 5) {
       bridge_turn_right(static_cast<uint8_t>(d));
-      if (d % 20 == 0 || d == 0 || d == 100) {
+      if (debug::kLogBridge && (d % 20 == 0 || d == 0 || d == 100)) {
         reportDuty("RIGHT", d);
       }
       vTaskDelay(rampUpStepDelay);
@@ -128,7 +161,7 @@ static void taskBridgeTest(void* parameter) {
 
     for (int d = 100; d >= 0; d -= 5) {
       bridge_turn_right(static_cast<uint8_t>(d));
-      if (d % 20 == 0 || d == 0 || d == 100) {
+      if (debug::kLogBridge && (d % 20 == 0 || d == 0 || d == 100)) {
         reportDuty("RIGHT", d);
       }
       vTaskDelay(rampDownStepDelay);
@@ -136,23 +169,29 @@ static void taskBridgeTest(void* parameter) {
 
     bridge_stop();
     disable_bridge_h();
-    EnviarMensaje("Prueba H-bridge finalizada");
+    broadcastIf(debug::kLogBridge, "Prueba H-bridge finalizada");
 
     vTaskDelay(cyclePause);
   }
 }
 
 static void taskRcMonitor(void* parameter) {
-  int lastCh14 = 9999;
+  int lastCh0 = 9999;
+  int lastCh2 = 9999;
+  int lastCh4 = 9999;
   int lastCh16 = 9999;
   for (;;) {
-    int ch14 = readChannel(14, -100, 100, 0);
+    int ch0 = readChannel(0, -100, 100, 0);
+    int ch2 = readChannel(2, -100, 100, 0);
+    int ch4 = readChannel(4, -100, 100, 0);
     int ch16 = readChannel(16, -100, 100, 0);
-    if (ch14 != lastCh14 || ch16 != lastCh16) {
-      String rcMsg = "RC -> Pin14: " + String(ch14) + " | Pin16: " + String(ch16);
-      EnviarMensaje(rcMsg);
-      EnviarMensajeTelnet(rcMsg);
-      lastCh14 = ch14;
+    if (ch0 != lastCh0 || ch2 != lastCh2 || ch4 != lastCh4 || ch16 != lastCh16) {
+      String rcMsg = "FS-iA6 -> GPIO0: " + String(ch0) + " | GPIO2: " + String(ch2) +
+                     " | GPIO4: " + String(ch4) + " | GPIO16: " + String(ch16);
+      broadcastIf(debug::kLogRc, rcMsg);
+      lastCh0 = ch0;
+      lastCh2 = ch2;
+      lastCh4 = ch4;
       lastCh16 = ch16;
     }
     vTaskDelay(RC_PERIOD);
@@ -162,7 +201,8 @@ static void taskRcMonitor(void* parameter) {
 static void taskPid(void* parameter) {
   TickType_t last = xTaskGetTickCount();
   for (;;) {
-    // Pendiente: implementar logica del PID (ejecuta cada 30 ms)
     vTaskDelayUntil(&last, PID_PERIOD);
   }
 }
+
+
