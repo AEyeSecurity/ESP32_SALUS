@@ -225,13 +225,16 @@ static void taskSteeringMonitor(void* parameter) {
   TickType_t lastWake = xTaskGetTickCount();
   float lastAngle = 0.0f;
   bool lastAngleValid = false;
+  uint32_t lastUpdate = 0u;
   const TickType_t period = pdMS_TO_TICKS(50);
   for (;;) {
     pwm_steering::SteeringState state{};
     const bool valid = pwm_steering::getState(state);
     if (debug::kLogSteering) {
       bool shouldReport = false;
-      if (valid != lastAngleValid) {
+      if (state.updatedMicros != lastUpdate) {
+        shouldReport = true;
+      } else if (!valid && lastAngleValid) {
         shouldReport = true;
       } else if (valid && lastAngleValid) {
         if (fabsf(state.angleDegrees - lastAngle) >= 1.0f) {
@@ -244,15 +247,13 @@ static void taskSteeringMonitor(void* parameter) {
           message = String("PWM steering -> angle: ") + String(state.angleDegrees, 2) +
                     " deg | duty: " + String(state.dutyCycle * 100.0f, 2) + "%";
         } else {
-          message = "PWM steering -> signal lost";
+          message = String("PWM steering -> invalido | high: ") + String(state.highMicros) +
+                    " us | period: " + String(state.periodMicros) + " us";
         }
         broadcastIf(debug::kLogSteering, message);
-      }
-      if (valid) {
         lastAngle = state.angleDegrees;
-        lastAngleValid = true;
-      } else {
-        lastAngleValid = false;
+        lastAngleValid = valid;
+        lastUpdate = state.updatedMicros;
       }
     }
     vTaskDelayUntil(&lastWake, period);
