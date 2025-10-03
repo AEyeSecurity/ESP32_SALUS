@@ -4,6 +4,7 @@
 #include "fs_ia6.h"
 #include "h_bridge.h"
 #include "pwm_steering.h"
+#include "pid.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <math.h>
@@ -89,6 +90,7 @@ void setup() {
   pinMode(16, INPUT);
 
   pwm_steering::init(15);
+  steering_pid::init();
 
   if (debug::kEnableBridgeTask) {
     init_h_bridge();
@@ -195,6 +197,7 @@ static void taskRcMonitor(void* parameter) {
     int ch2 = readChannel(2, -100, 100, 0);
     int ch4 = readChannel(4, -100, 100, 0);
     int ch16 = readChannel(16, -100, 100, 0);
+    steering_pid::setRcValue(ch4);
     if (ch0 != lastCh0 || ch2 != lastCh2 || ch4 != lastCh4 || ch16 != lastCh16) {
       String rcMsg = "FS-iA6 -> GPIO0: " + String(ch0) + " | GPIO2: " + String(ch2) +
                      " | GPIO4: " + String(ch4) + " | GPIO16: " + String(ch16);
@@ -210,11 +213,28 @@ static void taskRcMonitor(void* parameter) {
 
 static void taskPid(void* parameter) {
   TickType_t last = xTaskGetTickCount();
+  const float dtSeconds =
+      (static_cast<float>(PID_PERIOD) * static_cast<float>(portTICK_PERIOD_MS)) / 1000.0f;
   for (;;) {
     pwm_steering::SteeringState steeringState{};
-    pwm_steering::getState(steeringState);
-    if (steeringState.signalValid) {
-      // El valor de angulo queda disponible para el control PID.
+    const bool steeringValid = pwm_steering::getState(steeringState);
+
+    const int rcRaw = steering_pid::rcValue();
+    const float setpointDeg = steering_pid::rcToSetpointDegrees(rcRaw);
+
+    bool appliedControl = false;
+    if (steeringValid) {
+      const float relativeDeg = steering_pid::absoluteToRelative(steeringState.angleDegrees);
+      if (!isnan(relativeDeg)) {
+        const float controlPercent = steering_pid::update(setpointDeg, relativeDeg, dtSeconds);
+        steering_pid::applyControl(controlPercent);
+        appliedControl = true;
+      }
+    }
+
+    if (!appliedControl) {
+      steering_pid::reset();
+      steering_pid::stopActuator();
     }
     vTaskDelayUntil(&last, PID_PERIOD);
   }
