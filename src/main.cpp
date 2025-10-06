@@ -29,9 +29,11 @@ constexpr bool kLogSystem = false;
 constexpr bool kLogOta = false;
 constexpr bool kLogBridge = false;
 constexpr bool kLogLoop = false;
-constexpr bool kLogRc = true;
+constexpr bool kLogRc = false;
 constexpr bool kLogAs5600 = true;
 constexpr bool kEnableBridgeTask = false;
+constexpr bool kEnableRcTask = false;
+constexpr bool kEnablePidTask = false;
 }  // namespace debug
 
 static void serialIf(bool enabled, const String& message) {
@@ -58,6 +60,7 @@ static void taskBridgeTest(void* parameter);
 static void taskRcMonitor(void* parameter);
 static void taskPid(void* parameter);
 static void taskAs5600Monitor(void* parameter);
+static void runAs5600SelfTest();
 
 static AS5600 g_as5600;
 
@@ -76,6 +79,83 @@ static bool startTaskPinned(TaskFunction_t task,
     return false;
   }
   return true;
+}
+
+static void runAs5600SelfTest() {
+  broadcastIf(debug::kLogAs5600, "[AS5600][TEST] Iniciando diagnostico basico");
+
+  const bool connected = g_as5600.isConnected();
+  broadcastIf(debug::kLogAs5600, String("[AS5600][TEST] Conectado al bus I2C: ") + (connected ? "SI" : "NO"));
+  if (!connected) {
+    broadcastIf(debug::kLogAs5600, "[AS5600][TEST] Abortado: sin respuesta del dispositivo");
+    return;
+  }
+
+  const uint8_t status = g_as5600.getStatus();
+  if (status == 0xFF) {
+    broadcastIf(debug::kLogAs5600, "[AS5600][TEST][ERROR] No se pudo leer STATUS (0x0B)");
+  } else {
+    String msg = "[AS5600][TEST] STATUS (0x0B) = 0x";
+    msg += String(status, HEX);
+    msg += " md=";
+    msg += (status & 0x20) ? "1" : "0";
+    msg += " ml=";
+    msg += (status & 0x10) ? "1" : "0";
+    msg += " mh=";
+    msg += (status & 0x08) ? "1" : "0";
+    broadcastIf(debug::kLogAs5600, msg);
+  }
+
+  const uint16_t conf = g_as5600.getConf();
+  if (conf == 0xFFFF) {
+    broadcastIf(debug::kLogAs5600, "[AS5600][TEST][ERROR] No se pudo leer CONF (0x07-0x08)");
+  } else {
+    String msg = "[AS5600][TEST] CONF (0x07-0x08) = 0x";
+    msg += String(conf, HEX);
+    broadcastIf(debug::kLogAs5600, msg);
+  }
+
+  const uint8_t agc = g_as5600.getAgc();
+  if (agc == 0xFF) {
+    broadcastIf(debug::kLogAs5600, "[AS5600][TEST][ERROR] No se pudo leer AGC (0x1A)");
+  } else {
+    String msg = "[AS5600][TEST] AGC (0x1A) = ";
+    msg += String(agc);
+    broadcastIf(debug::kLogAs5600, msg);
+  }
+
+  const uint16_t magnitude = g_as5600.getMagnitude();
+  if (magnitude == 0xFFFF) {
+    broadcastIf(debug::kLogAs5600, "[AS5600][TEST][ERROR] No se pudo leer MAGNITUDE (0x1B-0x1C)");
+  } else {
+    String msg = "[AS5600][TEST] MAGNITUDE (0x1B-0x1C) = ";
+    msg += String(magnitude);
+    broadcastIf(debug::kLogAs5600, msg);
+  }
+
+  const uint16_t rawAngle = g_as5600.getRawAngle();
+  if (rawAngle == 0xFFFF) {
+    broadcastIf(debug::kLogAs5600, "[AS5600][TEST][ERROR] No se pudo leer RAW_ANGLE (0x0C-0x0D)");
+  } else {
+    String msg = "[AS5600][TEST] RAW_ANGLE (0x0C-0x0D) = ";
+    msg += String(rawAngle);
+    broadcastIf(debug::kLogAs5600, msg);
+  }
+
+  const uint16_t angle = g_as5600.getAngle();
+  if (angle == 0xFFFF) {
+    broadcastIf(debug::kLogAs5600, "[AS5600][TEST][ERROR] No se pudo leer ANGLE (0x0E-0x0F)");
+  } else {
+    const float angleDeg = (angle * 360.0f) / 4096.0f;
+    String msg = "[AS5600][TEST] ANGLE (0x0E-0x0F) = ";
+    msg += String(angle);
+    msg += " -> ";
+    msg += String(angleDeg, 2);
+    msg += "deg";
+    broadcastIf(debug::kLogAs5600, msg);
+  }
+
+  broadcastIf(debug::kLogAs5600, "[AS5600][TEST] Diagnostico completado");
 }
 
 void setup() {
@@ -101,15 +181,15 @@ void setup() {
   if (debug::kEnableBridgeTask) {
     startTaskPinned(taskBridgeTest, "BridgeTest", STACK_BRIDGE, nullptr, 2, nullptr, 1);
   }
-  startTaskPinned(taskRcMonitor, "RCMonitor", STACK_RC, nullptr, 1, nullptr, 1);
-  startTaskPinned(taskPid, "PID", STACK_PID, nullptr, 2, nullptr, 1);
+  if (debug::kEnableRcTask) {
+    startTaskPinned(taskRcMonitor, "RCMonitor", STACK_RC, nullptr, 1, nullptr, 1);
+  }
+  if (debug::kEnablePidTask) {
+    startTaskPinned(taskPid, "PID", STACK_PID, nullptr, 2, nullptr, 1);
+  }
 
   g_as5600.begin(AS5600_SDA_PIN, AS5600_SCL_PIN);
-  if (!g_as5600.isConnected()) {
-    Serial.println("[AS5600] No se detecta el sensor en el bus I2C");
-  } else {
-    Serial.println("[AS5600] Sensor inicializado correctamente");
-  }
+  runAs5600SelfTest();
   startTaskPinned(taskAs5600Monitor, "AS5600", STACK_AS5600, nullptr, 1, nullptr, 1);
 }
 
@@ -219,33 +299,49 @@ static void taskRcMonitor(void* parameter) {
 static void taskAs5600Monitor(void* parameter) {
   TickType_t lastWake = xTaskGetTickCount();
   for (;;) {
-    if (!g_as5600.isConnected()) {
-      Serial.println("[AS5600] Error: sensor desconectado");
+    const bool connected = g_as5600.isConnected();
+    if (!connected) {
+      broadcastIf(debug::kLogAs5600, "[AS5600][MON] connected=NO (sin respuesta I2C)");
       vTaskDelayUntil(&lastWake, AS5600_PERIOD);
       continue;
     }
 
     const uint8_t status = g_as5600.getStatus();
-    const float angle_deg = g_as5600.getAngleDegrees();
+    const uint16_t rawAngle = g_as5600.getRawAngle();
+    const uint16_t angle = g_as5600.getAngle();
 
-    String statusMsg;
+    String msg = "[AS5600][MON] connected=YES";
+
     if (status == 0xFF) {
-      statusMsg = "estado no disponible";
-    } else if ((status & 0x20) == 0) {  // STATUS_MD bit
-      statusMsg = "sin iman";
-    } else if (status & 0x08) {  // STATUS_MH bit
-      statusMsg = "iman muy cerca";
-    } else if (status & 0x10) {  // STATUS_ML bit
-      statusMsg = "iman muy lejos";
+      msg += " status=ERR";
     } else {
-      statusMsg = "iman OK";
+      msg += " status=0x";
+      msg += String(status, HEX);
+      msg += " md=";
+      msg += (status & 0x20) ? "1" : "0";
+      msg += " ml=";
+      msg += (status & 0x10) ? "1" : "0";
+      msg += " mh=";
+      msg += (status & 0x08) ? "1" : "0";
     }
 
-    const bool angleOk = angle_deg >= 0.0f;
-    const String angleMsg = angleOk ? String(angle_deg, 2) + "°" : String("error lectura");
+    if (rawAngle == 0xFFFF) {
+      msg += " raw=ERR";
+    } else {
+      msg += " raw=";
+      msg += String(rawAngle);
+    }
 
-    String logMsg = "[AS5600] angulo=" + angleMsg + " | " + statusMsg;
-    broadcastIf(debug::kLogAs5600, logMsg);
+    if (angle == 0xFFFF) {
+      msg += " angle=ERR";
+    } else {
+      const float angleDeg = (angle * 360.0f) / 4096.0f;
+      msg += " angle=";
+      msg += String(angleDeg, 2);
+      msg += "deg";
+    }
+
+    broadcastIf(debug::kLogAs5600, msg);
 
     vTaskDelayUntil(&lastWake, AS5600_PERIOD);
   }
