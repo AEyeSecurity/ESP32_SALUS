@@ -1,65 +1,98 @@
-﻿# ESP32 Cuatri - Comunicacion WiFi con OTA y Telnet
+# ESP32 SALUS - Control PID de direccion
 
-Firmware para ESP32 orientado a pruebas de actuadores y comunicacion remota. El dispositivo opera como punto de acceso WiFi, expone consola por UART y Telnet y mantiene soporte OTA permanente mientras se ejecutan rutinas de control en paralelo.
+Firmware para ESP32 que integra comunicacion OTA/Telnet con un lazo PID de posicionamiento angular basado en el sensor magnetico AS5600 y un actuador controlado por un puente H. El receptor RC (FS-iA6) entrega la consigna mediante PWM en GPIO4.
 
-## Caracteristicas principales
+## Conexiones de hardware
 
-- **WiFi AP**: punto de acceso "ESPcuatri" (IP 192.168.4.1)
-- **OTA**: actualizacion de firmware sin cable via ArduinoOTA (puerto 3232)
-- **Telnet**: canal de monitoreo y debugging en tiempo real (puerto 23)
-- **UART**: consola serie a 115200 baudios para comandos locales
-- **FreeRTOS**: cada funcion critica vive en una tarea separada para evitar bloqueos
+| Senal / Modulo        | GPIO ESP32 | Descripcion                                                                 |
+|-----------------------|------------|------------------------------------------------------------------------------|
+| AS5600 SDA            | 25         | Bus I2C (tirar a 3V3 con 4.7 k si el modulo no lo trae).                    |
+| AS5600 SCL            | 26         | Bus I2C compartido con otras mediciones si fuese necesario.                 |
+| AS5600 VCC / GND      | 3V3 / GND  | Alimentacion del encoder magnetico.                                         |
+| Receptor RC - Canal 4 | 4          | PWM de mando (-100 a 100) que define la consigna asociada al angulo.        |
+| H-bridge ENABLE       | 21         | Se fuerza en HIGH cuando el PID necesita mover el motor.                    |
+| H-bridge LEFT PWM     | 19         | PWM para girar el motor a la izquierda (ver `bridge_turn_left`).            |
+| H-bridge RIGHT PWM    | 18         | PWM para girar el motor a la derecha (ver `bridge_turn_right`).             |
 
-## Arquitectura de tareas
+> No ejecutes `taskBridgeTest` y el PID en simultaneo: ambos manejan el mismo puente H.
 
-| Tarea            | Core | Prioridad | Periodo / Ritmo            | Responsabilidad clave |
-|------------------|------|-----------|----------------------------|------------------------|
-| `taskOtaTelnet`  | 0    | 3         | 20 ms (vTaskDelayUntil)    | Llama `ArduinoOTA.handle()` y publica heartbeat Telnet cada 5 s |
-| `taskBridgeTest` | 1    | 2         | bucle continuo cooperativo | Ejecuta rampas PWM de prueba sobre el puente H y reporta el duty |
-| `taskRcMonitor`  | 1    | 1         | 100 ms                     | Lee canales RC (GPIO 14 y 16) y notifica cambios por UART/Telnet |
-| `taskPid`        | 1    | 2         | 30 ms (placeholder)        | Reserva para el controlador PID periodico |
-| `loop()`         | 1*   | 1 (default) | 50 ms                     | Atiende mensajes UART y libera CPU |
+## Logica del control PID
 
-*La tarea `loop()` es la tarea Arduino por defecto, que corre en el mismo core que otras tareas de aplicacion.*
+1. **Lectura del mando**: `taskPidControl` usa `readChannel()` sobre `GPIO4` para obtener un valor normalizado entre -100 y 100.
+2. **Setpoint angular**: el valor anterior se mapea a grados via `mapRcValueToAngle()` (`centerDeg +/- spanDeg`).
+3. **Sensado**: se consulta `AS5600::getAngleDegrees()`. Errores de I2C detienen el motor y reinician el PID.
+4. **Error envuelto**: `computeAngleError()` lleva el error a +/-180 grados para evitar saltos cuando el angulo cruza 0.
+5. **Actualizacion PID**: `PidController::update()` integra el error con anti-windup y derivada discreta (ver `src/pid.cpp:159`).
+6. **Post-procesado**: se aplica *deadband* y un minimo de duty (`applyDeadband`, `applyMinActive`) para vencer la friccion.
+7. **Actuacion**: el signo del comando decide sentido; el modulo `h_bridge` genera el PWM correspondiente o detiene el motor.
 
-Las tareas se crean en `setup()` mediante `xTaskCreatePinnedToCore`, fijando afinidad y prioridad. Si una tarea no puede inicializarse, se notifica por UART y Telnet.
+## Tareas y temporizacion
 
-`taskPid` aun no implementa el control, pero ya mantiene un periodo fijo de 30 ms para insertar la logica en el futuro.
+| Tarea / funcion          | Nucleo | Prioridad | Periodo / Ritmo           | Proposito principal |
+|--------------------------|--------|-----------|---------------------------|---------------------|
+| `taskOtaTelnet`          | 0      | 3         | 20 ms                     | Gestiona OTA y Telnet. |
+| `taskAs5600Monitor`      | 1      | 1         | 30 ms (log cada 500 ms)   | Telemetria del sensor AS5600. |
+| `taskPidControl`         | 1      | 2         | 20 ms                     | Ejecuta el lazo PID y controla el puente H. |
+| `taskRcMonitor` (opcional)| 1     | 1         | 100 ms                    | Muestra los valores del receptor RC. |
+| `taskBridgeTest` (opcional)| 1    | 2         | Bucle cooperativo         | Rampa de prueba del puente H (no usar junto al PID). |
+| `loop()`                 | 1      | -         | 50 ms                     | Manejo basico de UART. |
 
-## Flujo de arranque
+La tarea PID calcula su `dt` con `micros()` y, ante valores anomalos, usa el periodo nominal (`PID_PERIOD`).
 
-1. Inicializa UART, WiFi (modo AP), OTA y Telnet.
-2. Configura GPIO del receptor RC y activa el driver del puente H.
-3. Lanza las tareas FreeRTOS listadas arriba.
+## Parametros configurables clave
 
-## Dependencias y compilacion
+- `RC_STEERING_PIN` (`src/main.cpp:22`): GPIO del canal RC que alimenta el setpoint.
+- `PID_CENTER_DEG` (`src/main.cpp:24`): angulo centrado que corresponde a mando 0. Ej.: 150 grados.
+- `PID_SPAN_DEG` (`src/main.cpp:25`): amplitud maxima de correccion (mando +/-100 => +/-span grados).
+- `PID_DEADBAND_PERCENT` (`src/main.cpp:26`): zona muerta en % del duty final para evitar oscilaciones pequenas.
+- `PID_MIN_ACTIVE_PERCENT` (`src/main.cpp:27`): duty minimo aplicado cuando el comando es distinto de cero.
+- Ganancias (`PID_KP`, `PID_KI`, `PID_KD` en `src/main.cpp:28-30`): tunings base iniciales; se pueden variar y recompilar.
+- Limite integral (`PID_INTEGRAL_LIMIT`, `src/main.cpp:31`): clamp simetrico del termino I para prevenir windup.
+- Periodo y logging (`PID_PERIOD`, `PID_LOG_INTERVAL` en `src/main.cpp:37-38`): definen la cadencia de calculo y cada cuanto loguea.
+- Flags de depuracion (`debug::kLogPid`, `debug::kEnablePidTask` en `src/main.cpp:47,50`): activan logs y la tarea PID.
+- La estructura `PidTaskConfig` empaqueta estos parametros y se pasa a FreeRTOS (`src/main.cpp:62-71`).
 
-### PlatformIO
+En la inicializacion (`src/main.cpp:80-83`) se fijan las ganancias, limites y se hace `reset()` antes de arrancar la tarea.
 
-```
-pio run
-pio run --target upload
-```
+## Funcionamiento interno del PID
 
-El proyecto usa PlatformIO con `framework = arduino` y depende de:
+La implementacion a medida vive en `include/pid.h` y `src/pid.cpp`:
 
-- `TelnetStream` para la sesion remota
-- `IBusBM` para integracion futura con IBUS (opcional)
+- La clase `PidController` (`include/pid.h:11`) administra ganancias, limites y estado interno (integral, derivada).
+- `PidController::update()` (`src/pid.cpp:115`) suma P, integra I con saturacion y calcula una derivada simple filtrada por paso de tiempo.
+- `wrapAngleDegrees()` (`src/pid.cpp:141`) mantiene el error dentro de +/-180 grados.
+- `taskPidControl()` (`src/pid.cpp:159`) coordina lecturas, PID y PWM; incluye protecciones ante lecturas invalidas y logging periodico.
 
-> Nota: este repositorio asume que `pio` esta en el PATH. Si no, instala PlatformIO Core o usa la extension de VS Code.
+## Pasos de uso
 
-## Conexion rapida
+1. Conecta el hardware segun la tabla y asegura la alimentacion estable del AS5600 y del puente H.
+2. Compila/sube con PlatformIO (`pio run --target upload`) o via OTA (`pio run --target upload --upload-port 192.168.4.1`).
+3. Opcional: habilita Telnet (`telnet 192.168.4.1 23`) para seguir los logs del PID (`debug::kLogPid = true`).
+4. Ajusta el transmisor RC: en reposo debe entregar ~150 grados (mando 0). Verifica que el sensor reporte valores coherentes.
+5. Modifica ganancias o rangos en `src/main.cpp` segun la respuesta del sistema y vuelve a compilar.
 
-1. Conectarse al WiFi "ESPcuatri" (clave `teamcit2024`).
-2. Abrir una consola Telnet con `telnet 192.168.4.1 23`.
-3. Usar UART a 115200 baudios, 8N1, para consola local.
-4. Subir firmware OTA con `pio run --target upload` o `espota.py` apuntando a 192.168.4.1:3232.
+## Ajuste del PID
 
-## Extensiones sugeridas
+- Comienza aumentando `PID_KP` hasta que el sistema responda rapido sin saturar; agrega `PID_KI` para eliminar error estacionario y `PID_KD` si ves sobreoscilaciones.
+- Reduce `PID_DEADBAND_PERCENT` si quieres mas sensibilidad; subelo si vibra alrededor del centro.
+- `PID_MIN_ACTIVE_PERCENT` ayuda a vencer la friccion estatica; ajustalo al minimo que mueva confiablemente el motor.
+- Si el lazo integra demasiado y tarda en recuperarse, baja `PID_INTEGRAL_LIMIT` o `PID_KI`.
+- Puedes instrumentar mas datos dentro de `taskPidControl` o enviar comandos por Telnet para ajustar en caliente (idea para mejoras futuras).
 
-- Reemplazar `taskBridgeTest` por la logica real de actuacion leyendo comandos de RC o PID.
-- Integrar el controlador PID en `taskPid`, protegiendo recursos compartidos con colas o semaforos.
-- Anadir comandos extra via Telnet para diagnostico o streaming de sensores.
+## Depuracion y buenas practicas
 
----
-Proyecto Team CIT 2024
+- Mantener `debug::kEnablePidTask = true` y `debug::kEnableBridgeTask = false`; la tarea PID ya inicializa el puente H por su cuenta.
+- Si el AS5600 falla (lectura < 0), el PID congela la salida y detiene el puente; revisa cableado o bus I2C.
+- Usa la tarea `taskRcMonitor` para verificar los valores del receptor antes de activar el PID.
+- Los logs `[PID]` aparecen cada `PID_LOG_INTERVAL`; ajusta el valor para evitar saturar Telnet.
+
+## Archivos relevantes
+
+- `src/main.cpp`: configuracion de tareas, constantes y arranque del PID.
+- `include/pid.h`: definicion del controlador y de `PidTaskConfig`.
+- `src/pid.cpp`: implementacion del lazo, helpers de angulo y logica de FreeRTOS.
+- `include/h_bridge.h` y `src/h_bridge.cpp`: capa de abstraccion del puente H.
+- `include/AS5600.h` y `src/AS5600.cpp`: driver del sensor magnetico.
+
+Con esta estructura dispones de un lazo PID limpio, portable y sencillo de ajustar para mantener el motor alrededor de un angulo deseado siguiendo las ordenes del receptor RC.
+
