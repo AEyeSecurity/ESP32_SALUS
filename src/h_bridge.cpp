@@ -1,7 +1,12 @@
 // h_bridge.cpp
-// Implementación simple del control de un puente H en ESP32 usando LEDC
+// Implementacion simple del control de un puente H en ESP32 usando LEDC
 
 #include "../include/h_bridge.h"
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+#include "ota_telnet.h"
 
 // GPIO assignments
 static const int ENABLE_PIN = 21;
@@ -44,7 +49,9 @@ void disable_bridge_h() {
 
 // dutyPercent: 0..100
 static uint32_t duty_from_percent(uint8_t dutyPercent) {
-  if (dutyPercent >= 100) return (uint32_t)((1 << LEDC_RESOLUTION) - 1);
+  if (dutyPercent >= 100) {
+    return (uint32_t)((1 << LEDC_RESOLUTION) - 1);
+  }
   return (uint32_t)((dutyPercent * ((1 << LEDC_RESOLUTION) - 1)) / 100);
 }
 
@@ -65,4 +72,68 @@ void bridge_turn_right(uint8_t dutyPercent) {
 void bridge_stop() {
   ledcWrite(LEFT_LEDC_CHANNEL, 0);
   ledcWrite(RIGHT_LEDC_CHANNEL, 0);
+}
+
+static void reportDuty(const char* label, int duty, bool log) {
+  if (!log) {
+    return;
+  }
+  String msg = String("H-bridge ") + label + " duty: " + duty + "%";
+  broadcastIf(true, msg);
+}
+
+void taskBridgeTest(void* parameter) {
+  const HBridgeTaskConfig* cfg = static_cast<const HBridgeTaskConfig*>(parameter);
+  const bool log = (cfg != nullptr) ? cfg->log : false;
+
+  const TickType_t rampUpStepDelay = pdMS_TO_TICKS(80);
+  const TickType_t rampDownStepDelay = pdMS_TO_TICKS(60);
+  const TickType_t pauseBetweenDirections = pdMS_TO_TICKS(300);
+  const TickType_t cyclePause = pdMS_TO_TICKS(2000);
+
+  for (;;) {
+    enable_bridge_h();
+    broadcastIf(log, "Iniciando prueba H-bridge: izquierda subir/bajar, derecha subir/bajar");
+
+    for (int d = 0; d <= 100; d += 5) {
+      bridge_turn_left(static_cast<uint8_t>(d));
+      if (d % 20 == 0 || d == 0 || d == 100) {
+        reportDuty("LEFT", d, log);
+      }
+      vTaskDelay(rampUpStepDelay);
+    }
+
+    for (int d = 100; d >= 0; d -= 5) {
+      bridge_turn_left(static_cast<uint8_t>(d));
+      if (d % 20 == 0 || d == 0 || d == 100) {
+        reportDuty("LEFT", d, log);
+      }
+      vTaskDelay(rampDownStepDelay);
+    }
+
+    bridge_stop();
+    vTaskDelay(pauseBetweenDirections);
+
+    for (int d = 0; d <= 100; d += 5) {
+      bridge_turn_right(static_cast<uint8_t>(d));
+      if (d % 20 == 0 || d == 0 || d == 100) {
+        reportDuty("RIGHT", d, log);
+      }
+      vTaskDelay(rampUpStepDelay);
+    }
+
+    for (int d = 100; d >= 0; d -= 5) {
+      bridge_turn_right(static_cast<uint8_t>(d));
+      if (d % 20 == 0 || d == 0 || d == 100) {
+        reportDuty("RIGHT", d, log);
+      }
+      vTaskDelay(rampDownStepDelay);
+    }
+
+    bridge_stop();
+    disable_bridge_h();
+    broadcastIf(log, "Prueba H-bridge finalizada");
+
+    vTaskDelay(cyclePause);
+  }
 }

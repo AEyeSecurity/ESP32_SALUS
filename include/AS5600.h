@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 class AS5600 {
 public:
@@ -11,7 +13,7 @@ public:
     void begin(int sda_pin = -1, int scl_pin = -1, uint32_t freq = 400000);
     bool isConnected();
 
-    // Funciones de diagnóstico y lectura
+    // Funciones de diagnostico y lectura
     void printStatus();
     void printAgcMagnitude();
     void printAngles();
@@ -24,12 +26,12 @@ public:
     uint16_t getAngle();
     float getAngleDegrees();
 
-    // Funciones de configuración
+    // Funciones de configuracion
     bool setOutsToPwm();
     uint16_t getConf();
     bool setConf(uint16_t conf);
 
-    // Medición de PWM (requiere pin externo)
+    // Medicion de PWM (requiere pin externo)
     bool measurePwm(int pwm_pin, float &duty_percent, float &freq_hz);
 
 private:
@@ -71,5 +73,15 @@ private:
     bool i2cRead16(uint8_t reg, uint16_t &val);
     bool i2cWrite16(uint8_t reg, uint16_t val);
 };
+
+struct AS5600MonitorConfig {
+    AS5600* sensor;
+    bool log;
+    TickType_t period;
+    TickType_t logInterval;
+};
+
+void runAs5600SelfTest(AS5600& sensor, bool log);
+void taskAs5600Monitor(void* parameter);
 
 #endif // AS5600_H
