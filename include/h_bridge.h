@@ -12,12 +12,18 @@ void init_h_bridge();
 void enable_bridge_h();
 void disable_bridge_h();
 
-// Giro: dutyPercent en 0..100 (%). No habilita automáticamente el enable_pin;
+// Giro: dutyPercent en 0..100 (%). No habilita automaticamente el enable_pin;
 // el usuario debe llamar a enable_bridge_h() antes de usar estos.
 void bridge_turn_left(uint8_t dutyPercent);
 void bridge_turn_right(uint8_t dutyPercent);
 
 // Detiene cualquier salida PWM (poniendo duty a 0)
 void bridge_stop();
+
+struct HBridgeTaskConfig {
+  bool log;
+};
+
+void taskBridgeTest(void* parameter);
 
 #endif // H_BRIDGE_H
