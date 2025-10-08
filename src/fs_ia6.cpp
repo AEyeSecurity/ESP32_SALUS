@@ -56,29 +56,29 @@ void taskRcMonitor(void* parameter) {
   const bool log = (cfg != nullptr) ? cfg->log : false;
   const TickType_t period = (cfg != nullptr) ? cfg->period : pdMS_TO_TICKS(100);
 
-  int lastAccel = 9999;
+  int lastThrottle = 9999;
   int lastSteering = 9999;
-  int lastBrakeGear = 9999;
-  int lastAux = 9999;
+  int lastAux1 = 9999;
+  int lastAux2 = 9999;
 
   for (;;) {
-    int accel = readChannel(kRcAccelPin, -100, 100, 0);
+    int throttle = readChannel(kRcThrottlePin, -100, 100, 0);
     int steering = readChannel(kRcSteeringPin, -100, 100, 0);
-    int brakeGear = readChannel(kRcBrakeGearPin, -100, 100, 0);
-    int aux = readChannel(kRcAuxPin, -100, 100, 0);
+    int aux1 = readChannel(kRcAux1Pin, -100, 100, 0);
+    int aux2 = readChannel(kRcAux2Pin, -100, 100, 0);
 
-    if (accel != lastAccel || steering != lastSteering || brakeGear != lastBrakeGear || aux != lastAux) {
+    if (throttle != lastThrottle || steering != lastSteering || aux1 != lastAux1 || aux2 != lastAux2) {
       if (log) {
-        String rcMsg = "FS-iA6 -> Aceleracion(GPIO0): " + String(accel) +
+        String rcMsg = "FS-iA6 -> Acelerador/Reversa(GPIO4): " + String(throttle) +
                        " | Direccion(GPIO6): " + String(steering) +
-                       " | Freno/Marchas(GPIO4): " + String(brakeGear) +
-                       " | Aux(GPIO16): " + String(aux);
+                       " | Aux1(GPIO0): " + String(aux1) +
+                       " | Aux2(GPIO2): " + String(aux2);
         broadcastIf(true, rcMsg);
       }
-      lastAccel = accel;
+      lastThrottle = throttle;
       lastSteering = steering;
-      lastBrakeGear = brakeGear;
-      lastAux = aux;
+      lastAux1 = aux1;
+      lastAux2 = aux2;
     }
     vTaskDelay(period);
   }

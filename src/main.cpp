@@ -49,12 +49,12 @@ void setup() {
   InicializaTelnet();
 
   broadcastIf(debug::kLogRc,
-              "Iniciando pruebas FS-iA6 (GPIO0 aceleracion, GPIO6 direccion, GPIO4 freno/marchas, GPIO16 auxiliar)");
+              "Iniciando pruebas FS-iA6 (GPIO4 acelerador/reversa, GPIO6 direccion, GPIO0 auxiliar1, GPIO2 auxiliar2)");
 
-  pinMode(kRcAccelPin, INPUT);
+  pinMode(kRcThrottlePin, INPUT);
   pinMode(kRcSteeringPin, INPUT);
-  pinMode(kRcBrakeGearPin, INPUT);
-  pinMode(kRcAuxPin, INPUT);
+  pinMode(kRcAux1Pin, INPUT);
+  pinMode(kRcAux2Pin, INPUT);
 
   if (debug::kEnableBridgeTask) {
     init_h_bridge();
