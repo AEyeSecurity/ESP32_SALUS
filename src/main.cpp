@@ -31,10 +31,15 @@ constexpr int QUAD_THROTTLE_PWM_PIN = 17;
 constexpr uint8_t QUAD_THROTTLE_LEDC_CHANNEL = 4;  // Reservado para acelerador (no se solapa con el puente H)
 constexpr double QUAD_THROTTLE_PWM_FREQUENCY = 20000.0;
 constexpr uint8_t QUAD_THROTTLE_PWM_RES_BITS = 10;
+constexpr int QUAD_THROTTLE_DEADZONE = 10;
+constexpr uint8_t QUAD_THROTTLE_MIN_PERCENT = 25;
+constexpr uint8_t QUAD_THROTTLE_MAX_PERCENT = 90;
 
 constexpr uint32_t GEARBOX_UART_BAUD = 115200;
 constexpr int GEARBOX_UART_RX_PIN = -1;  // Configurar cuando se definan los pines
 constexpr int GEARBOX_UART_TX_PIN = -1;
+constexpr const char* QUAD_REVERSE_ENABLE_CMD = ">DRIVE:REV:ON\n";
+constexpr const char* QUAD_REVERSE_DISABLE_CMD = ">DRIVE:REV:OFF\n";
 
 namespace debug {
 constexpr bool kLogSystem = false;
@@ -87,6 +92,9 @@ void setup() {
     g_quadConfig.throttleLedcChannel = QUAD_THROTTLE_LEDC_CHANNEL;
     g_quadConfig.throttlePwmFrequency = QUAD_THROTTLE_PWM_FREQUENCY;
     g_quadConfig.throttlePwmResolutionBits = QUAD_THROTTLE_PWM_RES_BITS;
+    g_quadConfig.throttleDeadzone = QUAD_THROTTLE_DEADZONE;
+    g_quadConfig.throttleMinPercent = QUAD_THROTTLE_MIN_PERCENT;
+    g_quadConfig.throttleMaxPercent = QUAD_THROTTLE_MAX_PERCENT;
     g_quadConfig.taskPeriod = QUAD_PERIOD;
     g_quadConfig.rcTimeout = QUAD_RC_TIMEOUT;
     g_quadConfig.log = debug::kLogQuad;
@@ -94,6 +102,8 @@ void setup() {
     g_quadConfig.gearboxBaud = GEARBOX_UART_BAUD;
     g_quadConfig.gearboxRxPin = GEARBOX_UART_RX_PIN;
     g_quadConfig.gearboxTxPin = GEARBOX_UART_TX_PIN;
+    g_quadConfig.reverseEnableCommand = QUAD_REVERSE_ENABLE_CMD;
+    g_quadConfig.reverseDisableCommand = QUAD_REVERSE_DISABLE_CMD;
     g_quadConfig.rcQueue = g_rcInputQueue;
 
     if (debug::kEnableQuadTask) {

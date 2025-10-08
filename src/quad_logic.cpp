@@ -1,6 +1,7 @@
 #include "quad_logic.h"
 
 #include <algorithm>
+#include <cstdint>
 
 #include "h_bridge.h"
 #include "ota_telnet.h"
@@ -12,12 +13,20 @@ QueueHandle_t g_rcQueue = nullptr;
 bool g_initialized = false;
 bool g_serialReady = false;
 bool g_bridgeEnabled = false;
+bool g_reverseActive = false;
 
 RcInputSnapshot g_lastSnapshot{};
 TickType_t g_lastSnapshotTick = 0;
 
 int clampPercent(int value, int minValue, int maxValue) {
   return std::min(std::max(value, minValue), maxValue);
+}
+
+int mapRange(int value, int inMin, int inMax, int outMin, int outMax) {
+  if (inMax == inMin) {
+    return outMin;
+  }
+  return outMin + (static_cast<int64_t>(value - inMin) * (outMax - outMin)) / (inMax - inMin);
 }
 
 uint32_t dutyFromPercent(uint8_t resolutionBits, int percent) {
@@ -54,10 +63,9 @@ void applySteering(int steeringPercent) {
   }
 }
 
-void applyThrottle(int throttlePercent) {
-  // Only positive throttle drives the PWM; negatives are treated as zero for now.
-  throttlePercent = clampPercent(throttlePercent, 0, 100);
-  const uint32_t duty = dutyFromPercent(g_config.throttlePwmResolutionBits, throttlePercent);
+void applyThrottleDutyPercent(int dutyPercent) {
+  dutyPercent = clampPercent(dutyPercent, 0, 100);
+  const uint32_t duty = dutyFromPercent(g_config.throttlePwmResolutionBits, dutyPercent);
   ledcWrite(g_config.throttleLedcChannel, duty);
 }
 
@@ -88,6 +96,30 @@ bool sendGearCommand(GearCommand cmd, bool log) {
     broadcastIf(true, String("[QUAD] Gear command sent: ") + payload);
   }
   return true;
+}
+
+bool sendReverseCommand(bool reverseEnabled, bool log) {
+  if (g_config.gearboxSerial == nullptr || !g_serialReady) {
+    return false;
+  }
+  const char* payload = reverseEnabled ? g_config.reverseEnableCommand : g_config.reverseDisableCommand;
+  if (payload == nullptr) {
+    return false;
+  }
+  g_config.gearboxSerial->print(payload);
+  if (log) {
+    broadcastIf(true, String("[QUAD] Reverse command sent: ") + payload);
+  }
+  return true;
+}
+
+void ensureReverseState(bool reverseEnabled, bool log) {
+  if (reverseEnabled == g_reverseActive) {
+    return;
+  }
+  if (sendReverseCommand(reverseEnabled, log)) {
+    g_reverseActive = reverseEnabled;
+  }
 }
 
 void handleGear(const RcInputSnapshot& snapshot, bool log) {
@@ -144,6 +176,10 @@ bool initQuadLogic(const QuadLogicConfig& config) {
   g_config = config;
   g_rcQueue = config.rcQueue;
 
+  g_config.throttleDeadzone = clampPercent(g_config.throttleDeadzone, 0, 99);
+  g_config.throttleMinPercent = static_cast<uint8_t>(clampPercent(g_config.throttleMinPercent, 0, 100));
+  g_config.throttleMaxPercent = static_cast<uint8_t>(clampPercent(g_config.throttleMaxPercent, g_config.throttleMinPercent, 100));
+
   // Configura el canal LEDC reservado para el acelerador (documentado en README).
   ledcSetup(g_config.throttleLedcChannel, g_config.throttlePwmFrequency, g_config.throttlePwmResolutionBits);
   ledcAttachPin(g_config.throttlePwmPin, g_config.throttleLedcChannel);
@@ -165,6 +201,7 @@ bool initQuadLogic(const QuadLogicConfig& config) {
   g_lastSnapshot = {};
   g_lastSnapshot.valid = false;
   g_lastSnapshotTick = 0;
+  g_reverseActive = false;
   g_initialized = true;
   return true;
 }
@@ -181,7 +218,7 @@ void taskQuadLogic(void* parameter) {
   const TickType_t timeout = (cfg->rcTimeout > 0) ? cfg->rcTimeout : pdMS_TO_TICKS(200);
 
   bool lastRcFresh = false;
-  int lastAppliedThrottle = -1;
+  int lastAppliedThrottleDuty = -1;
   int lastAppliedSteering = -101;
 
   for (;;) {
@@ -197,15 +234,14 @@ void taskQuadLogic(void* parameter) {
     const bool rcFresh = g_lastSnapshot.valid && (now - g_lastSnapshotTick <= timeout);
 
     if (!rcFresh) {
-      if (lastRcFresh) {
-        if (cfg->log) {
-          broadcastIf(true, "[QUAD] RC timeout -> entering failsafe");
-        }
+      if (lastRcFresh && cfg->log) {
+        broadcastIf(true, "[QUAD] RC timeout -> entering failsafe");
       }
       lastRcFresh = false;
-      if (lastAppliedThrottle != 0) {
-        applyThrottle(0);
-        lastAppliedThrottle = 0;
+      ensureReverseState(false, cfg->log);
+      if (lastAppliedThrottleDuty != 0) {
+        applyThrottleDutyPercent(0);
+        lastAppliedThrottleDuty = 0;
       }
       if (lastAppliedSteering != 0) {
         applySteering(0);
@@ -221,13 +257,34 @@ void taskQuadLogic(void* parameter) {
       logSnapshot(g_lastSnapshot);
     }
 
-    const int throttleCommand = clampPercent(g_lastSnapshot.throttle, -100, 100);
+    const int throttleCommandRaw = clampPercent(g_lastSnapshot.throttle, -100, 100);
     const int steeringCommand = clampPercent(g_lastSnapshot.steering, -100, 100);
 
-    const int positiveThrottle = (throttleCommand > 0) ? throttleCommand : 0;
-    if (positiveThrottle != lastAppliedThrottle) {
-      applyThrottle(positiveThrottle);
-      lastAppliedThrottle = positiveThrottle;
+    const int deadzone = g_config.throttleDeadzone;
+    const int absThrottle = (throttleCommandRaw >= 0) ? throttleCommandRaw : -throttleCommandRaw;
+    bool reverseRequested = false;
+    int dutyPercent = 0;
+
+    if (absThrottle > deadzone) {
+      reverseRequested = (throttleCommandRaw < 0);
+      const int scaled = mapRange(absThrottle, deadzone, 100, 0, 100);
+      const int minPct = g_config.throttleMinPercent;
+      const int maxPct = g_config.throttleMaxPercent;
+      if (scaled <= 0) {
+        dutyPercent = minPct;
+      } else {
+        dutyPercent = minPct + ((maxPct - minPct) * scaled) / 100;
+      }
+    } else {
+      reverseRequested = false;
+      dutyPercent = 0;
+    }
+
+    ensureReverseState(reverseRequested, cfg->log);
+
+    if (dutyPercent != lastAppliedThrottleDuty) {
+      applyThrottleDutyPercent(dutyPercent);
+      lastAppliedThrottleDuty = dutyPercent;
     }
 
     if (steeringCommand != lastAppliedSteering) {

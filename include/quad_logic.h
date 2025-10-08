@@ -27,6 +27,9 @@ struct QuadLogicConfig {
   uint8_t throttleLedcChannel;
   double throttlePwmFrequency;
   uint8_t throttlePwmResolutionBits;
+  int throttleDeadzone;           // +/- range treated as neutro (0..100)
+  uint8_t throttleMinPercent;     // Duty (%) applied once se supera el deadzone
+  uint8_t throttleMaxPercent;     // Duty (%) maximo permitido
   TickType_t taskPeriod;
   TickType_t rcTimeout;
   bool log;
@@ -34,6 +37,8 @@ struct QuadLogicConfig {
   uint32_t gearboxBaud;
   int gearboxRxPin;
   int gearboxTxPin;
+  const char* reverseEnableCommand;
+  const char* reverseDisableCommand;
   QueueHandle_t rcQueue;
 };
 
@@ -43,4 +48,3 @@ bool initQuadLogic(const QuadLogicConfig& config);
 void taskQuadLogic(void* parameter);
 
 #endif  // QUAD_LOGIC_H
-

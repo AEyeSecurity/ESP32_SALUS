@@ -58,9 +58,11 @@ El proyecto usa PlatformIO con `framework = arduino` y depende de:
 - `taskRcMonitor` escribe cada snapshot en esa cola con `quadLogicQueueRcInput()`, de modo que la capa de actuacion siempre consume el valor mas reciente sin bloquear.
 - `initQuadLogic()` configura:
   - LEDC canal **4** @ 20 kHz / 10 bits y lo asocia al GPIO17 (acelerador). Este canal queda reservado exclusivamente para el throttle, mientras que el puente H continua usando los canales 0 y 1.
+  - Curva de acelerador: aplica `throttleDeadzone`, `throttleMinPercent` (default 25%) y `throttleMaxPercent` (default 90%) para reproducir el rango original 40-150 pero adaptado a 3.3 V. Ajusta los `QUAD_THROTTLE_*` en `src/main.cpp` segun calibraciones de campo.
   - El puente H mediante `init_h_bridge()` y gestiona enable/disable automaticamente segun el comando de direccion.
   - `Serial1` (`GEARBOX_UART_BAUD`, `GEARBOX_UART_RX_PIN`, `GEARBOX_UART_TX_PIN`) para enviar comandos de cambios (`>GEAR:UP\n`, `>GEAR:DOWN\n`). Ajusta los pines cuando se definan en hardware.
-- `taskQuadLogic` corre cada 30 ms. Si no recibe actualizaciones en 250 ms aplica failsafe (duty 0 y puente deshabilitado). Al detectar flancos en `aux1`/`aux2` envia los comandos de caja por `Serial1`.
+  - Los comandos de reversa `>DRIVE:REV:ON\n` / `>DRIVE:REV:OFF\n` via UART reemplazan al antiguo pin `PIN_REVERSE`.
+- `taskQuadLogic` corre cada 30 ms. Si no recibe actualizaciones en 250 ms aplica failsafe (duty 0 y puente deshabilitado). Comanda reversa via UART cuando el acelerador cruza el deadzone negativo y, en paralelo, al detectar flancos en `aux1`/`aux2` envia los comandos de caja por `Serial1`.
 - Las trazas del modulo se controlan via `debug::kLogQuad`.
 
 ## Conexion rapida
