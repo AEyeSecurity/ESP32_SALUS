@@ -4,6 +4,7 @@
 #include <freertos/task.h>
 
 #include "ota_telnet.h"
+#include "quad_logic.h"
 
 //////////////// NO IBUS /////////////////////////////////////////////////////////////
 
@@ -66,6 +67,18 @@ void taskRcMonitor(void* parameter) {
     int steering = readChannel(kRcSteeringPin, -100, 100, 0);
     int aux1 = readChannel(kRcAux1Pin, -100, 100, 0);
     int aux2 = readChannel(kRcAux2Pin, -100, 100, 0);
+
+    RcInputSnapshot snapshot{};
+    snapshot.throttle = throttle;
+    snapshot.steering = steering;
+    snapshot.aux1 = aux1;
+    snapshot.aux2 = aux2;
+    snapshot.timestamp = xTaskGetTickCount();
+    snapshot.valid = true;
+
+    if (!quadLogicQueueRcInput(snapshot) && log) {
+      broadcastIf(true, "[FS-iA6] WARNING: no se pudo publicar RC snapshot a quad_logic");
+    }
 
     if (throttle != lastThrottle || steering != lastSteering || aux1 != lastAux1 || aux2 != lastAux2) {
       if (log) {
