@@ -28,10 +28,10 @@ constexpr bool kLogSystem = false;
 constexpr bool kLogOta = false;
 constexpr bool kLogBridge = false;
 constexpr bool kLogLoop = false;
-constexpr bool kLogRc = false;
-constexpr bool kLogAs5600 = true;
+constexpr bool kLogRc = true;
+constexpr bool kLogAs5600 = false;
 constexpr bool kEnableBridgeTask = false;
-constexpr bool kEnableRcTask = false;
+constexpr bool kEnableRcTask = true;
 }  // namespace debug
 
 static AS5600 g_as5600;
@@ -48,12 +48,13 @@ void setup() {
   delay(1000);
   InicializaTelnet();
 
-  broadcastIf(debug::kLogRc, "Iniciando pruebas FS-iA6 (GPIO0, GPIO2, GPIO4 y GPIO16)");
+  broadcastIf(debug::kLogRc,
+              "Iniciando pruebas FS-iA6 (GPIO0 aceleracion, GPIO6 direccion, GPIO4 freno/marchas, GPIO16 auxiliar)");
 
-  pinMode(0, INPUT);
-  pinMode(2, INPUT);
-  pinMode(4, INPUT);
-  pinMode(16, INPUT);
+  pinMode(kRcAccelPin, INPUT);
+  pinMode(kRcSteeringPin, INPUT);
+  pinMode(kRcBrakeGearPin, INPUT);
+  pinMode(kRcAuxPin, INPUT);
 
   if (debug::kEnableBridgeTask) {
     init_h_bridge();

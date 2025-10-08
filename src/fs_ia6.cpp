@@ -56,27 +56,29 @@ void taskRcMonitor(void* parameter) {
   const bool log = (cfg != nullptr) ? cfg->log : false;
   const TickType_t period = (cfg != nullptr) ? cfg->period : pdMS_TO_TICKS(100);
 
-  int lastCh0 = 9999;
-  int lastCh2 = 9999;
-  int lastCh4 = 9999;
-  int lastCh16 = 9999;
+  int lastAccel = 9999;
+  int lastSteering = 9999;
+  int lastBrakeGear = 9999;
+  int lastAux = 9999;
 
   for (;;) {
-    int ch0 = readChannel(0, -100, 100, 0);
-    int ch2 = readChannel(2, -100, 100, 0);
-    int ch4 = readChannel(4, -100, 100, 0);
-    int ch16 = readChannel(16, -100, 100, 0);
+    int accel = readChannel(kRcAccelPin, -100, 100, 0);
+    int steering = readChannel(kRcSteeringPin, -100, 100, 0);
+    int brakeGear = readChannel(kRcBrakeGearPin, -100, 100, 0);
+    int aux = readChannel(kRcAuxPin, -100, 100, 0);
 
-    if (ch0 != lastCh0 || ch2 != lastCh2 || ch4 != lastCh4 || ch16 != lastCh16) {
+    if (accel != lastAccel || steering != lastSteering || brakeGear != lastBrakeGear || aux != lastAux) {
       if (log) {
-        String rcMsg = "FS-iA6 -> GPIO0: " + String(ch0) + " | GPIO2: " + String(ch2) +
-                       " | GPIO4: " + String(ch4) + " | GPIO16: " + String(ch16);
+        String rcMsg = "FS-iA6 -> Aceleracion(GPIO0): " + String(accel) +
+                       " | Direccion(GPIO6): " + String(steering) +
+                       " | Freno/Marchas(GPIO4): " + String(brakeGear) +
+                       " | Aux(GPIO16): " + String(aux);
         broadcastIf(true, rcMsg);
       }
-      lastCh0 = ch0;
-      lastCh2 = ch2;
-      lastCh4 = ch4;
-      lastCh16 = ch16;
+      lastAccel = accel;
+      lastSteering = steering;
+      lastBrakeGear = brakeGear;
+      lastAux = aux;
     }
     vTaskDelay(period);
   }

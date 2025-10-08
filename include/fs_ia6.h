@@ -11,6 +11,11 @@
 // Include iBusBM Library
 #include <IBusBM.h>
 
+constexpr uint8_t kRcAccelPin = 0;
+constexpr uint8_t kRcSteeringPin = 6;
+constexpr uint8_t kRcBrakeGearPin = 4;
+constexpr uint8_t kRcAuxPin = 2;
+
 // Set all pins as inputs for COMM
 void initFS_IA6(uint8_t ch1, uint8_t ch2, uint8_t ch3, uint8_t ch4, uint8_t ch5, uint8_t ch6);
 
