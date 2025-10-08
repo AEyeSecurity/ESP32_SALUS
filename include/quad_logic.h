@@ -16,12 +16,6 @@ struct RcInputSnapshot {
   bool valid;
 };
 
-enum class GearCommand {
-  None = 0,
-  Up,
-  Down
-};
-
 struct QuadLogicConfig {
   int throttlePwmPin;
   uint8_t throttleLedcChannel;
@@ -37,6 +31,10 @@ struct QuadLogicConfig {
   uint32_t gearboxBaud;
   int gearboxRxPin;
   int gearboxTxPin;
+  int gearShiftThreshold;        // Aux value (> threshold) required to armar cambio
+  TickType_t gearShiftHoldTicks; // Tiempo que debe mantenerse por encima del threshold
+  uint8_t gearMaxNumber;         // Cantidad de marchas (wrap-around)
+  uint8_t gearInitialNumber;     // Marcha inicial al arrancar
   const char* reverseEnableCommand;
   const char* reverseDisableCommand;
   QueueHandle_t rcQueue;

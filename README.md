@@ -60,9 +60,14 @@ El proyecto usa PlatformIO con `framework = arduino` y depende de:
   - LEDC canal **4** @ 20 kHz / 10 bits y lo asocia al GPIO17 (acelerador). Este canal queda reservado exclusivamente para el throttle, mientras que el puente H continua usando los canales 0 y 1.
   - Curva de acelerador: aplica `throttleDeadzone`, `throttleMinPercent` (default 25%) y `throttleMaxPercent` (default 90%) para reproducir el rango original 40-150 pero adaptado a 3.3 V. Ajusta los `QUAD_THROTTLE_*` en `src/main.cpp` segun calibraciones de campo.
   - El puente H mediante `init_h_bridge()` y gestiona enable/disable automaticamente segun el comando de direccion.
-  - `Serial1` (`GEARBOX_UART_BAUD`, `GEARBOX_UART_RX_PIN`, `GEARBOX_UART_TX_PIN`) para enviar comandos de cambios (`>GEAR:UP\n`, `>GEAR:DOWN\n`). Ajusta los pines cuando se definan en hardware.
+  - `Serial1` (`GEARBOX_UART_BAUD`, `GEARBOX_UART_RX_PIN`, `GEARBOX_UART_TX_PIN`) para enviar comandos de cambios (`>GEAR:SHIFT:N\n`). Ajusta los pines cuando se definan en hardware.
+  - Detectores de marcha: `gearShiftThreshold` (default 80), `gearShiftHoldTicks` (500 ms), `gearMaxNumber` (4) y `gearInitialNumber` (1) se configuran en `src/main.cpp` para adaptar el comportamiento del RC AUX.
   - Los comandos de reversa `>DRIVE:REV:ON\n` / `>DRIVE:REV:OFF\n` via UART reemplazan al antiguo pin `PIN_REVERSE`.
-- `taskQuadLogic` corre cada 30 ms. Si no recibe actualizaciones en 250 ms aplica failsafe (duty 0 y puente deshabilitado). Comanda reversa via UART cuando el acelerador cruza el deadzone negativo y, en paralelo, al detectar flancos en `aux1`/`aux2` envia los comandos de caja por `Serial1`.
+- `taskQuadLogic` corre cada 30 ms. Si no recibe actualizaciones en 250 ms aplica failsafe (duty 0 y puente deshabilitado). Comanda reversa via UART cuando el acelerador cruza el deadzone negativo y gestiona cambios: si `aux1` permanece >80 durante 500 ms, al liberar el switch avanza a la siguiente marcha (1→4 con wrap) y publica `>GEAR:SHIFT:N`.
+- Mensajeria UART hacia la Raspberry Pi:
+  - `>DRIVE:REV:ON\n` / `>DRIVE:REV:OFF\n`: indican habilitar/deshabilitar el rele de reversa, se emiten cada vez que el acelerador pasa el deadzone negativo o vuelve a neutro.
+  - `>GEAR:SHIFT:N\n`: notifica la marcha objetivo (N en 1..4 por defecto). Solo se envia cuando se cumplio la ventana de 500 ms con `aux1` alto y el switch vuelve a reposo; la Raspberry debe accionar el rele de cambio durante ~0.5 s al recibirlo.
+  - Estos comandos son eventos discretos (no se transmiten continuamente). Si se requiere telemetria continua o watchdog, se puede extender con un frame periodico que incluya checksum y flags adicionales.
 - Las trazas del modulo se controlan via `debug::kLogQuad`.
 
 ## Conexion rapida

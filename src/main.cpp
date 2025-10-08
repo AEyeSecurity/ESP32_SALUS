@@ -34,6 +34,10 @@ constexpr uint8_t QUAD_THROTTLE_PWM_RES_BITS = 10;
 constexpr int QUAD_THROTTLE_DEADZONE = 10;
 constexpr uint8_t QUAD_THROTTLE_MIN_PERCENT = 25;
 constexpr uint8_t QUAD_THROTTLE_MAX_PERCENT = 90;
+constexpr int QUAD_GEAR_SHIFT_THRESHOLD = 80;
+constexpr TickType_t QUAD_GEAR_SHIFT_HOLD = pdMS_TO_TICKS(500);
+constexpr uint8_t QUAD_GEAR_MAX_NUMBER = 4;
+constexpr uint8_t QUAD_GEAR_INITIAL_NUMBER = 1;
 
 constexpr uint32_t GEARBOX_UART_BAUD = 115200;
 constexpr int GEARBOX_UART_RX_PIN = -1;  // Configurar cuando se definan los pines
@@ -95,6 +99,10 @@ void setup() {
     g_quadConfig.throttleDeadzone = QUAD_THROTTLE_DEADZONE;
     g_quadConfig.throttleMinPercent = QUAD_THROTTLE_MIN_PERCENT;
     g_quadConfig.throttleMaxPercent = QUAD_THROTTLE_MAX_PERCENT;
+    g_quadConfig.gearShiftThreshold = QUAD_GEAR_SHIFT_THRESHOLD;
+    g_quadConfig.gearShiftHoldTicks = QUAD_GEAR_SHIFT_HOLD;
+    g_quadConfig.gearMaxNumber = QUAD_GEAR_MAX_NUMBER;
+    g_quadConfig.gearInitialNumber = QUAD_GEAR_INITIAL_NUMBER;
     g_quadConfig.taskPeriod = QUAD_PERIOD;
     g_quadConfig.rcTimeout = QUAD_RC_TIMEOUT;
     g_quadConfig.log = debug::kLogQuad;

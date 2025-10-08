@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 
 #include "h_bridge.h"
 #include "ota_telnet.h"
@@ -14,6 +15,10 @@ bool g_initialized = false;
 bool g_serialReady = false;
 bool g_bridgeEnabled = false;
 bool g_reverseActive = false;
+uint8_t g_currentGear = 1;
+bool g_shiftAuxActive = false;
+bool g_shiftHoldSatisfied = false;
+TickType_t g_shiftAuxSince = 0;
 
 RcInputSnapshot g_lastSnapshot{};
 TickType_t g_lastSnapshotTick = 0;
@@ -69,35 +74,6 @@ void applyThrottleDutyPercent(int dutyPercent) {
   ledcWrite(g_config.throttleLedcChannel, duty);
 }
 
-bool sendGearCommand(GearCommand cmd, bool log) {
-  if (cmd == GearCommand::None || g_config.gearboxSerial == nullptr) {
-    return false;
-  }
-  if (!g_serialReady) {
-    return false;
-  }
-  const char* payload = nullptr;
-  switch (cmd) {
-    case GearCommand::Up:
-      payload = ">GEAR:UP\n";
-      break;
-    case GearCommand::Down:
-      payload = ">GEAR:DOWN\n";
-      break;
-    default:
-      payload = nullptr;
-      break;
-  }
-  if (payload == nullptr) {
-    return false;
-  }
-  g_config.gearboxSerial->print(payload);
-  if (log) {
-    broadcastIf(true, String("[QUAD] Gear command sent: ") + payload);
-  }
-  return true;
-}
-
 bool sendReverseCommand(bool reverseEnabled, bool log) {
   if (g_config.gearboxSerial == nullptr || !g_serialReady) {
     return false;
@@ -122,26 +98,52 @@ void ensureReverseState(bool reverseEnabled, bool log) {
   }
 }
 
+bool sendGearShift(uint8_t newGear, bool log) {
+  if (g_config.gearboxSerial == nullptr || !g_serialReady) {
+    return false;
+  }
+  char buffer[24];
+  const int written = snprintf(buffer, sizeof(buffer), ">GEAR:SHIFT:%u\n", static_cast<unsigned>(newGear));
+  if (written <= 0) {
+    return false;
+  }
+  g_config.gearboxSerial->print(buffer);
+  if (log) {
+    broadcastIf(true, String("[QUAD] Gear shift -> marcha ") + String(newGear));
+  }
+  return true;
+}
+
 void handleGear(const RcInputSnapshot& snapshot, bool log) {
-  static bool aux1Latched = false;
-  static bool aux2Latched = false;
+  const TickType_t now = snapshot.timestamp;
+  const bool auxAbove = snapshot.aux1 >= g_config.gearShiftThreshold;
 
-  const bool aux1Active = snapshot.aux1 > 50;
-  const bool aux2Active = snapshot.aux2 > 50;
-
-  GearCommand cmd = GearCommand::None;
-  if (aux1Active && !aux1Latched) {
-    cmd = GearCommand::Up;
-  } else if (aux2Active && !aux2Latched) {
-    cmd = GearCommand::Down;
+  if (auxAbove) {
+    if (!g_shiftAuxActive) {
+      g_shiftAuxActive = true;
+      g_shiftAuxSince = now;
+      g_shiftHoldSatisfied = false;
+    } else if (!g_shiftHoldSatisfied) {
+      if ((now - g_shiftAuxSince) >= g_config.gearShiftHoldTicks) {
+        g_shiftHoldSatisfied = true;
+        if (log) {
+          broadcastIf(true, "[QUAD] Cambio armado (aux1 sobre threshold)");
+        }
+      }
+    }
+    return;
   }
 
-  if (cmd != GearCommand::None) {
-    sendGearCommand(cmd, log);
+  if (g_shiftAuxActive) {
+    if (g_shiftHoldSatisfied) {
+      uint8_t nextGear = (g_currentGear >= g_config.gearMaxNumber) ? 1 : static_cast<uint8_t>(g_currentGear + 1);
+      g_currentGear = nextGear;
+      sendGearShift(g_currentGear, log);
+    }
   }
 
-  aux1Latched = aux1Active;
-  aux2Latched = aux2Active;
+  g_shiftAuxActive = false;
+  g_shiftHoldSatisfied = false;
 }
 
 void logSnapshot(const RcInputSnapshot& snapshot) {
@@ -179,6 +181,20 @@ bool initQuadLogic(const QuadLogicConfig& config) {
   g_config.throttleDeadzone = clampPercent(g_config.throttleDeadzone, 0, 99);
   g_config.throttleMinPercent = static_cast<uint8_t>(clampPercent(g_config.throttleMinPercent, 0, 100));
   g_config.throttleMaxPercent = static_cast<uint8_t>(clampPercent(g_config.throttleMaxPercent, g_config.throttleMinPercent, 100));
+  if (g_config.gearShiftThreshold < -100) {
+    g_config.gearShiftThreshold = -100;
+  } else if (g_config.gearShiftThreshold > 100) {
+    g_config.gearShiftThreshold = 100;
+  }
+  if (g_config.gearShiftHoldTicks == 0) {
+    g_config.gearShiftHoldTicks = pdMS_TO_TICKS(500);
+  }
+  if (g_config.gearMaxNumber == 0) {
+    g_config.gearMaxNumber = 1;
+  }
+  if (g_config.gearInitialNumber == 0 || g_config.gearInitialNumber > g_config.gearMaxNumber) {
+    g_config.gearInitialNumber = 1;
+  }
 
   // Configura el canal LEDC reservado para el acelerador (documentado en README).
   ledcSetup(g_config.throttleLedcChannel, g_config.throttlePwmFrequency, g_config.throttlePwmResolutionBits);
@@ -202,6 +218,10 @@ bool initQuadLogic(const QuadLogicConfig& config) {
   g_lastSnapshot.valid = false;
   g_lastSnapshotTick = 0;
   g_reverseActive = false;
+  g_currentGear = g_config.gearInitialNumber;
+  g_shiftAuxActive = false;
+  g_shiftHoldSatisfied = false;
+  g_shiftAuxSince = 0;
   g_initialized = true;
   return true;
 }
