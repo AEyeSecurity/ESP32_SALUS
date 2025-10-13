@@ -28,10 +28,10 @@ constexpr bool kLogSystem = false;
 constexpr bool kLogOta = false;
 constexpr bool kLogBridge = false;
 constexpr bool kLogLoop = false;
-constexpr bool kLogRc = false;
-constexpr bool kLogAs5600 = true;
+constexpr bool kLogRc = true;
+constexpr bool kLogAs5600 = false;
 constexpr bool kEnableBridgeTask = false;
-constexpr bool kEnableRcTask = false;
+constexpr bool kEnableRcTask = true;
 }  // namespace debug
 
 static AS5600 g_as5600;

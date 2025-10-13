@@ -55,6 +55,30 @@ El proyecto usa PlatformIO con `framework = arduino` y depende de:
 3. Usar UART a 115200 baudios, 8N1, para consola local.
 4. Subir firmware OTA con `pio run --target upload` o `espota.py` apuntando a 192.168.4.1:3232.
 
+## Debug por modulos
+
+El archivo `src/main.cpp` expone un bloque `namespace debug` con banderas `constexpr` que controlan tanto la creacion de tareas de diagnostico como los mensajes que se envian por UART y Telnet:
+
+```cpp
+namespace debug {
+constexpr bool kLogSystem = false;
+constexpr bool kLogOta = false;
+constexpr bool kLogBridge = false;
+constexpr bool kLogLoop = false;
+constexpr bool kLogRc = false;
+constexpr bool kLogAs5600 = true;
+constexpr bool kEnableBridgeTask = false;
+constexpr bool kEnableRcTask = false;
+}  // namespace debug
+```
+
+Para depurar cada modulo, ajusta las banderas relevantes y recompila (`pio run --target upload`):
+
+- **LogRC** (`debug::kLogRc` en `src/main.cpp:31`, `debug::kEnableRcTask` en `src/main.cpp:34`): habilita la tarea `taskRcMonitor` y publica cambios de los canales FS-iA6 en Telnet/UART. Activa ambas banderas para ver el log periodico con los valores de GPIO0, GPIO2, GPIO4 y GPIO16.
+- **LogAs5600** (`debug::kLogAs5600` en `src/main.cpp:32`): al ponerlo en `true` se emiten mensajes del autotest `runAs5600SelfTest` y del monitor periodico `taskAs5600Monitor` (estado I2C, angulo en grados, magnitud). Puedes ajustar `AS5600_LOG_INTERVAL` si necesitas mas o menos frecuencia.
+- **OTA** (`debug::kLogOta` en `src/main.cpp:28`): al activarlo, la tarea `taskOtaTelnet` envia un heartbeat Telnet cada 5 s (configurable con `g_otaConfig.heartbeatInterval`) ademas de los mensajes estandar de OTA (`*** OTA INICIO/FIN ***`).
+- **LogBridge** (`debug::kLogBridge` en `src/main.cpp:29`, `debug::kEnableBridgeTask` en `src/main.cpp:33`): usa ambas banderas en `true` para lanzar `taskBridgeTest`, que ejecuta rampas PWM y reporta el duty de cada direccion via `broadcastIf`. Ideal para comprobar hardware antes de integrar el control real.
+
 ## Extensiones sugeridas
 
 - Reemplazar `taskBridgeTest` por la logica real de actuacion leyendo comandos de RC o PID.
