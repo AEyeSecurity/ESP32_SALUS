@@ -58,25 +58,26 @@ void taskRcMonitor(void* parameter) {
 
   int lastCh0 = 9999;
   int lastCh2 = 9999;
-  int lastCh4 = 9999;
-  int lastCh16 = 9999;
+  int lastThrottle = 9999;
+  int lastSteering = 9999;
 
   for (;;) {
     int ch0 = readChannel(0, -100, 100, 0);
     int ch2 = readChannel(2, -100, 100, 0);
-    int ch4 = readChannel(4, -100, 100, 0);
-    int ch16 = readChannel(16, -100, 100, 0);
+    int throttle = readChannel(kRcThrottlePin, -100, 100, 0);
+    int steering = readChannel(kRcSteeringPin, -100, 100, 0);
 
-    if (ch0 != lastCh0 || ch2 != lastCh2 || ch4 != lastCh4 || ch16 != lastCh16) {
+    if (ch0 != lastCh0 || ch2 != lastCh2 || throttle != lastThrottle || steering != lastSteering) {
       if (log) {
         String rcMsg = "FS-iA6 -> GPIO0: " + String(ch0) + " | GPIO2: " + String(ch2) +
-                       " | GPIO4: " + String(ch4) + " | GPIO16: " + String(ch16);
+                       " | acelerador GPIO4: " + String(throttle) +
+                       " | direccion GPIO16: " + String(steering);
         broadcastIf(true, rcMsg);
       }
       lastCh0 = ch0;
       lastCh2 = ch2;
-      lastCh4 = ch4;
-      lastCh16 = ch16;
+      lastThrottle = throttle;
+      lastSteering = steering;
     }
     vTaskDelay(period);
   }
