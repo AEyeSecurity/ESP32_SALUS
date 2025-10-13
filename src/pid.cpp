@@ -242,15 +242,18 @@ void taskPidControl(void* parameter) {
     if (shouldLog) {
       String msg;
       msg.reserve(160);
-      msg += "[PID] rc=";
+      msg += "[PID] sensor=";
+      msg += String(measuredDeg, 2);
+      msg += "deg";
+      msg += " rcGPIO16=";
       msg += rcValue;
       msg += " target=";
       msg += String(targetDeg, 2);
-      msg += "deg measured=";
-      msg += String(measuredDeg, 2);
-      msg += "deg error=";
+      msg += "deg";
+      msg += " error=";
       msg += String(errorDeg, 2);
-      msg += "deg out=";
+      msg += "deg";
+      msg += " salida=";
       msg += String(outputPercent, 1);
       msg += "%";
       broadcastIf(true, msg);

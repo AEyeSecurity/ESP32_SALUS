@@ -1,6 +1,6 @@
 # ESP32 SALUS - Control PID de direccion
 
-Firmware para ESP32 que integra comunicacion OTA/Telnet con un lazo PID de posicionamiento angular basado en el sensor magnetico AS5600 y un actuador controlado por un puente H. El receptor RC (FS-iA6) entrega la consigna mediante PWM en GPIO4.
+Firmware para ESP32 que integra comunicacion OTA/Telnet con un lazo PID de posicionamiento angular basado en el sensor magnetico AS5600 y un actuador controlado por un puente H. El receptor RC (FS-iA6) usa GPIO16 para la direccion y GPIO4 para el canal de aceleracion/reversa.
 
 ## Conexiones de hardware
 
@@ -9,7 +9,8 @@ Firmware para ESP32 que integra comunicacion OTA/Telnet con un lazo PID de posic
 | AS5600 SDA            | 25         | Bus I2C (tirar a 3V3 con 4.7 k si el modulo no lo trae).                    |
 | AS5600 SCL            | 26         | Bus I2C compartido con otras mediciones si fuese necesario.                 |
 | AS5600 VCC / GND      | 3V3 / GND  | Alimentacion del encoder magnetico.                                         |
-| Receptor RC - Canal 4 | 4          | PWM de mando (-100 a 100) que define la consigna asociada al angulo.        |
+| Receptor RC - Direccion | 16         | PWM (-100 a 100) que define la consigna asociada al angulo.                  |
+| Receptor RC - Acelerador | 4         | PWM (-100 a 100) reservado para acelerar/reversa (aun sin logica asociada). |
 | H-bridge ENABLE       | 21         | Se fuerza en HIGH cuando el PID necesita mover el motor.                    |
 | H-bridge LEFT PWM     | 19         | PWM para girar el motor a la izquierda (ver `bridge_turn_left`).            |
 | H-bridge RIGHT PWM    | 18         | PWM para girar el motor a la derecha (ver `bridge_turn_right`).             |
@@ -41,7 +42,8 @@ La tarea PID calcula su `dt` con `micros()` y, ante valores anomalos, usa el per
 
 ## Parametros configurables clave
 
-- `RC_STEERING_PIN` (`src/main.cpp:22`): GPIO del canal RC que alimenta el setpoint.
+- `kRcSteeringPin` (`include/fs_ia6.h:38`): GPIO del canal RC que alimenta el setpoint de direccion.
+- `kRcThrottlePin` (`include/fs_ia6.h:39`): GPIO del canal RC reservado para el canal de acelerador/reversa.
 - `PID_CENTER_DEG` (`src/main.cpp:24`): angulo centrado que corresponde a mando 0. Ej.: 150 grados.
 - `PID_SPAN_DEG` (`src/main.cpp:25`): amplitud maxima de correccion (mando +/-100 => +/-span grados).
 - `PID_DEADBAND_PERCENT` (`src/main.cpp:26`): zona muerta en % del duty final para evitar oscilaciones pequenas.
