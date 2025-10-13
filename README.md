@@ -74,7 +74,7 @@ constexpr bool kEnableRcTask = false;
 
 Para depurar cada modulo, ajusta las banderas relevantes y recompila (`pio run --target upload`):
 
-- **LogRC** (`debug::kLogRc` en `src/main.cpp:31`, `debug::kEnableRcTask` en `src/main.cpp:34`): habilita la tarea `taskRcMonitor` y publica cambios de los canales FS-iA6 en Telnet/UART. Activa ambas banderas para ver el log periodico con los valores de GPIO0, GPIO2, GPIO4 y GPIO16.
+- **LogRC** (`debug::kLogRc` en `src/main.cpp:31`, `debug::kEnableRcTask` en `src/main.cpp:34`): habilita la tarea `taskRcMonitor` y publica cambios de los canales FS-iA6 en Telnet/UART. Activa ambas banderas para ver el log periodico con los valores de GPIO0, GPIO2, acelerador GPIO4 y direccion izquierda/derecha GPIO16.
 - **LogAs5600** (`debug::kLogAs5600` en `src/main.cpp:32`): al ponerlo en `true` se emiten mensajes del autotest `runAs5600SelfTest` y del monitor periodico `taskAs5600Monitor` (estado I2C, angulo en grados, magnitud). Puedes ajustar `AS5600_LOG_INTERVAL` si necesitas mas o menos frecuencia.
 - **OTA** (`debug::kLogOta` en `src/main.cpp:28`): al activarlo, la tarea `taskOtaTelnet` envia un heartbeat Telnet cada 5 s (configurable con `g_otaConfig.heartbeatInterval`) ademas de los mensajes estandar de OTA (`*** OTA INICIO/FIN ***`).
 - **LogBridge** (`debug::kLogBridge` en `src/main.cpp:29`, `debug::kEnableBridgeTask` en `src/main.cpp:33`): usa ambas banderas en `true` para lanzar `taskBridgeTest`, que ejecuta rampas PWM y reporta el duty de cada direccion via `broadcastIf`. Ideal para comprobar hardware antes de integrar el control real.

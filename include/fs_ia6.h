@@ -35,5 +35,7 @@ struct FsIa6TaskConfig {
   TickType_t period;
 };
 
-void taskRcMonitor(void* parameter);
+constexpr uint8_t kRcSteeringPin = 16;
+constexpr uint8_t kRcThrottlePin = 4;
 
+void taskRcMonitor(void* parameter);
