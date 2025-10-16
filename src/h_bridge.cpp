@@ -12,6 +12,9 @@
 static const int ENABLE_PIN = 21;
 static const int LEFT_PWM_PIN = 19;  // girar a la izquierda
 static const int RIGHT_PWM_PIN = 18; // girar a la derecha
+static const int LIMIT_LEFT_PIN = 27;  // final de carrera izquierda
+static const int LIMIT_RIGHT_PIN = 14; // final de carrera derecha
+static const int LIMIT_ACTIVE_STATE = LOW; // usando pull-ups internos
 
 // LEDC settings
 static const int LEDC_FREQ = 20000;      // 20 kHz
@@ -20,10 +23,26 @@ static const int LEFT_LEDC_CHANNEL = 0;
 static const int RIGHT_LEDC_CHANNEL = 1;
 static const int LEDC_TIMER = 0; // timer index
 
+static bool limit_active(int pin) {
+  return digitalRead(pin) == LIMIT_ACTIVE_STATE;
+}
+
+bool bridge_limit_left_active() {
+  return limit_active(LIMIT_LEFT_PIN);
+}
+
+bool bridge_limit_right_active() {
+  return limit_active(LIMIT_RIGHT_PIN);
+}
+
 void init_h_bridge() {
   // Configure enable pin
   pinMode(ENABLE_PIN, OUTPUT);
   digitalWrite(ENABLE_PIN, LOW); // disabled by default
+
+  // Configure limit switches with pull-ups
+  pinMode(LIMIT_LEFT_PIN, INPUT_PULLUP);
+  pinMode(LIMIT_RIGHT_PIN, INPUT_PULLUP);
 
   // Configure LEDC timer
   ledcSetup(LEDC_TIMER, LEDC_FREQ, LEDC_RESOLUTION);
@@ -56,6 +75,10 @@ static uint32_t duty_from_percent(uint8_t dutyPercent) {
 }
 
 void bridge_turn_left(uint8_t dutyPercent) {
+  if (bridge_limit_left_active()) {
+    bridge_stop();
+    return;
+  }
   // Left: apply PWM to LEFT channel, ensure RIGHT channel is 0
   uint32_t duty = duty_from_percent(dutyPercent);
   ledcWrite(RIGHT_LEDC_CHANNEL, 0);
@@ -63,6 +86,10 @@ void bridge_turn_left(uint8_t dutyPercent) {
 }
 
 void bridge_turn_right(uint8_t dutyPercent) {
+  if (bridge_limit_right_active()) {
+    bridge_stop();
+    return;
+  }
   // Right: apply PWM to RIGHT channel, ensure LEFT channel is 0
   uint32_t duty = duty_from_percent(dutyPercent);
   ledcWrite(LEFT_LEDC_CHANNEL, 0);
