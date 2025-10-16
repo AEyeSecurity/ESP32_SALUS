@@ -20,6 +20,10 @@ void bridge_turn_right(uint8_t dutyPercent);
 // Detiene cualquier salida PWM (poniendo duty a 0)
 void bridge_stop();
 
+// Lectura del estado de los finales de carrera (true si está activado)
+bool bridge_limit_left_active();
+bool bridge_limit_right_active();
+
 struct HBridgeTaskConfig {
   bool log;
 };

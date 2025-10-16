@@ -189,6 +189,8 @@ void taskPidControl(void* parameter) {
   bool bridgeEnabled = cfg->autoInitBridge;
   uint32_t lastMicros = micros();
   TickType_t lastWake = xTaskGetTickCount();
+  bool leftLimitLatched = false;
+  bool rightLimitLatched = false;
 
   for (;;) {
     const uint32_t nowMicros = micros();
@@ -202,6 +204,9 @@ void taskPidControl(void* parameter) {
     const int rcValue = readChannel(cfg->rcPin, -100, 100, 0);
     const float targetDeg = mapRcValueToAngle(rcValue, cfg->centerDeg, cfg->spanDeg);
     const float measuredDeg = cfg->sensor->getAngleDegrees();
+
+    const bool limitLeftActive = bridge_limit_left_active();
+    const bool limitRightActive = bridge_limit_right_active();
 
     TickType_t nowTicks = xTaskGetTickCount();
     const bool shouldLog = cfg->log && (logInterval == 0 || (nowTicks - lastLog) >= logInterval);
@@ -222,6 +227,33 @@ void taskPidControl(void* parameter) {
     outputPercent = applyDeadband(outputPercent, cfg->deadbandPercent);
     outputPercent = applyMinActive(outputPercent, cfg->minActivePercent);
     outputPercent = clampf(outputPercent, -100.0f, 100.0f);
+
+    bool blockedByLimit = false;
+    if (limitLeftActive && outputPercent < -0.001f) {
+      outputPercent = 0.0f;
+      blockedByLimit = true;
+      if (!leftLimitLatched) {
+        broadcastIf(true, "[PID] Final de carrera izquierda activo; deteniendo giro hacia la izquierda");
+        leftLimitLatched = true;
+      }
+    } else if (!limitLeftActive) {
+      leftLimitLatched = false;
+    }
+
+    if (limitRightActive && outputPercent > 0.001f) {
+      outputPercent = 0.0f;
+      blockedByLimit = true;
+      if (!rightLimitLatched) {
+        broadcastIf(true, "[PID] Final de carrera derecha activo; deteniendo giro hacia la derecha");
+        rightLimitLatched = true;
+      }
+    } else if (!limitRightActive) {
+      rightLimitLatched = false;
+    }
+
+    if (blockedByLimit) {
+      cfg->controller->reset();
+    }
 
     if (fabsf(outputPercent) < 0.001f) {
       bridge_stop();

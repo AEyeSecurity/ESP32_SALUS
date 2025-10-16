@@ -20,7 +20,7 @@ constexpr uint16_t STACK_PID = 4096;
 constexpr int AS5600_SDA_PIN = 25;
 constexpr int AS5600_SCL_PIN = 26;
 
-constexpr float PID_CENTER_DEG = 230.0f;
+constexpr float PID_CENTER_DEG = 180.0f;
 constexpr float PID_SPAN_DEG = 30.0f;
 constexpr float PID_DEADBAND_PERCENT = 5.0f;
 constexpr float PID_MIN_ACTIVE_PERCENT = 15.0f;
@@ -42,7 +42,7 @@ constexpr bool kLogOta = false;
 constexpr bool kLogBridge = false;
 constexpr bool kLogLoop = false;
 constexpr bool kLogRc = false;
-constexpr bool kLogAs5600 = true;
+constexpr bool kLogAs5600 = false;
 constexpr bool kLogPid = true;
 constexpr bool kEnableBridgeTask = false;
 constexpr bool kEnableRcTask = false;
