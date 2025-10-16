@@ -18,26 +18,49 @@ constexpr uint16_t STACK_RC = 2048;
 constexpr uint16_t STACK_AS5600 = 3072;
 constexpr uint16_t STACK_PID = 4096;
 constexpr uint16_t STACK_THROTTLE = 2048;
+constexpr uint16_t STACK_BRAKE = 2048;
 
 constexpr int AS5600_SDA_PIN = 25;
 constexpr int AS5600_SCL_PIN = 26;
 
-constexpr float PID_CENTER_DEG = 115.0f;
-constexpr float PID_SPAN_DEG = 30.0f;
+constexpr float PID_CENTER_DEG = 292.0f;
+constexpr float PID_SPAN_DEG = 40.0f;
 constexpr float PID_DEADBAND_PERCENT = 5.0f;
 constexpr float PID_MIN_ACTIVE_PERCENT = 15.0f;
-constexpr float PID_KP = 2.0f;
+constexpr float PID_KP = 3.0f;
 constexpr float PID_KI = 0.0f;
 constexpr float PID_KD = 0.0f;
 constexpr float PID_INTEGRAL_LIMIT = 50.0f;
 
 constexpr uint8_t THROTTLE_PWM_PIN = 17;
-constexpr uint8_t THROTTLE_LEDC_CHANNEL = 2;
+constexpr uint8_t THROTTLE_LEDC_CHANNEL = 4;
 constexpr uint32_t THROTTLE_PWM_FREQ = 20000;
 constexpr uint8_t THROTTLE_PWM_RESOLUTION = 8;
-constexpr int THROTTLE_PWM_MIN_DUTY = 0;
-constexpr int THROTTLE_PWM_MAX_DUTY = 200;
+
+constexpr double kArduinoPwmReferenceVolts = 5.0;
+constexpr double kEsp32PwmReferenceVolts = 3.3;
+constexpr int kArduinoThrottlePwmMin = 40;
+constexpr int kArduinoThrottlePwmMax = 150;
+
+constexpr int scaleAnalogWriteValue(int arduinoValue) {
+  return static_cast<int>(((arduinoValue * kArduinoPwmReferenceVolts) / kEsp32PwmReferenceVolts) + 0.5);
+}
+
+constexpr int THROTTLE_PWM_MIN_DUTY = scaleAnalogWriteValue(kArduinoThrottlePwmMin);
+constexpr int THROTTLE_PWM_MAX_DUTY = scaleAnalogWriteValue(kArduinoThrottlePwmMax);
+constexpr int THROTTLE_PWM_MAX_VALUE = (1 << THROTTLE_PWM_RESOLUTION) - 1;
+static_assert(THROTTLE_PWM_MAX_DUTY <= THROTTLE_PWM_MAX_VALUE, "Throttle max duty exceeds LEDC resolution");
 constexpr int THROTTLE_THRESHOLD = 15;
+
+constexpr uint8_t BRAKE_SERVO_PIN_A = 23;
+constexpr uint8_t BRAKE_SERVO_PIN_B = 22;
+constexpr uint8_t BRAKE_SERVO_CHANNEL_A = 8;
+constexpr uint8_t BRAKE_SERVO_CHANNEL_B = 9;
+constexpr uint32_t BRAKE_PWM_FREQ = 50;
+constexpr uint8_t BRAKE_PWM_RESOLUTION = 16;
+constexpr int BRAKE_RELEASE_ANGLE = 30;
+constexpr int BRAKE_APPLY_ANGLE = 100;
+constexpr int BRAKE_THRESHOLD = -15;
 
 constexpr TickType_t OTA_PERIOD = pdMS_TO_TICKS(20);
 constexpr TickType_t RC_PERIOD = pdMS_TO_TICKS(100);
@@ -45,7 +68,8 @@ constexpr TickType_t AS5600_PERIOD = pdMS_TO_TICKS(30);
 constexpr TickType_t AS5600_LOG_INTERVAL = pdMS_TO_TICKS(500);
 constexpr TickType_t PID_PERIOD = pdMS_TO_TICKS(20);
 constexpr TickType_t PID_LOG_INTERVAL = pdMS_TO_TICKS(200);
-constexpr TickType_t THROTTLE_PERIOD = pdMS_TO_TICKS(40);
+constexpr TickType_t THROTTLE_PERIOD = pdMS_TO_TICKS(20);
+constexpr TickType_t BRAKE_PERIOD = pdMS_TO_TICKS(20);
 
 namespace debug {
 constexpr bool kLogSystem = false;
@@ -54,12 +78,14 @@ constexpr bool kLogBridge = false;
 constexpr bool kLogLoop = false;
 constexpr bool kLogRc = false;
 constexpr bool kLogAs5600 = false;
-constexpr bool kLogPid = true;
-constexpr bool kLogThrottle = false;
+constexpr bool kLogPid = false;
+constexpr bool kLogThrottle = true;
+constexpr bool kLogBrake = true;
 constexpr bool kEnableBridgeTask = false;
 constexpr bool kEnableRcTask = false;
 constexpr bool kEnablePidTask = true;
 constexpr bool kEnableThrottleTask = true;
+constexpr bool kEnableBrakeTask = true;
 }  // namespace debug
 
 static AS5600 g_as5600;
@@ -95,6 +121,22 @@ static QuadThrottleTaskConfig g_throttleTaskConfig = {
     true,
     THROTTLE_PERIOD,
     debug::kLogThrottle};
+static QuadBrakeTaskConfig g_brakeTaskConfig = {
+    {
+        BRAKE_SERVO_PIN_A,
+        BRAKE_SERVO_PIN_B,
+        BRAKE_SERVO_CHANNEL_A,
+        BRAKE_SERVO_CHANNEL_B,
+        BRAKE_PWM_FREQ,
+        BRAKE_PWM_RESOLUTION,
+        BRAKE_RELEASE_ANGLE,
+        BRAKE_APPLY_ANGLE,
+        BRAKE_THRESHOLD,
+    },
+    kRcThrottlePin,
+    false,
+    BRAKE_PERIOD,
+    debug::kLogBrake};
 
 void setup() {
   InicializaUart();
@@ -117,6 +159,8 @@ void setup() {
   pinMode(kRcThrottlePin, INPUT);
   pinMode(kRcSteeringPin, INPUT);
 
+  initQuadBrake(g_brakeTaskConfig.brake);
+
   if (debug::kEnableBridgeTask) {
     init_h_bridge();
     broadcastIf(debug::kLogBridge, "Inicializado H-bridge (pins 21 enable, 19 left PWM, 18 right PWM)");
@@ -131,6 +175,9 @@ void setup() {
   }
   if (debug::kEnableThrottleTask) {
     startTaskPinned(taskQuadThrottleControl, "Throttle", STACK_THROTTLE, &g_throttleTaskConfig, 1, nullptr, 1);
+  }
+  if (debug::kEnableBrakeTask) {
+    startTaskPinned(taskQuadBrakeControl, "Brake", STACK_BRAKE, &g_brakeTaskConfig, 1, nullptr, 1);
   }
 
   g_as5600.begin(AS5600_SDA_PIN, AS5600_SCL_PIN);

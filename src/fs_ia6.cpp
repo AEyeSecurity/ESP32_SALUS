@@ -5,6 +5,10 @@
 
 #include "ota_telnet.h"
 
+namespace {
+portMUX_TYPE g_pulseMux = portMUX_INITIALIZER_UNLOCKED;
+}
+
 //////////////// NO IBUS /////////////////////////////////////////////////////////////
 
 // Set all pins as inputs for COMM
@@ -20,11 +24,27 @@ void initFS_IA6(uint8_t ch1, uint8_t ch2, uint8_t ch3, uint8_t ch4, uint8_t ch5,
 // Read the number of a specified channel and convert to the range provided.
 // If the channel is off, return the default value
 int readChannel(int channelInput, int minLimit, int maxLimit, int defaultValue) {
+  portENTER_CRITICAL(&g_pulseMux);
   int ch = pulseIn(channelInput, HIGH, 30000);
+  portEXIT_CRITICAL(&g_pulseMux);
   if (ch < 100) {
     return defaultValue;
   }
-  return map(ch, 1000, 2000, minLimit, maxLimit);
+  int value = map(ch, 1000, 2000, minLimit, maxLimit);
+  if (minLimit < maxLimit) {
+    if (value < minLimit) {
+      value = minLimit;
+    } else if (value > maxLimit) {
+      value = maxLimit;
+    }
+  } else {
+    if (value > minLimit) {
+      value = minLimit;
+    } else if (value < maxLimit) {
+      value = maxLimit;
+    }
+  }
+  return value;
 }
 
 // Read the switch channel and return a boolean value
@@ -48,7 +68,21 @@ int readChannel(IBusBM& ibus, byte channelInput, int minLimit, int maxLimit, int
   if (ch < 100) {
     return defaultValue;
   }
-  return map(ch, 1000, 2000, minLimit, maxLimit);
+  int value = map(ch, 1000, 2000, minLimit, maxLimit);
+  if (minLimit < maxLimit) {
+    if (value < minLimit) {
+      value = minLimit;
+    } else if (value > maxLimit) {
+      value = maxLimit;
+    }
+  } else {
+    if (value > minLimit) {
+      value = minLimit;
+    } else if (value < maxLimit) {
+      value = maxLimit;
+    }
+  }
+  return value;
 }
 
 void taskRcMonitor(void* parameter) {
