@@ -7,6 +7,7 @@
 #include <freertos/task.h>
 #include "freertos_utils.h"
 #include "pid.h"
+#include "quad_functions.h"
 
 const char* ssid = "ESPcuatri";
 const char* contrasena = "teamcit2024";
@@ -16,6 +17,7 @@ constexpr uint16_t STACK_BRIDGE = 4096;
 constexpr uint16_t STACK_RC = 2048;
 constexpr uint16_t STACK_AS5600 = 3072;
 constexpr uint16_t STACK_PID = 4096;
+constexpr uint16_t STACK_THROTTLE = 2048;
 
 constexpr int AS5600_SDA_PIN = 25;
 constexpr int AS5600_SCL_PIN = 26;
@@ -29,12 +31,24 @@ constexpr float PID_KI = 0.0f;
 constexpr float PID_KD = 0.0f;
 constexpr float PID_INTEGRAL_LIMIT = 50.0f;
 
+constexpr uint8_t THROTTLE_PWM_PIN = 17;
+constexpr uint8_t THROTTLE_DIRECTION_PIN = kQuadNoGpio;
+constexpr bool THROTTLE_FORWARD_LEVEL_HIGH = true;
+constexpr uint8_t THROTTLE_LEDC_CHANNEL = 2;
+constexpr uint32_t THROTTLE_PWM_FREQ = 20000;
+constexpr uint8_t THROTTLE_PWM_RESOLUTION = 8;
+constexpr int THROTTLE_PWM_MIN_DUTY = 61;   // 40 scaled from 5V -> 3.3V
+constexpr int THROTTLE_PWM_MAX_DUTY = 227;  // 150 scaled from 5V -> 3.3V
+constexpr int THROTTLE_DEADZONE = 10;
+constexpr uint32_t THROTTLE_DIRECTION_DELAY_MS = 1000;
+
 constexpr TickType_t OTA_PERIOD = pdMS_TO_TICKS(20);
 constexpr TickType_t RC_PERIOD = pdMS_TO_TICKS(100);
 constexpr TickType_t AS5600_PERIOD = pdMS_TO_TICKS(30);
 constexpr TickType_t AS5600_LOG_INTERVAL = pdMS_TO_TICKS(500);
 constexpr TickType_t PID_PERIOD = pdMS_TO_TICKS(20);
 constexpr TickType_t PID_LOG_INTERVAL = pdMS_TO_TICKS(200);
+constexpr TickType_t THROTTLE_PERIOD = pdMS_TO_TICKS(40);
 
 namespace debug {
 constexpr bool kLogSystem = false;
@@ -44,9 +58,11 @@ constexpr bool kLogLoop = false;
 constexpr bool kLogRc = false;
 constexpr bool kLogAs5600 = false;
 constexpr bool kLogPid = true;
+constexpr bool kLogThrottle = false;
 constexpr bool kEnableBridgeTask = false;
 constexpr bool kEnableRcTask = false;
 constexpr bool kEnablePidTask = true;
+constexpr bool kEnableThrottleTask = true;
 }  // namespace debug
 
 static AS5600 g_as5600;
@@ -68,6 +84,24 @@ static PidTaskConfig g_pidTaskConfig = {
     PID_LOG_INTERVAL,
     debug::kLogPid,
     true};
+static QuadThrottleTaskConfig g_throttleTaskConfig = {
+    {
+        THROTTLE_PWM_PIN,
+        THROTTLE_DIRECTION_PIN,
+        THROTTLE_FORWARD_LEVEL_HIGH,
+        THROTTLE_LEDC_CHANNEL,
+        THROTTLE_PWM_FREQ,
+        THROTTLE_PWM_RESOLUTION,
+        THROTTLE_PWM_MIN_DUTY,
+        THROTTLE_PWM_MAX_DUTY,
+        THROTTLE_DEADZONE,
+        THROTTLE_DIRECTION_DELAY_MS,
+        debug::kLogThrottle,
+    },
+    kRcThrottlePin,
+    true,
+    THROTTLE_PERIOD,
+    debug::kLogThrottle};
 
 void setup() {
   InicializaUart();
@@ -101,6 +135,9 @@ void setup() {
   }
   if (debug::kEnableRcTask) {
     startTaskPinned(taskRcMonitor, "RCMonitor", STACK_RC, &g_rcConfig, 1, nullptr, 1);
+  }
+  if (debug::kEnableThrottleTask) {
+    startTaskPinned(taskQuadThrottleControl, "Throttle", STACK_THROTTLE, &g_throttleTaskConfig, 1, nullptr, 1);
   }
 
   g_as5600.begin(AS5600_SDA_PIN, AS5600_SCL_PIN);

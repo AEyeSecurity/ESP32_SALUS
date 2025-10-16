@@ -1,6 +1,6 @@
 # ESP32 SALUS - Control PID de direccion
 
-Firmware para ESP32 que integra comunicacion OTA/Telnet con un lazo PID de posicionamiento angular basado en el sensor magnetico AS5600 y un actuador controlado por un puente H. El receptor RC (FS-iA6) usa GPIO16 para la direccion y GPIO4 para el canal de aceleracion/reversa.
+Firmware para ESP32 que integra comunicacion OTA/Telnet con un lazo PID de posicionamiento angular basado en el sensor magnetico AS5600, un actuador controlado por un puente H y el control de acelerador del quad. El receptor RC (FS-iA6) usa GPIO16 para la direccion, GPIO4 para el canal de aceleracion/reversa y la salida PWM al motor se genera sobre GPIO17.
 
 ## Conexiones de hardware
 
@@ -10,7 +10,9 @@ Firmware para ESP32 que integra comunicacion OTA/Telnet con un lazo PID de posic
 | AS5600 SCL            | 26         | Bus I2C compartido con otras mediciones si fuese necesario.                 |
 | AS5600 VCC / GND      | 3V3 / GND  | Alimentacion del encoder magnetico.                                         |
 | Receptor RC - Direccion | 16         | PWM (-100 a 100) que define la consigna asociada al angulo.                  |
-| Receptor RC - Acelerador | 4         | PWM (-100 a 100) reservado para acelerar/reversa (aun sin logica asociada). |
+| Receptor RC - Acelerador | 4         | PWM (-100 a 100) que define aceleracion o marcha atras.                      |
+| Salida PWM acelerador    | 17        | LEDC canal 2 (20 kHz, 8 bits) hacia el ESC/controlador del quad.            |
+| Pin sentido acelerador   | (opcional)| Configurable (`THROTTLE_DIRECTION_PIN`); usar `kQuadNoGpio` si no aplica.   |
 | H-bridge ENABLE       | 21         | Se fuerza en HIGH cuando el PID necesita mover el motor.                    |
 | H-bridge LEFT PWM     | 19         | PWM para girar el motor a la izquierda (ver `bridge_turn_left`).            |
 | H-bridge RIGHT PWM    | 18         | PWM para girar el motor a la derecha (ver `bridge_turn_right`).             |
@@ -35,6 +37,7 @@ Firmware para ESP32 que integra comunicacion OTA/Telnet con un lazo PID de posic
 | `taskAs5600Monitor`      | 1      | 1         | 30 ms (log cada 500 ms)   | Telemetria del sensor AS5600. |
 | `taskPidControl`         | 1      | 2         | 20 ms                     | Ejecuta el lazo PID y controla el puente H. |
 | `taskRcMonitor` (opcional)| 1     | 1         | 100 ms                    | Muestra los valores del receptor RC. |
+| `taskQuadThrottleControl`| 1      | 1         | 40 ms                     | Genera el PWM de aceleracion con LEDC y maneja reversa. |
 | `taskBridgeTest` (opcional)| 1    | 2         | Bucle cooperativo         | Rampa de prueba del puente H (no usar junto al PID). |
 | `loop()`                 | 1      | -         | 50 ms                     | Manejo basico de UART. |
 
@@ -53,6 +56,7 @@ La tarea PID calcula su `dt` con `micros()` y, ante valores anomalos, usa el per
 - Periodo y logging (`PID_PERIOD`, `PID_LOG_INTERVAL` en `src/main.cpp:37-38`): definen la cadencia de calculo y cada cuanto loguea.
 - Flags de depuracion (`debug::kLogPid`, `debug::kEnablePidTask` en `src/main.cpp:47,50`): activan logs y la tarea PID.
 - La estructura `PidTaskConfig` empaqueta estos parametros y se pasa a FreeRTOS (`src/main.cpp:62-71`).
+- Parametros de acelerador (`THROTTLE_*` y `debug::kLogThrottle` en `src/main.cpp`): definen pines, rangos de PWM y logging del control de motor.
 
 En la inicializacion (`src/main.cpp:80-83`) se fijan las ganancias, limites y se hace `reset()` antes de arrancar la tarea.
 
@@ -95,6 +99,7 @@ La implementacion a medida vive en `include/pid.h` y `src/pid.cpp`:
 - `src/pid.cpp`: implementacion del lazo, helpers de angulo y logica de FreeRTOS.
 - `include/h_bridge.h` y `src/h_bridge.cpp`: capa de abstraccion del puente H.
 - `include/AS5600.h` y `src/AS5600.cpp`: driver del sensor magnetico.
+- `include/quad_functions.h` y `src/quad_functions.cpp`: helpers para el acelerador (LEDC + manejo de reversa).
 
 Con esta estructura dispones de un lazo PID limpio, portable y sencillo de ajustar para mantener el motor alrededor de un angulo deseado siguiendo las ordenes del receptor RC.
 

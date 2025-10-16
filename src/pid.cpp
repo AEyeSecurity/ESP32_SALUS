@@ -295,7 +295,3 @@ void taskPidControl(void* parameter) {
     vTaskDelayUntil(&lastWake, period);
   }
 }
-
-
-
-
