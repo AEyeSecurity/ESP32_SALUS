@@ -20,11 +20,11 @@ constexpr uint16_t STACK_PID = 4096;
 constexpr int AS5600_SDA_PIN = 25;
 constexpr int AS5600_SCL_PIN = 26;
 
-constexpr float PID_CENTER_DEG = 115.0f;
-constexpr float PID_SPAN_DEG = 30.0f;
+constexpr float PID_CENTER_DEG = 292.0f;
+constexpr float PID_SPAN_DEG = 40.0f;
 constexpr float PID_DEADBAND_PERCENT = 5.0f;
 constexpr float PID_MIN_ACTIVE_PERCENT = 15.0f;
-constexpr float PID_KP = 2.0f;
+constexpr float PID_KP = 3.0f;
 constexpr float PID_KI = 0.0f;
 constexpr float PID_KD = 0.0f;
 constexpr float PID_INTEGRAL_LIMIT = 50.0f;
