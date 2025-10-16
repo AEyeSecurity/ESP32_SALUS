@@ -10,9 +10,8 @@ Firmware para ESP32 que integra comunicacion OTA/Telnet con un lazo PID de posic
 | AS5600 SCL            | 26         | Bus I2C compartido con otras mediciones si fuese necesario.                 |
 | AS5600 VCC / GND      | 3V3 / GND  | Alimentacion del encoder magnetico.                                         |
 | Receptor RC - Direccion | 16         | PWM (-100 a 100) que define la consigna asociada al angulo.                  |
-| Receptor RC - Acelerador | 4         | PWM (-100 a 100) que define aceleracion o marcha atras.                      |
+| Receptor RC - Acelerador | 4         | PWM (0 a 100) que define aceleracion; valores <=15 se ignoran.              |
 | Salida PWM acelerador    | 17        | LEDC canal 2 (20 kHz, 8 bits) hacia el ESC/controlador del quad.            |
-| Pin sentido acelerador   | (opcional)| Configurable (`THROTTLE_DIRECTION_PIN`); usar `kQuadNoGpio` si no aplica.   |
 | H-bridge ENABLE       | 21         | Se fuerza en HIGH cuando el PID necesita mover el motor.                    |
 | H-bridge LEFT PWM     | 19         | PWM para girar el motor a la izquierda (ver `bridge_turn_left`).            |
 | H-bridge RIGHT PWM    | 18         | PWM para girar el motor a la derecha (ver `bridge_turn_right`).             |
@@ -56,7 +55,7 @@ La tarea PID calcula su `dt` con `micros()` y, ante valores anomalos, usa el per
 - Periodo y logging (`PID_PERIOD`, `PID_LOG_INTERVAL` en `src/main.cpp:37-38`): definen la cadencia de calculo y cada cuanto loguea.
 - Flags de depuracion (`debug::kLogPid`, `debug::kEnablePidTask` en `src/main.cpp:47,50`): activan logs y la tarea PID.
 - La estructura `PidTaskConfig` empaqueta estos parametros y se pasa a FreeRTOS (`src/main.cpp:62-71`).
-- Parametros de acelerador (`THROTTLE_*` y `debug::kLogThrottle` en `src/main.cpp`): definen pines, rangos de PWM y logging del control de motor.
+- Parametros de acelerador (`THROTTLE_*` y `debug::kLogThrottle` en `src/main.cpp`): definen pines, rango de PWM (0-200 sobre 255), umbral (>15) y logging del control de motor.
 
 En la inicializacion (`src/main.cpp:80-83`) se fijan las ganancias, limites y se hace `reset()` antes de arrancar la tarea.
 

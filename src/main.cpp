@@ -32,15 +32,12 @@ constexpr float PID_KD = 0.0f;
 constexpr float PID_INTEGRAL_LIMIT = 50.0f;
 
 constexpr uint8_t THROTTLE_PWM_PIN = 17;
-constexpr uint8_t THROTTLE_DIRECTION_PIN = kQuadNoGpio;
-constexpr bool THROTTLE_FORWARD_LEVEL_HIGH = true;
 constexpr uint8_t THROTTLE_LEDC_CHANNEL = 2;
 constexpr uint32_t THROTTLE_PWM_FREQ = 20000;
 constexpr uint8_t THROTTLE_PWM_RESOLUTION = 8;
-constexpr int THROTTLE_PWM_MIN_DUTY = 61;   // 40 scaled from 5V -> 3.3V
-constexpr int THROTTLE_PWM_MAX_DUTY = 227;  // 150 scaled from 5V -> 3.3V
-constexpr int THROTTLE_DEADZONE = 10;
-constexpr uint32_t THROTTLE_DIRECTION_DELAY_MS = 1000;
+constexpr int THROTTLE_PWM_MIN_DUTY = 0;
+constexpr int THROTTLE_PWM_MAX_DUTY = 200;
+constexpr int THROTTLE_THRESHOLD = 15;
 
 constexpr TickType_t OTA_PERIOD = pdMS_TO_TICKS(20);
 constexpr TickType_t RC_PERIOD = pdMS_TO_TICKS(100);
@@ -87,16 +84,12 @@ static PidTaskConfig g_pidTaskConfig = {
 static QuadThrottleTaskConfig g_throttleTaskConfig = {
     {
         THROTTLE_PWM_PIN,
-        THROTTLE_DIRECTION_PIN,
-        THROTTLE_FORWARD_LEVEL_HIGH,
         THROTTLE_LEDC_CHANNEL,
         THROTTLE_PWM_FREQ,
         THROTTLE_PWM_RESOLUTION,
         THROTTLE_PWM_MIN_DUTY,
         THROTTLE_PWM_MAX_DUTY,
-        THROTTLE_DEADZONE,
-        THROTTLE_DIRECTION_DELAY_MS,
-        debug::kLogThrottle,
+        THROTTLE_THRESHOLD,
     },
     kRcThrottlePin,
     true,

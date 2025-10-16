@@ -10,9 +10,6 @@ namespace {
 QuadThrottleConfig g_config{};
 uint32_t g_maxDuty = 255;
 bool g_initialized = false;
-bool g_forwardState = true;
-bool g_waitingDirection = false;
-uint32_t g_directionReadyMs = 0;
 int g_lastDuty = 0;
 
 uint32_t computeMaxDuty(uint8_t resolutionBits) {
@@ -35,37 +32,6 @@ int clampDuty(int duty) {
   return duty;
 }
 
-bool hasDirectionPin() {
-  return g_config.directionPin != kQuadNoGpio;
-}
-
-void applyDirectionLevel(bool forward) {
-  if (!hasDirectionPin()) {
-    return;
-  }
-  const bool levelHigh = forward ? g_config.forwardLevelHigh : !g_config.forwardLevelHigh;
-  digitalWrite(g_config.directionPin, levelHigh ? HIGH : LOW);
-}
-
-bool directionDelayExpired(uint32_t nowMs) {
-  if (!g_waitingDirection) {
-    return true;
-  }
-  if (static_cast<int32_t>(nowMs - g_directionReadyMs) >= 0) {
-    g_waitingDirection = false;
-    return true;
-  }
-  return false;
-}
-
-void logDirectionChange(bool forward) {
-  if (!g_config.logDirectionChanges) {
-    return;
-  }
-  String msg = String("[THROTTLE] Direccion: ") + (forward ? "adelante" : "reversa");
-  broadcastIf(true, msg);
-}
-
 }  // namespace
 
 void initQuadThrottle(const QuadThrottleConfig& config) {
@@ -78,15 +44,12 @@ void initQuadThrottle(const QuadThrottleConfig& config) {
   }
   g_config.pwmMinDuty = clampDuty(g_config.pwmMinDuty);
   g_config.pwmMaxDuty = clampDuty(g_config.pwmMaxDuty);
-  g_lastDuty = g_config.pwmMinDuty;
-  g_forwardState = true;
-  g_waitingDirection = false;
-  g_directionReadyMs = millis();
-
-  if (hasDirectionPin()) {
-    pinMode(g_config.directionPin, OUTPUT);
-    applyDirectionLevel(true);
+  if (g_config.activationThreshold < 0) {
+    g_config.activationThreshold = 0;
+  } else if (g_config.activationThreshold > 100) {
+    g_config.activationThreshold = 100;
   }
+  g_lastDuty = g_config.pwmMinDuty;
 
   ledcSetup(g_config.ledcChannel, g_config.pwmFrequencyHz, g_config.pwmResolutionBits);
   ledcAttachPin(g_config.pwmPin, g_config.ledcChannel);
@@ -102,43 +65,26 @@ int quadThrottleUpdate(int rcValue) {
 
   if (rcValue > 100) {
     rcValue = 100;
-  } else if (rcValue < -100) {
-    rcValue = -100;
+  } else if (rcValue < 0) {
+    rcValue = 0;
   }
 
-  int requestedDuty = g_config.pwmMinDuty;
-  bool requestedForward = true;
-  const int deadZone = g_config.deadZone;
-  if (rcValue > deadZone) {
-    requestedDuty = map(rcValue, deadZone, 100, g_config.pwmMinDuty, g_config.pwmMaxDuty);
-    requestedForward = true;
-  } else if (rcValue < -deadZone) {
-    const int magnitude = (rcValue < 0) ? -rcValue : rcValue;
-    requestedDuty = map(magnitude, deadZone, 100, g_config.pwmMinDuty, g_config.pwmMaxDuty);
-    requestedForward = false;
-  } else {
-    requestedForward = true;
-    requestedDuty = g_config.pwmMinDuty;
+  const int threshold = g_config.activationThreshold;
+  int duty = g_config.pwmMinDuty;
+
+  if (rcValue > threshold) {
+    const int span = g_config.pwmMaxDuty - g_config.pwmMinDuty;
+    const int range = 100 - threshold;
+    if (range <= 0) {
+      duty = g_config.pwmMaxDuty;
+    } else {
+      duty = g_config.pwmMinDuty + ((rcValue - threshold) * span) / range;
+    }
   }
 
-  requestedDuty = clampDuty(requestedDuty);
-
-  const uint32_t nowMs = millis();
-  if (hasDirectionPin() && requestedForward != g_forwardState) {
-    applyDirectionLevel(requestedForward);
-    g_forwardState = requestedForward;
-    g_directionReadyMs = nowMs + g_config.directionChangeDelayMs;
-    g_waitingDirection = g_config.directionChangeDelayMs > 0;
-    logDirectionChange(requestedForward);
-  }
-
-  if (!directionDelayExpired(nowMs)) {
-    requestedDuty = g_config.pwmMinDuty;
-  }
-
-  requestedDuty = clampDuty(requestedDuty);
-  ledcWrite(g_config.ledcChannel, requestedDuty);
-  g_lastDuty = requestedDuty;
+  duty = clampDuty(duty);
+  ledcWrite(g_config.ledcChannel, duty);
+  g_lastDuty = duty;
 
   return g_lastDuty;
 }
@@ -168,28 +114,23 @@ void taskQuadThrottleControl(void* parameter) {
   TickType_t lastWake = xTaskGetTickCount();
   int lastRcValue = 9999;
   int lastDutyReported = -1;
-  bool lastDirReported = true;
 
   for (;;) {
-    const int rcValue = readChannel(cfg->rcInputPin, -100, 100, 0);
+    const int rcValue = readChannel(cfg->rcInputPin, 0, 100, 0);
     const int duty = quadThrottleUpdate(rcValue);
 
-    if (cfg->log && (rcValue != lastRcValue || duty != lastDutyReported || g_forwardState != lastDirReported)) {
+    if (cfg->log && (rcValue != lastRcValue || duty != lastDutyReported)) {
       String msg;
-      msg.reserve(96);
+      msg.reserve(64);
       msg += "[THROTTLE] rc=";
       msg += rcValue;
       msg += " duty=";
       msg += duty;
       msg += "/";
       msg += static_cast<int>(g_maxDuty);
-      msg += " dir=";
-      msg += g_forwardState ? "adelante" : "reversa";
-      msg += g_waitingDirection ? " (esperando cambio)" : "";
       broadcastIf(true, msg);
       lastRcValue = rcValue;
       lastDutyReported = duty;
-      lastDirReported = g_forwardState;
     }
 
     vTaskDelayUntil(&lastWake, period);
