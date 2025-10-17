@@ -1,109 +1,127 @@
-# ESP32 SALUS - Control PID de direccion
+# ESP32 SALUS - Mapa de tareas FreeRTOS
 
-Firmware para ESP32 que integra comunicacion OTA/Telnet con un lazo PID de posicionamiento angular basado en el sensor magnetico AS5600, un actuador controlado por un puente H, control de acelerador y freno por servos. El receptor RC (FS-iA6) usa GPIO16 para la direccion, GPIO4 para el canal de aceleracion y la salida PWM al motor se genera sobre GPIO17; los servos de freno viven en GPIO23 y GPIO22.
+Firmware para ESP32 centrado en el control de direccion de un quad con sensor magnetico AS5600. El proyecto combina OTA+Telnet, un lazo PID, control de acelerador LEDC y servos de freno. Este documento detalla la organizacion de las tareas FreeRTOS, sus prioridades, cadencias y condiciones de activacion.
 
-## Conexiones de hardware
+## Flujo de arranque (src/main.cpp)
 
-| Senal / Modulo        | GPIO ESP32 | Descripcion                                                                 |
-|-----------------------|------------|------------------------------------------------------------------------------|
-| AS5600 SDA            | 25         | Bus I2C (tirar a 3V3 con 4.7 k si el modulo no lo trae).                    |
-| AS5600 SCL            | 26         | Bus I2C compartido con otras mediciones si fuese necesario.                 |
-| AS5600 VCC / GND      | 3V3 / GND  | Alimentacion del encoder magnetico.                                         |
-| Receptor RC - Direccion | 16         | PWM (-100 a 100) que define la consigna asociada al angulo.                  |
-| Receptor RC - Acelerador | 4         | PWM (-100 a 100); >15 acelera, <-15 acciona freno (servos).                 |
-| Salida PWM acelerador    | 17        | LEDC canal 2 (20 kHz, 8 bits) hacia el ESC/controlador del quad.            |
-| Servo freno izquierdo    | 23        | LEDC canal 3 (50 Hz, 16 bits); reposo 30°, frenado 80°.                     |
-| Servo freno derecho      | 22        | LEDC canal 4 (50 Hz, 16 bits); reposo 30°, frenado 80°.                     |
-| H-bridge ENABLE       | 21         | Se fuerza en HIGH cuando el PID necesita mover el motor.                    |
-| H-bridge LEFT PWM     | 19         | PWM para girar el motor a la izquierda (ver `bridge_turn_left`).            |
-| H-bridge RIGHT PWM    | 18         | PWM para girar el motor a la derecha (ver `bridge_turn_right`).             |
+1. `setup()` inicializa UART (`InicializaUart`), WiFi en modo AP (`InicializaWiFi`), OTA (`InicializaOTA`) y el servidor Telnet (`InicializaTelnet`).
+2. Se configuran los limites del controlador PID (`PidController::setTunings`, `setOutputLimits`, `setIntegralLimits`, `reset`).
+3. Se configuran pines de entrada para los canales RC (GPIO0, GPIO2, GPIO4, GPIO16) y se inicializa el hardware de freno (`initQuadBrake`).
+4. Se crean las tareas FreeRTOS usando `startTaskPinned` (`src/freertos_utils.cpp`), pasando los `*_TaskConfig` con parametros de periodo, logging y auto-inicializacion de hardware.
+5. Se ejecuta un autotest del AS5600 (`runAs5600SelfTest`) y se lanza `taskAs5600Monitor`.
+6. La tarea Arduino `loop()` queda como supervisor ligero: recibe mensajes por UART y duerme 50 ms entre iteraciones.
 
-> No ejecutes `taskBridgeTest` y el PID en simultaneo: ambos manejan el mismo puente H.
+## Resumen de tareas FreeRTOS
 
-## Logica del control PID
+| Tarea                     | Archivo/funcion          | Stack (palabras ~KB) | Prio | Nucleo | Cadencia / disparador                       | Habilitacion por defecto | Comentario principal |
+|---------------------------|--------------------------|----------------------|------|--------|---------------------------------------------|--------------------------|----------------------|
+| `taskOtaTelnet`          | `src/ota_telnet.cpp`     | 4096 (~16 KB)        | 3    | 0      | 20 ms periodica (`vTaskDelayUntil`)         | Siempre                  | Ejecuta `ArduinoOTA.handle()` y heartbeat Telnet cada 5 s si se habilita. |
+| `taskAs5600Monitor`      | `src/AS5600.cpp`         | 3072 (~12 KB)        | 1    | 1      | 30 ms periodica, log cada 500 ms            | Siempre                  | Mide estado del AS5600 y opcionalmente reporta estado de iman y angulo. |
+| `taskPidControl`         | `src/pid.cpp`            | 4096 (~16 KB)        | 2    | 1      | 20 ms (`vTaskDelayUntil` + `micros()` para dt) | `debug::kEnablePidTask` (true) | Cierra el lazo PID, acciona el puente H y respeta finales de carrera. |
+| `taskQuadThrottleControl`| `src/quad_functions.cpp` | 2048 (~8 KB)         | 1    | 1      | 20 ms periodica                              | `debug::kEnableThrottleTask` (true) | Lee RC GPIO4, filtra y actualiza PWM LEDC del acelerador. |
+| `taskQuadBrakeControl`   | `src/quad_functions.cpp` | 2048 (~8 KB)         | 1    | 1      | 20 ms periodica                              | `debug::kEnableBrakeTask` (true) | Usa el valor filtrado para posicionar los servos de freno via LEDC. |
+| `taskRcMonitor`          | `src/fs_ia6.cpp`         | 2048 (~8 KB)         | 1    | 1      | 100 ms periodica (`vTaskDelay`)              | `debug::kEnableRcTask` (false) | Solo loguea los canales del receptor RC; ideal para calibracion. |
+| `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~16 KB)        | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
+| `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Maneja mensajes UART y reenvia a Telnet cuando `debug::kLogLoop` esta activo. |
 
-1. **Lectura del mando**: `taskPidControl` usa `readChannel()` sobre `GPIO4` para obtener un valor normalizado entre -100 y 100.
-2. **Setpoint angular**: el valor anterior se mapea a grados via `mapRcValueToAngle()` (`centerDeg +/- spanDeg`).
-3. **Sensado**: se consulta `AS5600::getAngleDegrees()`. Errores de I2C detienen el motor y reinician el PID.
-4. **Error envuelto**: `computeAngleError()` lleva el error a +/-180 grados para evitar saltos cuando el angulo cruza 0.
-5. **Actualizacion PID**: `PidController::update()` integra el error con anti-windup y derivada discreta (ver `src/pid.cpp:159`).
-6. **Post-procesado**: se aplica *deadband* y un minimo de duty (`applyDeadband`, `applyMinActive`) para vencer la friccion.
-7. **Actuacion**: el signo del comando decide sentido; el modulo `h_bridge` genera el PWM correspondiente o detiene el motor.
+> Nota: FreeRTOS en ESP32 interpreta el parametro `stackSize` en palabras de 32 bits. 4096 palabras equivalen a ~16 KB.
 
-## Tareas y temporizacion
+## Detalle por tarea
 
-| Tarea / funcion          | Nucleo | Prioridad | Periodo / Ritmo           | Proposito principal |
-|--------------------------|--------|-----------|---------------------------|---------------------|
-| `taskOtaTelnet`          | 0      | 3         | 20 ms                     | Gestiona OTA y Telnet. |
-| `taskAs5600Monitor`      | 1      | 1         | 30 ms (log cada 500 ms)   | Telemetria del sensor AS5600. |
-| `taskPidControl`         | 1      | 2         | 20 ms                     | Ejecuta el lazo PID y controla el puente H. |
-| `taskRcMonitor` (opcional)| 1     | 1         | 100 ms                    | Muestra los valores del receptor RC. |
-| `taskQuadThrottleControl`| 1      | 1         | 40 ms                     | Genera el PWM de aceleracion con LEDC (umbral >15).     |
-| `taskQuadBrakeControl`   | 1      | 1         | 40 ms                     | Posiciona los servos de freno segun el mando (<-15).     |
-| `taskBridgeTest` (opcional)| 1    | 2         | Bucle cooperativo         | Rampa de prueba del puente H (no usar junto al PID). |
-| `loop()`                 | 1      | -         | 50 ms                     | Manejo basico de UART. |
+### `taskOtaTelnet` (src/ota_telnet.cpp)
+- Configuracion: `OtaTelnetTaskConfig` fija `taskPeriod` (20 ms), `heartbeatInterval` (5000 ms) y `logHeartbeat` (false por defecto).
+- Bucle: ejecuta `ArduinoOTA.handle()` en cada tick y amortigua la latencia llamando `vTaskDelayUntil` con el ultimo `TickType_t` registrado.
+- Disparadores: 100% temporizados; no usa interrupciones. El heartbeat solo envia mensajes cuando ha pasado el intervalo configurado.
+- Interfaz: utiliza `EnviarMensajeTelnet` para los avisos, compartiendo la UART/Telnet con el resto del sistema via `broadcastIf`.
 
-La tarea PID calcula su `dt` con `micros()` y, ante valores anomalos, usa el periodo nominal (`PID_PERIOD`).
+### `taskAs5600Monitor` (src/AS5600.cpp)
+- Configuracion: `AS5600MonitorConfig` comparte puntero al sensor, flag de log, periodo (30 ms) y `logInterval` (500 ms).
+- Bucle: verifica conectividad I2C (`isConnected`), lee STATUS, RAW_ANGLE, ANGLE y MAGNITUDE. Solo cuando `logInterval` expira construye un mensaje detallado.
+- Seguridad: si el sensor no responde, no se destruye la tarea; simplemente reporta desconexion y reintenta en el siguiente ciclo.
+- Disparador: temporizado via `vTaskDelayUntil`. No emplea interrupciones I2C ni callbacks.
 
-## Parametros configurables clave
+### `taskPidControl` (src/pid.cpp)
+- Configuracion: `PidTaskConfig` incluye puntero al sensor, GPIO RC (GPIO16), calibres (centro, span, deadband, min duty), periodos y flag `autoInitBridge`.
+- Bucle: calcula `dt` con `micros()`. Si el delta es invalido (>1 s o <=0) usa el periodo nominal en segundos (`ticksToSeconds(period)`).
+- Lecturas: usa `readChannel` (GPIO16) para mapear de -100..100 a angulo (`mapRcValueToAngle`). El AS5600 se lee en grados; si retorna negativo se detiene el puente y se hace `reset()` del PID.
+- Actuacion: llama `bridge_turn_left/right` segun el signo; activa el puente H si estaba deshabilitado. Reinicia el integrador si golpea un final de carrera.
+- Protecciones: chequea `bridge_limit_left/right_active`. Los limites generan logs y mantienen latch para evitar spam.
+- Cadencia: `vTaskDelayUntil` con periodo de 20 ms. Logs `[PID]` cada `PID_LOG_INTERVAL` (200 ms).
 
-- `kRcSteeringPin` (`include/fs_ia6.h:38`): GPIO del canal RC que alimenta el setpoint de direccion.
-- `kRcThrottlePin` (`include/fs_ia6.h:39`): GPIO del canal RC reservado para el canal de acelerador/freno.
-- `PID_CENTER_DEG` (`src/main.cpp:24`): angulo centrado que corresponde a mando 0. Ej.: 150 grados.
-- `PID_SPAN_DEG` (`src/main.cpp:25`): amplitud maxima de correccion (mando +/-100 => +/-span grados).
-- `PID_DEADBAND_PERCENT` (`src/main.cpp:26`): zona muerta en % del duty final para evitar oscilaciones pequenas.
-- `PID_MIN_ACTIVE_PERCENT` (`src/main.cpp:27`): duty minimo aplicado cuando el comando es distinto de cero.
-- Ganancias (`PID_KP`, `PID_KI`, `PID_KD` en `src/main.cpp:28-30`): tunings base iniciales; se pueden variar y recompilar.
-- Limite integral (`PID_INTEGRAL_LIMIT`, `src/main.cpp:31`): clamp simetrico del termino I para prevenir windup.
-- Periodo y logging (`PID_PERIOD`, `PID_LOG_INTERVAL` en `src/main.cpp:37-38`): definen la cadencia de calculo y cada cuanto loguea.
-- Flags de depuracion (`debug::kLogPid`, `debug::kEnablePidTask` en `src/main.cpp:47,50`): activan logs y la tarea PID.
-- La estructura `PidTaskConfig` empaqueta estos parametros y se pasa a FreeRTOS (`src/main.cpp:62-71`).
-- Parametros de acelerador (`THROTTLE_*` y `debug::kLogThrottle` en `src/main.cpp`): definen pines, rango de PWM (61-227 sobre 255, equivalente a 40-150 en Arduino 5 V), umbral (>15) y logging del control de motor.
-- Parametros de freno (`BRAKE_*` y `debug::kLogBrake` en `src/main.cpp`): pines/LEDc para servos, angulos de reposo (30°) y frenado (80°), umbral de accion (-15).
+### `taskQuadThrottleControl` (src/quad_functions.cpp)
+- Configuracion: `QuadThrottleTaskConfig` define el pin PWM (GPIO17), canal LEDC, frecuencia (20 kHz), resolucion (8 bits) y umbral de activacion (>15%). `autoInitHardware` habilita `initQuadThrottle` al arrancar la tarea.
+- Lectura: invoca `readChannel` sobre `kRcThrottlePin` (GPIO4). El valor se filtra con `updateThrottleFilter`, que suaviza y auto-ajusta el offset en reposo.
+- Accion: `quadThrottleUpdate` traduce el valor normalizado a un duty dentro de `[pwmMinDuty, pwmMaxDuty]`, saturando con `clampDuty`. El duty y el RC filtrado se loguean si cambia el valor.
+- Shared state: actualiza `g_lastThrottleUpdateTick` para que otras tareas sepan si hay dato fresco.
+- Cadencia: `vTaskDelayUntil`, periodo 20 ms.
 
-En la inicializacion (`src/main.cpp:80-83`) se fijan las ganancias, limites y se hace `reset()` antes de arrancar la tarea.
+### `taskQuadBrakeControl` (src/quad_functions.cpp)
+- Configuracion: `QuadBrakeTaskConfig` contiene servos en GPIO23/GPIO22 (LEDC 50 Hz, 16 bits) y angulos de reposo/freno. Arranca `initQuadBrake` si `autoInitHardware` es true.
+- Datos de entrada: reusa el ultimo valor filtrado por la tarea de acelerador si es reciente (`throttleDataFresh(pdMS_TO_TICKS(100))`); de lo contrario asume 0 y suelta el freno.
+- Accion: `quadBrakeUpdate` aplica el angulo de freno cuando el valor es menor al umbral (por defecto -15). `applyBrakeAngle` convierte a pulso microsegundos y a duty LEDC.
+- Cadencia: 20 ms via `vTaskDelayUntil`. Logs `[BRAKE]` cuando cambia RC o angulo.
 
-## Funcionamiento interno del PID
+### `taskRcMonitor` (src/fs_ia6.cpp)
+- Activacion: controlada por `debug::kEnableRcTask`. No inicializa hardware extra; solo llama `readChannel` en GPIO0, GPIO2, GPIO4 y GPIO16.
+- Funcion: detecta cambios respecto al ultimo estado y los difunde con `broadcastIf`. Útil para calibrar pulsos del receptor FS-iA6.
+- Cadencia: 100 ms mediante `vTaskDelay`. Si no hay cambios, la tarea solo duerme.
 
-La implementacion a medida vive en `include/pid.h` y `src/pid.cpp`:
+### `taskBridgeTest` (src/h_bridge.cpp)
+- Activacion: `debug::kEnableBridgeTask`. Mutual exclusion con el PID: en `setup()` no se lanza el PID si esta flag esta en true.
+- Funcionamiento: habilita el puente H, recorre rampas de duty 0-100% a izquierda y derecha con pasos de 5% y retardos de 80/60 ms. Entre rampas hay pausas de 300 ms y 2 s.
+- Seguridad: usa `bridge_limit_*` para impedir movimiento contra el final de carrera. Muestra mensajes `[HBRIDGE]` periodicamente.
+- Cadencia: no tiene un periodo fijo; la tarea usa multiples `vTaskDelay` en cada etapa del ciclo.
 
-- La clase `PidController` (`include/pid.h:11`) administra ganancias, limites y estado interno (integral, derivada).
-- `PidController::update()` (`src/pid.cpp:115`) suma P, integra I con saturacion y calcula una derivada simple filtrada por paso de tiempo.
-- `wrapAngleDegrees()` (`src/pid.cpp:141`) mantiene el error dentro de +/-180 grados.
-- `taskPidControl()` (`src/pid.cpp:159`) coordina lecturas, PID y PWM; incluye protecciones ante lecturas invalidas y logging periodico.
+### `loop()` (src/main.cpp)
+- Corre en el contexto de Arduino (core 1). Si `debug::kLogLoop` es true, reenvia cualquier mensaje recibido por UART al Telnet (`EnviarMensajeTelnet`).
+- Para liberar CPU cede 50 ms con `vTaskDelay(pdMS_TO_TICKS(50))`.
 
-## Pasos de uso
+## Recursos compartidos y sincronizacion
 
-1. Conecta el hardware segun la tabla y asegura la alimentacion estable del AS5600 y del puente H.
-2. Compila/sube con PlatformIO (`pio run --target upload`) o via OTA (`pio run --target upload --upload-port 192.168.4.1`).
-3. Opcional: habilita Telnet (`telnet 192.168.4.1 23`) para seguir los logs del PID (`debug::kLogPid = true`).
-4. Ajusta el transmisor RC: en reposo debe entregar ~150 grados (mando 0). Verifica que el sensor reporte valores coherentes.
-5. Modifica ganancias o rangos en `src/main.cpp` segun la respuesta del sistema y vuelve a compilar.
+- `readChannel` (`src/fs_ia6.cpp`) usa `pulseIn` protegido por `portENTER_CRITICAL` para evitar condiciones de carrera entre tareas que miden PWM.
+- El valor filtrado del acelerador (`g_filteredThrottleValue`) y su marca temporal (`g_lastThrottleUpdateTick`) son `volatile` y se comparten entre las tareas de acelerador y freno.
+- Las funciones del puente H (`bridge_turn_*`, `bridge_stop`) no usan mutex; la coordinacion depende de las flags `debug::kEnablePidTask` y `debug::kEnableBridgeTask` para evitar tareas concurrentes sobre el mismo hardware.
+- Los logs emplean `broadcastIf` que multiplexa Serial y Telnet, manteniendo consistencia en el formato sin necesidad de colas.
 
-## Ajuste del PID
+## Flags de habilitacion y logging (namespace `debug` en src/main.cpp)
 
-- Comienza aumentando `PID_KP` hasta que el sistema responda rapido sin saturar; agrega `PID_KI` para eliminar error estacionario y `PID_KD` si ves sobreoscilaciones.
-- Reduce `PID_DEADBAND_PERCENT` si quieres mas sensibilidad; subelo si vibra alrededor del centro.
-- `PID_MIN_ACTIVE_PERCENT` ayuda a vencer la friccion estatica; ajustalo al minimo que mueva confiablemente el motor.
-- Si el lazo integra demasiado y tarda en recuperarse, baja `PID_INTEGRAL_LIMIT` o `PID_KI`.
-- Puedes instrumentar mas datos dentro de `taskPidControl` o enviar comandos por Telnet para ajustar en caliente (idea para mejoras futuras).
+- `kEnableBridgeTask = false`
+- `kEnableRcTask = false`
+- `kEnablePidTask = true`
+- `kEnableThrottleTask = true`
+- `kEnableBrakeTask = true`
+- Flags de log (`kLog*`) controlan el volumen de mensajes por tarea sin recompilar el codigo.
 
-## Depuracion y buenas practicas
+## Periodos y constantes relevantes (src/main.cpp)
 
-- Mantener `debug::kEnablePidTask = true` y `debug::kEnableBridgeTask = false`; la tarea PID ya inicializa el puente H por su cuenta.
-- Si el AS5600 falla (lectura < 0), el PID congela la salida y detiene el puente; revisa cableado o bus I2C.
-- Usa la tarea `taskRcMonitor` para verificar los valores del receptor antes de activar el PID.
-- Los logs `[PID]` aparecen cada `PID_LOG_INTERVAL`; ajusta el valor para evitar saturar Telnet.
+- `OTA_PERIOD` = 20 ms
+- `RC_PERIOD` = 100 ms
+- `AS5600_PERIOD` = 30 ms; `AS5600_LOG_INTERVAL` = 500 ms
+- `PID_PERIOD` = 20 ms; `PID_LOG_INTERVAL` = 200 ms
+- `THROTTLE_PERIOD` = 20 ms
+- `BRAKE_PERIOD` = 20 ms
 
-## Archivos relevantes
+Estos valores se inyectan en los `*_TaskConfig` y definen la cadencia con la que `vTaskDelay` o `vTaskDelayUntil` libera la CPU.
 
-- `src/main.cpp`: configuracion de tareas, constantes y arranque del PID.
-- `include/pid.h`: definicion del controlador y de `PidTaskConfig`.
-- `src/pid.cpp`: implementacion del lazo, helpers de angulo y logica de FreeRTOS.
-- `include/h_bridge.h` y `src/h_bridge.cpp`: capa de abstraccion del puente H.
-- `include/AS5600.h` y `src/AS5600.cpp`: driver del sensor magnetico.
-- `include/quad_functions.h` y `src/quad_functions.cpp`: helpers para el acelerador (LEDC) y servos de freno.
-- Servos de freno (`src/quad_functions.cpp`, seccion BRAKE): genera PWM 50 Hz para posicionar los servomotores entre 30° (reposo) y 80° (frenado).
+## Conexiones de hardware (resumen)
 
-Con esta estructura dispones de un lazo PID limpio, portable y sencillo de ajustar para mantener el motor alrededor de un angulo deseado siguiendo las ordenes del receptor RC.
+| Senal / Modulo           | GPIO ESP32 | Descripcion breve                                                      |
+|--------------------------|------------|------------------------------------------------------------------------|
+| AS5600 SDA / SCL         | 25 / 26    | Bus I2C del sensor magnetico.                                          |
+| AS5600 VCC / GND         | 3V3 / GND  | Alimentacion del AS5600.                                               |
+| FS-iA6 direccion         | 16         | PWM -100..100 para el setpoint PID.                                    |
+| FS-iA6 acelerador        | 4          | PWM -100..100; >15 acelera, <-15 activa freno.                         |
+| Salida PWM acelerador    | 17         | LEDC 20 kHz, 8 bits hacia ESC o controlador de motor.                  |
+| Servo freno izquierdo    | 23         | LEDC 50 Hz, 16 bits.                                                   |
+| Servo freno derecho      | 22         | LEDC 50 Hz, 16 bits.                                                   |
+| H-bridge enable / PWM    | 21 / 19 / 18 | Control de motor para direccion, con finales de carrera en GPIO27 y 14. |
+
+## Diagnostico y mejores practicas
+
+- Activa `debug::kLogPid` y `debug::kLogThrottle` cuando necesites validar el lazo y el acelerador; desactivalos para vuelo normal.
+- Si `taskAs5600Monitor` reporta `connected=NO`, revisa VCC, GND y pull-ups del bus I2C antes de habilitar el PID.
+- Antes de usar el PID, puedes habilitar temporalmente `taskRcMonitor` para asegurarte de que los pulsos del receptor lleguen dentro del rango esperado.
+- No ejecutes `taskBridgeTest` mientras el PID este activo; ambas tareas usan el puente H sin mutex y se interferirian mutuamente.
+
+Con esta descripcion puedes ajustar periodos, prioridades o flags con plena visibilidad del impacto en la programacion de FreeRTOS y en la interaccion con el hardware.
 
