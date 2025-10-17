@@ -63,24 +63,25 @@ constexpr int BRAKE_APPLY_ANGLE = 100;
 constexpr int BRAKE_THRESHOLD = -15;
 
 constexpr TickType_t OTA_PERIOD = pdMS_TO_TICKS(20);
-constexpr TickType_t RC_PERIOD = pdMS_TO_TICKS(100);
+constexpr TickType_t RC_SAMPLER_PERIOD = pdMS_TO_TICKS(10);
+constexpr TickType_t RC_MONITOR_PERIOD = pdMS_TO_TICKS(100);
 constexpr TickType_t AS5600_PERIOD = pdMS_TO_TICKS(30);
 constexpr TickType_t AS5600_LOG_INTERVAL = pdMS_TO_TICKS(500);
-constexpr TickType_t PID_PERIOD = pdMS_TO_TICKS(20);
+constexpr TickType_t PID_PERIOD = pdMS_TO_TICKS(30);
 constexpr TickType_t PID_LOG_INTERVAL = pdMS_TO_TICKS(200);
-constexpr TickType_t THROTTLE_PERIOD = pdMS_TO_TICKS(20);
-constexpr TickType_t BRAKE_PERIOD = pdMS_TO_TICKS(20);
+constexpr TickType_t THROTTLE_PERIOD = pdMS_TO_TICKS(30);
+constexpr TickType_t BRAKE_PERIOD = pdMS_TO_TICKS(30);
 
 namespace debug {
 constexpr bool kLogSystem = false;
 constexpr bool kLogOta = false;
 constexpr bool kLogBridge = false;
 constexpr bool kLogLoop = false;
-constexpr bool kLogRc = false;
+constexpr bool kLogRc = true;
 constexpr bool kLogAs5600 = false;
 constexpr bool kLogPid = false;
-constexpr bool kLogThrottle = true;
-constexpr bool kLogBrake = true;
+constexpr bool kLogThrottle = false;
+constexpr bool kLogBrake = false;
 constexpr bool kEnableBridgeTask = false;
 constexpr bool kEnableRcTask = false;
 constexpr bool kEnablePidTask = true;
@@ -93,7 +94,8 @@ static PidController g_pidController;
 
 static OtaTelnetTaskConfig g_otaConfig = {debug::kLogOta, pdMS_TO_TICKS(5000), OTA_PERIOD};
 static HBridgeTaskConfig g_bridgeConfig = {debug::kLogBridge};
-static FsIa6TaskConfig g_rcConfig = {debug::kLogRc, RC_PERIOD};
+static FsIa6SamplerConfig g_rcSamplerConfig = {debug::kLogRc, RC_SAMPLER_PERIOD};
+static FsIa6TaskConfig g_rcConfig = {debug::kLogRc, RC_MONITOR_PERIOD};
 static AS5600MonitorConfig g_as5600TaskConfig = {&g_as5600, debug::kLogAs5600, AS5600_PERIOD, AS5600_LOG_INTERVAL};
 static PidTaskConfig g_pidTaskConfig = {
     &g_as5600,
@@ -170,14 +172,15 @@ void setup() {
   if (debug::kEnableBridgeTask) {
     startTaskPinned(taskBridgeTest, "BridgeTest", STACK_BRIDGE, &g_bridgeConfig, 2, nullptr, 1);
   }
+  startTaskPinned(taskRcSampler, "RCSampler", STACK_RC, &g_rcSamplerConfig, 3, nullptr, 1);
   if (debug::kEnableRcTask) {
     startTaskPinned(taskRcMonitor, "RCMonitor", STACK_RC, &g_rcConfig, 1, nullptr, 1);
   }
   if (debug::kEnableThrottleTask) {
-    startTaskPinned(taskQuadThrottleControl, "Throttle", STACK_THROTTLE, &g_throttleTaskConfig, 1, nullptr, 1);
+    startTaskPinned(taskQuadThrottleControl, "Throttle", STACK_THROTTLE, &g_throttleTaskConfig, 2, nullptr, 1);
   }
   if (debug::kEnableBrakeTask) {
-    startTaskPinned(taskQuadBrakeControl, "Brake", STACK_BRAKE, &g_brakeTaskConfig, 1, nullptr, 1);
+    startTaskPinned(taskQuadBrakeControl, "Brake", STACK_BRAKE, &g_brakeTaskConfig, 2, nullptr, 1);
   }
 
   g_as5600.begin(AS5600_SDA_PIN, AS5600_SCL_PIN);

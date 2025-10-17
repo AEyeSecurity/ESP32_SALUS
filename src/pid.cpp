@@ -177,7 +177,7 @@ void taskPidControl(void* parameter) {
     return;
   }
 
-  const TickType_t period = (cfg->period > 0) ? cfg->period : pdMS_TO_TICKS(20);
+  const TickType_t period = (cfg->period > 0) ? cfg->period : pdMS_TO_TICKS(30);
   const TickType_t logInterval = (cfg->logInterval > 0) ? cfg->logInterval : pdMS_TO_TICKS(200);
   TickType_t lastLog = xTaskGetTickCount();
 
@@ -201,14 +201,19 @@ void taskPidControl(void* parameter) {
       dtSeconds = ticksToSeconds(period);
     }
 
-    const int rcValue = readChannel(cfg->rcPin, -100, 100, 0);
+    TickType_t nowTicks = xTaskGetTickCount();
+    RcSharedState rcSnapshot{};
+    bool rcValid = rcGetStateCopy(rcSnapshot);
+    if (!rcValid || !rcSnapshot.valid || (nowTicks - rcSnapshot.lastUpdateTick) > pdMS_TO_TICKS(50)) {
+      rcSnapshot.steering = 0;
+    }
+    const int rcValue = rcSnapshot.steering;
     const float targetDeg = mapRcValueToAngle(rcValue, cfg->centerDeg, cfg->spanDeg);
     const float measuredDeg = cfg->sensor->getAngleDegrees();
 
     const bool limitLeftActive = bridge_limit_left_active();
     const bool limitRightActive = bridge_limit_right_active();
 
-    TickType_t nowTicks = xTaskGetTickCount();
     const bool shouldLog = cfg->log && (logInterval == 0 || (nowTicks - lastLog) >= logInterval);
 
     if (measuredDeg < 0.0f) {

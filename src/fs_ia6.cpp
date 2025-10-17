@@ -7,6 +7,9 @@
 
 namespace {
 portMUX_TYPE g_pulseMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE g_rcStateMux = portMUX_INITIALIZER_UNLOCKED;
+RcSharedState g_rcState = {0, 0, 0, 0, 0, false};
+TickType_t g_lastRcLogTick = 0;
 }
 
 //////////////// NO IBUS /////////////////////////////////////////////////////////////
@@ -54,6 +57,49 @@ bool readSwitch(byte channelInput, bool defaultValue) {
   return (ch > 50);
 }
 
+bool rcGetStateCopy(RcSharedState& out) {
+  portENTER_CRITICAL(&g_rcStateMux);
+  out = g_rcState;
+  portEXIT_CRITICAL(&g_rcStateMux);
+  return out.valid;
+}
+
+void taskRcSampler(void* parameter) {
+  const FsIa6SamplerConfig* cfg = static_cast<const FsIa6SamplerConfig*>(parameter);
+  const bool log = (cfg != nullptr) ? cfg->log : false;
+  const TickType_t period = (cfg != nullptr && cfg->period > 0) ? cfg->period : pdMS_TO_TICKS(10);
+
+  TickType_t lastWake = xTaskGetTickCount();
+  RcSharedState snapshot{};
+  snapshot.valid = false;
+
+  for (;;) {
+    snapshot.ch0 = readChannel(0, -100, 100, 0);
+    snapshot.ch2 = readChannel(2, -100, 100, 0);
+    snapshot.throttle = readChannel(kRcThrottlePin, -100, 100, 0);
+    snapshot.steering = readChannel(kRcSteeringPin, -100, 100, 0);
+    snapshot.lastUpdateTick = xTaskGetTickCount();
+    snapshot.valid = true;
+
+    portENTER_CRITICAL(&g_rcStateMux);
+    g_rcState = snapshot;
+    portEXIT_CRITICAL(&g_rcStateMux);
+
+    if (log) {
+      const TickType_t now = snapshot.lastUpdateTick;
+      if (now - g_lastRcLogTick >= pdMS_TO_TICKS(100)) {
+        String rcMsg = "RC sampler -> GPIO0: " + String(snapshot.ch0) + " | GPIO2: " + String(snapshot.ch2) +
+                       " | acelerador GPIO4: " + String(snapshot.throttle) +
+                       " | direccion GPIO16: " + String(snapshot.steering);
+        broadcastIf(true, rcMsg);
+        g_lastRcLogTick = now;
+      }
+    }
+
+    vTaskDelayUntil(&lastWake, period);
+  }
+}
+
 //////////////// IBUS  /////////////////////////////////////////////////////////////////
 
 // Attach iBus object to serial port
@@ -96,10 +142,15 @@ void taskRcMonitor(void* parameter) {
   int lastSteering = 9999;
 
   for (;;) {
-    int ch0 = readChannel(0, -100, 100, 0);
-    int ch2 = readChannel(2, -100, 100, 0);
-    int throttle = readChannel(kRcThrottlePin, -100, 100, 0);
-    int steering = readChannel(kRcSteeringPin, -100, 100, 0);
+    RcSharedState snapshot{};
+    if (!rcGetStateCopy(snapshot)) {
+      vTaskDelay(period);
+      continue;
+    }
+    int ch0 = snapshot.ch0;
+    int ch2 = snapshot.ch2;
+    int throttle = snapshot.throttle;
+    int steering = snapshot.steering;
 
     if (ch0 != lastCh0 || ch2 != lastCh2 || throttle != lastThrottle || steering != lastSteering) {
       if (log) {

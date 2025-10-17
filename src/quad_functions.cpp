@@ -256,16 +256,23 @@ void taskQuadThrottleControl(void* parameter) {
     initQuadThrottle(cfg->throttle);
   }
 
-    TickType_t period = (cfg->period > 0) ? cfg->period : pdMS_TO_TICKS(20);
+  TickType_t period = (cfg->period > 0) ? cfg->period : pdMS_TO_TICKS(30);
   TickType_t lastWake = xTaskGetTickCount();
   int lastRcValue = 9999;
   int lastDutyReported = -1;
 
   for (;;) {
-      const int rawValue = readChannel(cfg->rcInputPin, -100, 100, 0);
-      const int rcValue = updateThrottleFilter(rawValue);
-      g_lastThrottleUpdateTick = xTaskGetTickCount();
-      const int duty = quadThrottleUpdate(rcValue);
+    RcSharedState rcSnapshot{};
+    const bool rcValid = rcGetStateCopy(rcSnapshot);
+    const TickType_t sampleTick = xTaskGetTickCount();
+    int rawValue = 0;
+    if (rcValid && rcSnapshot.valid && (sampleTick - rcSnapshot.lastUpdateTick) <= pdMS_TO_TICKS(50)) {
+      rawValue = rcSnapshot.throttle;
+    }
+
+    const int rcValue = updateThrottleFilter(rawValue);
+    g_lastThrottleUpdateTick = (rcValid && rcSnapshot.valid) ? rcSnapshot.lastUpdateTick : sampleTick;
+    const int duty = quadThrottleUpdate(rcValue);
 
     if (cfg->log && (rcValue != lastRcValue || duty != lastDutyReported)) {
       String msg;
@@ -297,17 +304,17 @@ void taskQuadBrakeControl(void* parameter) {
     initQuadBrake(cfg->brake);
   }
 
-    TickType_t period = (cfg->period > 0) ? cfg->period : pdMS_TO_TICKS(20);
+  TickType_t period = (cfg->period > 0) ? cfg->period : pdMS_TO_TICKS(30);
   TickType_t lastWake = xTaskGetTickCount();
   int lastRcValue = 9999;
   int lastAngleReported = -1;
 
   for (;;) {
-      int rcValue = 0;
-      if (throttleDataFresh(pdMS_TO_TICKS(100))) {
-        rcValue = getFilteredThrottleValue();
-      }
-      quadBrakeUpdate(rcValue);
+    int rcValue = 0;
+    if (throttleDataFresh(pdMS_TO_TICKS(60))) {
+      rcValue = getFilteredThrottleValue();
+    }
+    quadBrakeUpdate(rcValue);
 
     if (cfg->log && (rcValue != lastRcValue || g_brakeCurrentAngle != lastAngleReported)) {
       String msg;
