@@ -3,6 +3,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <esp_timer.h>
+
 #include "fs_ia6.h"
 #include "ota_telnet.h"
 
@@ -247,112 +249,98 @@ void quadBrakeRelease() {
   applyBrakeAngle(g_brakeConfig.releaseAngleDeg);
 }
 
-void taskQuadThrottleControl(void* parameter) {
-  const QuadThrottleTaskConfig* cfg = static_cast<const QuadThrottleTaskConfig*>(parameter);
+void taskQuadDriveControl(void* parameter) {
+  const QuadDriveTaskConfig* cfg = static_cast<const QuadDriveTaskConfig*>(parameter);
   if (cfg == nullptr) {
-    broadcastIf(true, "[THROTTLE] Configuracion invalida, deteniendo tarea");
+    broadcastIf(true, "[DRIVE] Configuracion invalida, deteniendo tarea");
     vTaskDelete(nullptr);
     return;
   }
 
   if (cfg->autoInitHardware) {
     initQuadThrottle(cfg->throttle);
+    initQuadBrake(cfg->brake);
   }
 
-  TickType_t period = (cfg->period > 0) ? cfg->period : pdMS_TO_TICKS(30);
-  TickType_t lastWake = xTaskGetTickCount();
-  int lastRcValue = 9999;
-  int lastDutyReported = -1;
+  const TickType_t period = (cfg->period > 0) ? cfg->period : pdMS_TO_TICKS(30);
   TickType_t lastStaleLog = 0;
+  TickType_t lastPerfLog = 0;
+  int lastThrottleRcValue = 9999;
+  int lastDutyReported = -1;
+  int lastBrakeReported = -1;
+
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  if (!rcRegisterConsumer(self)) {
+    broadcastIf(true, "[DRIVE] No se pudo registrar la tarea para notificaciones RC");
+  }
 
   for (;;) {
+    const int64_t iterationStartUs = esp_timer_get_time();
+    const uint32_t notificationCount = ulTaskNotifyTake(pdTRUE, period);
+    (void)notificationCount;
+
     RcSharedState rcSnapshot{};
     const bool rcValid = rcGetStateCopy(rcSnapshot);
     const TickType_t sampleTick = xTaskGetTickCount();
     const TickType_t snapshotTick = rcSnapshot.lastUpdateTick;
     const bool snapshotFresh =
         rcValid && rcSnapshot.valid && snapshotTick != 0 && (sampleTick - snapshotTick) <= pdMS_TO_TICKS(50);
-    int rawValue = snapshotFresh ? rcSnapshot.throttle : 0;
+    const int rawThrottle = snapshotFresh ? rcSnapshot.throttle : 0;
 
-    const int rcValue = updateThrottleFilter(rawValue);
+    const int rcValue = updateThrottleFilter(rawThrottle);
     if (snapshotFresh) {
       g_lastThrottleUpdateTick = snapshotTick;
     }
     const int duty = quadThrottleUpdate(rcValue);
 
-    if (cfg->log && (rcValue != lastRcValue || duty != lastDutyReported)) {
+    const int brakeInput = throttleDataFresh(pdMS_TO_TICKS(60)) ? getFilteredThrottleValue() : 0;
+    quadBrakeUpdate(brakeInput);
+
+    if (cfg->log && (rcValue != lastThrottleRcValue || duty != lastDutyReported ||
+                     g_brakeCurrentAngle != lastBrakeReported)) {
       String msg;
-      msg.reserve(64);
-      msg += "[THROTTLE] rc=";
+      msg.reserve(96);
+      msg += "[DRIVE] rc=";
       msg += rcValue;
       msg += " duty=";
       msg += duty;
       msg += "/";
       msg += static_cast<int>(g_maxDuty);
+      msg += " brake=";
+      msg += g_brakeCurrentAngle;
+      msg += "deg";
       if (snapshotFresh) {
         msg += " raw=";
-        msg += rawValue;
+        msg += rawThrottle;
       } else {
         msg += " raw=STALE";
       }
       msg += " ageMs=";
       msg += static_cast<int>((sampleTick - snapshotTick) * portTICK_PERIOD_MS);
       broadcastIf(true, msg);
-      lastRcValue = rcValue;
+      lastThrottleRcValue = rcValue;
       lastDutyReported = duty;
+      lastBrakeReported = g_brakeCurrentAngle;
     }
 
     if (cfg->log && !snapshotFresh) {
       if ((sampleTick - lastStaleLog) >= pdMS_TO_TICKS(500)) {
-        String warn = "[THROTTLE] sin datos frescos del RC (>50ms); usando 0";
-        broadcastIf(true, warn);
+        broadcastIf(true, "[DRIVE] sin datos frescos del RC (>50ms); usando 0");
         lastStaleLog = sampleTick;
       }
     } else {
       lastStaleLog = sampleTick;
     }
 
-    vTaskDelayUntil(&lastWake, period);
-  }
-}
-
-void taskQuadBrakeControl(void* parameter) {
-  const QuadBrakeTaskConfig* cfg = static_cast<const QuadBrakeTaskConfig*>(parameter);
-  if (cfg == nullptr) {
-    broadcastIf(true, "[BRAKE] Configuracion invalida, deteniendo tarea");
-    vTaskDelete(nullptr);
-    return;
-  }
-
-  if (cfg->autoInitHardware) {
-    initQuadBrake(cfg->brake);
-  }
-
-  TickType_t period = (cfg->period > 0) ? cfg->period : pdMS_TO_TICKS(30);
-  TickType_t lastWake = xTaskGetTickCount();
-  int lastRcValue = 9999;
-  int lastAngleReported = -1;
-
-  for (;;) {
-    int rcValue = 0;
-    if (throttleDataFresh(pdMS_TO_TICKS(60))) {
-      rcValue = getFilteredThrottleValue();
+    const int64_t iterationDurationUs = esp_timer_get_time() - iterationStartUs;
+    if (cfg->log && iterationDurationUs > 2000) {
+      if ((sampleTick - lastPerfLog) >= pdMS_TO_TICKS(1000)) {
+        String perfMsg = "[DRIVE] ciclo tardo ";
+        perfMsg += iterationDurationUs / 1000.0f;
+        perfMsg += "ms";
+        broadcastIf(true, perfMsg);
+        lastPerfLog = sampleTick;
+      }
     }
-    quadBrakeUpdate(rcValue);
-
-    if (cfg->log && (rcValue != lastRcValue || g_brakeCurrentAngle != lastAngleReported)) {
-      String msg;
-      msg.reserve(64);
-      msg += "[BRAKE] rc=";
-      msg += rcValue;
-      msg += " angle=";
-      msg += g_brakeCurrentAngle;
-      msg += "deg";
-      broadcastIf(true, msg);
-      lastRcValue = rcValue;
-      lastAngleReported = g_brakeCurrentAngle;
-    }
-
-    vTaskDelayUntil(&lastWake, period);
   }
 }

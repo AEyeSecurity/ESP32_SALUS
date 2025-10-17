@@ -6,7 +6,7 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 
 1. `setup()` inicializa UART (`InicializaUart`), WiFi en modo AP (`InicializaWiFi`), OTA (`InicializaOTA`) y el servidor Telnet (`InicializaTelnet`).
 2. Se configuran los limites del controlador PID (`PidController::setTunings`, `setOutputLimits`, `setIntegralLimits`, `reset`).
-3. Se configuran pines de entrada para los canales RC (GPIO0, GPIO2, GPIO4, GPIO16) y se inicializa el hardware de freno (`initQuadBrake`).
+3. Se configuran pines de entrada para los canales RC (GPIO0, GPIO2, GPIO4, GPIO16) y se habilita el lector RMT que captura los pulsos del receptor FS-iA6.
 4. Se crean las tareas FreeRTOS usando `startTaskPinned` (`src/freertos_utils.cpp`), pasando los `*_TaskConfig` con parametros de periodo, logging y auto-inicializacion de hardware.
 5. Se ejecuta un autotest del AS5600 (`runAs5600SelfTest`) y se lanza `taskAs5600Monitor`.
 6. La tarea Arduino `loop()` queda como supervisor ligero: recibe mensajes por UART y duerme 50 ms entre iteraciones.
@@ -16,11 +16,10 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 | Tarea                     | Archivo/funcion          | Stack (palabras ~KB) | Prio | Nucleo | Cadencia / disparador                       | Habilitacion por defecto | Comentario principal |
 |---------------------------|--------------------------|----------------------|------|--------|---------------------------------------------|--------------------------|----------------------|
 | `taskOtaTelnet`          | `src/ota_telnet.cpp`     | 4096 (~16 KB)        | 3    | 0      | 20 ms periodica (`vTaskDelayUntil`)         | Siempre                  | Ejecuta `ArduinoOTA.handle()` y heartbeat Telnet cada 5 s si se habilita. |
-| `taskRcSampler`          | `src/fs_ia6.cpp`         | 2048 (~8 KB)         | 3    | 1      | 10 ms periodica (`vTaskDelayUntil`)         | Siempre                  | Captura los canales FS-iA6 y actualiza el `RcSharedState` compartido. |
+| `taskRcSampler`          | `src/fs_ia6.cpp`         | 2048 (~8 KB)         | 4    | 1      | Notificacin RMT (timeout 10 ms)            | Siempre                  | Usa RMT para medir pulsos del FS-iA6, actualiza `RcSharedState` y despierta consumidores. |
 | `taskAs5600Monitor`      | `src/AS5600.cpp`         | 3072 (~12 KB)        | 1    | 1      | 30 ms periodica, log cada 500 ms            | Siempre                  | Mide estado del AS5600 y opcionalmente reporta estado de iman y angulo. |
-| `taskPidControl`         | `src/pid.cpp`            | 4096 (~16 KB)        | 2    | 1      | 30 ms (`vTaskDelayUntil` + `micros()` para dt) | `debug::kEnablePidTask` (true) | Consume el snapshot RC para el setpoint, cierra el lazo y acciona el puente H. |
-| `taskQuadThrottleControl`| `src/quad_functions.cpp` | 2048 (~8 KB)         | 2    | 1      | 30 ms periodica                              | `debug::kEnableThrottleTask` (true) | Usa el snapshot RC, filtra acelerador y actualiza PWM LEDC. |
-| `taskQuadBrakeControl`   | `src/quad_functions.cpp` | 2048 (~8 KB)         | 2    | 1      | 30 ms periodica                              | `debug::kEnableBrakeTask` (true) | Usa el acelerador filtrado para posicionar los servos de freno por LEDC. |
+| `taskPidControl`         | `src/pid.cpp`            | 4096 (~16 KB)        | 4    | 0      | Notificacin RC (timeout 30 ms)             | `debug::kEnablePidTask` (true) | Cierra el lazo PID leyendo el snapshot RC y acciona el puente H con control de limites. |
+| `taskQuadDriveControl`   | `src/quad_functions.cpp` | 4096 (~16 KB)        | 3    | 1      | Notificacin RC (timeout 30 ms)             | `debug::kEnableDriveTask` (true) | Filtra acelerador, actualiza LEDC y servos de freno en una nica tarea coherente. |
 | `taskRcMonitor`          | `src/fs_ia6.cpp`         | 2048 (~8 KB)         | 1    | 1      | 100 ms periodica (`vTaskDelay`)              | `debug::kEnableRcTask` (false) | Solo loguea el snapshot compartido; ideal para calibracion. |
 | `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~16 KB)        | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
 | `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Maneja mensajes UART y reenvia a Telnet cuando `debug::kLogLoop` esta activo. |
@@ -36,11 +35,11 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 - Interfaz: utiliza `EnviarMensajeTelnet` para los avisos, compartiendo la UART/Telnet con el resto del sistema via `broadcastIf`.
 
 ### `taskRcSampler` (src/fs_ia6.cpp)
-- Configuracion: `FsIa6SamplerConfig` define periodo (10 ms) y logging. El stack de 2 KB es suficiente para cuatro lecturas `pulseIn`.
-- Bucle: captura GPIO0, GPIO2, GPIO4 y GPIO16 usando `readChannel`, normaliza a -100..100, marca timestamp y copia el resultado en un `RcSharedState` protegido por `portMUX`.
-- Prioridad: se ejecuta con prioridad 3 en el core 1 para garantizar que el snapshot se actualiza aun cuando PID/acelerador/freno esten ocupados.
-- Logging: si `debug::kLogRc` es true emite un resumen cada 100 ms evitando saturar Telnet.
-- Consumo: el resto de las tareas obtiene una copia consistente via `rcGetStateCopy` sin volver a invocar `pulseIn`.
+- Configuracion: `FsIa6SamplerConfig` define periodo de vigilancia (10 ms), umbral de datos frescos y timeout de recepcion RMT.
+- Bucle: inicializa cuatro canales RMT (GPIO0, GPIO2, GPIO4, GPIO16) a 1 us de resolucion, consume el ring buffer, normaliza a -100..100 y publica un `RcSharedState` protegido por `portMUX`.
+- Prioridad: corre con prioridad 4 en el nucleo 1; cada pulso nuevo dispara `xTaskNotifyGive` a los consumidores registrados mediante `rcRegisterConsumer`.
+- Logging: con `debug::kLogRc` envia un resumen cada 500 ms solamente cuando hay lecturas recientes, evitando ruido cuando el receptor esta desconectado.
+- Consumo: otras tareas obtienen el snapshot con `rcGetStateCopy` y dependen de las notificaciones para reaccionar con latencia baja sin saturar la CPU.
 
 ### `taskAs5600Monitor` (src/AS5600.cpp)
 - Configuracion: `AS5600MonitorConfig` comparte puntero al sensor, flag de log, periodo (30 ms) y `logInterval` (500 ms).
@@ -49,29 +48,25 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 - Disparador: temporizado via `vTaskDelayUntil`. No emplea interrupciones I2C ni callbacks.
 
 ### `taskPidControl` (src/pid.cpp)
-- Configuracion: `PidTaskConfig` incluye puntero al sensor, GPIO de referencia (GPIO16), calibres (centro, span, deadband, min duty), periodo (30 ms) y flag `autoInitBridge`.
-- Bucle: calcula `dt` con `micros()`. Si el delta es invalido (>1 s o <=0) usa el periodo nominal en segundos (`ticksToSeconds(period)`).
-- Lecturas: obtiene el ultimo `RcSharedState` con `rcGetStateCopy`. Si el snapshot esta vencido (>50 ms) fuerza consigna neutra antes de mapear a grados (`mapRcValueToAngle`). El AS5600 se lee en grados; si retorna negativo se detiene el puente y se reinicia el PID.
-- Actuacion: llama `bridge_turn_left/right` segun el signo; activa el puente H si estaba deshabilitado. Reinicia el integrador si golpea un final de carrera.
-- Protecciones: chequea `bridge_limit_left/right_active`. Los limites generan logs y mantienen latch para evitar spam.
+- Configuracion: `PidTaskConfig` incluye sensor, GPIO de referencia (GPIO16), parametros de calibracion, periodo nominal (30 ms), `logInterval` y flag `autoInitBridge`.
+- Bucle: espera notificaciones del sampler mediante `ulTaskNotifyTake` con timeout de 30 ms, calcula `dt` con `micros()` y, si el valor es invalido, cae al periodo nominal.
+- Monitoreo: registra un warning si `dt` supera en +10 ms el objetivo o si el ciclo demora >4 ms (`esp_timer_get_time`), evitando floods con cooldown de 500/1000 ms.
+- Lecturas: copia el `RcSharedState`; cuando los datos superan 50 ms sin actualizar fija el setpoint a cero antes de mapear a grados (`mapRcValueToAngle`). Cualquier lectura negativa del AS5600 resetea el PID y detiene el puente.
+- Actuacion: ejecuta `bridge_turn_left/right` segun el signo y habilita el puente H en caliente. Reinicia el integrador cuando un final de carrera bloquea el movimiento.
+- Protecciones: usa `bridge_limit_left/right_active` con latches para limitar el spam de logs y evitar daos mecanicos.
 - Cadencia: `vTaskDelayUntil` con periodo de 30 ms. Logs `[PID]` cada `PID_LOG_INTERVAL` (200 ms).
 
-### `taskQuadThrottleControl` (src/quad_functions.cpp)
-- Configuracion: `QuadThrottleTaskConfig` define el pin PWM (GPIO17), canal LEDC, frecuencia (20 kHz), resolucion (8 bits) y umbral de activacion (>15%). `autoInitHardware` habilita `initQuadThrottle` al arrancar la tarea.
-- Lectura: toma el `RcSharedState` y aplica `updateThrottleFilter`, que suaviza y auto-ajusta el offset en reposo. Si el snapshot esta viejo (>50 ms) usa 0 como entrada.
-- Accion: `quadThrottleUpdate` traduce el valor normalizado a un duty dentro de `[pwmMinDuty, pwmMaxDuty]`, saturando con `clampDuty`. El duty y el RC filtrado se loguean si cambia el valor.
-- Shared state: marca `g_lastThrottleUpdateTick` con el timestamp del snapshot para que el freno sepa si hay dato fresco.
-- Cadencia: `vTaskDelayUntil`, periodo 30 ms.
-
-### `taskQuadBrakeControl` (src/quad_functions.cpp)
-- Configuracion: `QuadBrakeTaskConfig` contiene servos en GPIO23/GPIO22 (LEDC 50 Hz, 16 bits) y angulos de reposo/freno. Arranca `initQuadBrake` si `autoInitHardware` es true.
-- Datos de entrada: reusa el ultimo valor filtrado por la tarea de acelerador si es reciente (`throttleDataFresh(pdMS_TO_TICKS(60))`); de lo contrario asume 0 y suelta el freno.
-- Accion: `quadBrakeUpdate` aplica el angulo de freno cuando el valor es menor al umbral (por defecto -15). `applyBrakeAngle` convierte a pulso microsegundos y a duty LEDC.
-- Cadencia: 30 ms via `vTaskDelayUntil`. Logs `[BRAKE]` cuando cambia RC o angulo.
+### `taskQuadDriveControl` (src/quad_functions.cpp)
+- Configuracion: `QuadDriveTaskConfig` agrupa la configuracion del LEDC de acelerador, los servos de freno y el flag `autoInitHardware` que llama `initQuadThrottle/Brake` al crear la tarea.
+- Disparo: espera notificaciones RC con `ulTaskNotifyTake` (timeout 30 ms) y utiliza `esp_timer_get_time` para medir la duracion de cada ciclo.
+- Flujo: ejecuta `updateThrottleFilter`, aplica el duty con `quadThrottleUpdate` y reutiliza el valor filtrado para calcular el angulo de freno mediante `quadBrakeUpdate`, garantizando coherencia entre ambos actuadores.
+- Datos viejos: si el snapshot supera 50 ms sin actualizar, fuerza 0 como entrada y cada 500 ms emite `[DRIVE] sin datos frescos` cuando el logging esta habilitado.
+- Logging: combina en un solo mensaje `[DRIVE]` los cambios de RC filtrado, duty y angulo de freno, reduciendo el ruido en Telnet.
+- Instrumentacion: reporta ciclos >2 ms una vez por segundo para detectar latencias anormales en la tarea de conduccion.
 
 ### `taskRcMonitor` (src/fs_ia6.cpp)
 - Activacion: controlada por `debug::kEnableRcTask`. Reutiliza el `RcSharedState` mediante `rcGetStateCopy`, sin tocar el hardware.
-- Funcion: detecta cambios respecto al ultimo estado y los difunde con `broadcastIf`. Útil para calibrar pulsos del receptor FS-iA6.
+- Funcion: detecta cambios respecto al ultimo estado y los difunde con `broadcastIf`. Util para calibrar pulsos del receptor FS-iA6.
 - Cadencia: 100 ms mediante `vTaskDelay`. Si no hay cambios, la tarea solo duerme.
 
 ### `taskBridgeTest` (src/h_bridge.cpp)
@@ -86,8 +81,8 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 
 ## Recursos compartidos y sincronizacion
 
-- `taskRcSampler` es la unica que invoca `readChannel`; el snapshot se protege con `g_rcStateMux` y se entrega con `rcGetStateCopy` para evitar lecturas duplicadas.
-- El valor filtrado del acelerador (`g_filteredThrottleValue`) y su marca temporal (`g_lastThrottleUpdateTick`) son `volatile` y se comparten entre las tareas de acelerador y freno.
+- `taskRcSampler` concentra las lecturas RMT y la entrega mediante `rcRegisterConsumer`/`rcGetStateCopy`; ninguna otra tarea toca los perifericos de captura.
+- El valor filtrado del acelerador (`g_filteredThrottleValue`) y su marca temporal (`g_lastThrottleUpdateTick`) siguen almacenados en `quad_functions.cpp` y ahora los consume exclusivamente `taskQuadDriveControl`.
 - Las funciones del puente H (`bridge_turn_*`, `bridge_stop`) no usan mutex; la coordinacion depende de las flags `debug::kEnablePidTask` y `debug::kEnableBridgeTask` para evitar tareas concurrentes sobre el mismo hardware.
 - Los logs emplean `broadcastIf` que multiplexa Serial y Telnet, manteniendo consistencia en el formato sin necesidad de colas.
 
@@ -96,8 +91,7 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 - `kEnableBridgeTask = false`
 - `kEnableRcTask = false`
 - `kEnablePidTask = true`
-- `kEnableThrottleTask = true`
-- `kEnableBrakeTask = true`
+- `kEnableDriveTask = true`
 - Flags de log (`kLog*`) controlan el volumen de mensajes por tarea sin recompilar el codigo.
 
 ## Periodos y constantes relevantes (src/main.cpp)
@@ -106,8 +100,7 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 - `RC_SAMPLER_PERIOD` = 10 ms; `RC_MONITOR_PERIOD` = 100 ms
 - `AS5600_PERIOD` = 30 ms; `AS5600_LOG_INTERVAL` = 500 ms
 - `PID_PERIOD` = 30 ms; `PID_LOG_INTERVAL` = 200 ms
-- `THROTTLE_PERIOD` = 30 ms
-- `BRAKE_PERIOD` = 30 ms
+- `THROTTLE_PERIOD` = 30 ms (Drive)
 
 Estos valores se inyectan en los `*_TaskConfig` y definen la cadencia con la que `vTaskDelay` o `vTaskDelayUntil` libera la CPU.
 
@@ -126,7 +119,7 @@ Estos valores se inyectan en los `*_TaskConfig` y definen la cadencia con la que
 
 ## Diagnostico y mejores practicas
 
-- Activa `debug::kLogPid` y `debug::kLogThrottle` cuando necesites validar el lazo y el acelerador; desactivalos para vuelo normal.
+- Activa `debug::kLogPid` y `debug::kLogDrive` cuando necesites validar el lazo y el acelerador; desactivalos para vuelo normal.
 - Si `taskAs5600Monitor` reporta `connected=NO`, revisa VCC, GND y pull-ups del bus I2C antes de habilitar el PID.
 - Antes de usar el PID, puedes habilitar temporalmente `taskRcMonitor` para asegurarte de que los pulsos del receptor lleguen dentro del rango esperado.
 - No ejecutes `taskBridgeTest` mientras el PID este activo; ambas tareas usan el puente H sin mutex y se interferirian mutuamente.
