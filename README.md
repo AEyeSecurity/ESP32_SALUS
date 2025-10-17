@@ -18,7 +18,7 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 | `taskOtaTelnet`          | `src/ota_telnet.cpp`     | 4096 (~16 KB)        | 3    | 0      | 20 ms periodica (`vTaskDelayUntil`)         | Siempre                  | Ejecuta `ArduinoOTA.handle()` y heartbeat Telnet cada 5 s si se habilita. |
 | `taskRcSampler`          | `src/fs_ia6.cpp`         | 2048 (~8 KB)         | 4    | 1      | Notificacin RMT (timeout 10 ms)            | Siempre                  | Usa RMT para medir pulsos del FS-iA6, actualiza `RcSharedState` y despierta consumidores. |
 | `taskAs5600Monitor`      | `src/AS5600.cpp`         | 3072 (~12 KB)        | 1    | 1      | 30 ms periodica, log cada 500 ms            | Siempre                  | Mide estado del AS5600 y opcionalmente reporta estado de iman y angulo. |
-| `taskPidControl`         | `src/pid.cpp`            | 4096 (~16 KB)        | 4    | 0      | Notificacin RC (timeout 30 ms)             | `debug::kEnablePidTask` (true) | Cierra el lazo PID leyendo el snapshot RC y acciona el puente H con control de limites. |
+| `taskPidControl`         | `src/pid.cpp`            | 4096 (~16 KB)        | 4    | 0      | Notificacin RC (timeout 30 ms)             | `debug::kEnablePidTask` (true) | Cierra el lazo PID, incluye estado de calibracion y protege limites via finales de carrera. |
 | `taskQuadDriveControl`   | `src/quad_functions.cpp` | 4096 (~16 KB)        | 3    | 1      | Notificacin RC (timeout 30 ms)             | `debug::kEnableDriveTask` (true) | Filtra acelerador, actualiza LEDC y servos de freno en una nica tarea coherente. |
 | `taskRcMonitor`          | `src/fs_ia6.cpp`         | 2048 (~8 KB)         | 1    | 1      | 100 ms periodica (`vTaskDelay`)              | `debug::kEnableRcTask` (false) | Solo loguea el snapshot compartido; ideal para calibracion. |
 | `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~16 KB)        | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
@@ -48,13 +48,10 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 - Disparador: temporizado via `vTaskDelayUntil`. No emplea interrupciones I2C ni callbacks.
 
 ### `taskPidControl` (src/pid.cpp)
-- Configuracion: `PidTaskConfig` incluye sensor, GPIO de referencia (GPIO16), parametros de calibracion, periodo nominal (30 ms), `logInterval` y flag `autoInitBridge`.
-- Bucle: espera notificaciones del sampler mediante `ulTaskNotifyTake` con timeout de 30 ms, calcula `dt` con `micros()` y, si el valor es invalido, cae al periodo nominal.
-- Monitoreo: registra un warning si `dt` supera en +10 ms el objetivo o si el ciclo demora >4 ms (`esp_timer_get_time`), evitando floods con cooldown de 500/1000 ms.
-- Lecturas: copia el `RcSharedState`; cuando los datos superan 50 ms sin actualizar fija el setpoint a cero antes de mapear a grados (`mapRcValueToAngle`). Cualquier lectura negativa del AS5600 resetea el PID y detiene el puente.
-- Actuacion: ejecuta `bridge_turn_left/right` segun el signo y habilita el puente H en caliente. Reinicia el integrador cuando un final de carrera bloquea el movimiento.
-- Protecciones: usa `bridge_limit_left/right_active` con latches para limitar el spam de logs y evitar daos mecanicos.
-- Cadencia: `vTaskDelayUntil` con periodo de 30 ms. Logs `[PID]` cada `PID_LOG_INTERVAL` (200 ms).
+- Calibracion: responde al comando Telnet `steer.calibrate` lanzando una FSM (mover izquierda → soltar → mover derecha → soltar) que barre los finales de carrera con un duty moderado y registra los angulos reales del AS5600.
+- Offset asimetrico: los limites y el centro ajustado se guardan en un estado compartido (`steering_calibration_*`). El comando `steer.offset <deg>` permite compensar mecanica con mas recorrido hacia un lado.
+- Control: cuando no hay calibracion en curso, toma el `RcSharedState`, mapea setpoint segun los limites calibrados y ejecuta el PID que acciona `bridge_turn_left/right`. El PID se resetea al detectar lecturas invalidas o bloqueos por finales.
+- Seguridad y logs: monitorea dt (avisos si excede umbral), reporta centro ajustado en cada log `[PID]` y detiene el puente ante datos viejos o limites activos, evitando esfuerzos contra los topes.
 
 ### `taskQuadDriveControl` (src/quad_functions.cpp)
 - Configuracion: `QuadDriveTaskConfig` agrupa la configuracion del LEDC de acelerador, los servos de freno y el flag `autoInitHardware` que llama `initQuadThrottle/Brake` al crear la tarea.
@@ -78,6 +75,15 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 ### `loop()` (src/main.cpp)
 - Corre en el contexto de Arduino (core 1). Si `debug::kLogLoop` es true, reenvia cualquier mensaje recibido por UART al Telnet (`EnviarMensajeTelnet`).
 - Para liberar CPU cede 50 ms con `vTaskDelay(pdMS_TO_TICKS(50))`.
+
+## Calibracion de direccion via Telnet
+
+1. Conectate al AP `ESPcuatri` (password `teamcit2024` por defecto) y abre una sesion Telnet contra el puerto 23 (ej: `telnet 192.168.4.1 23`).
+2. Ejecuta `steer.help` para ver los comandos disponibles y `steer.status` para revisar los limites actuales. Si nunca calibraste se mostraran los valores por defecto definidos en firmware.
+3. Lanza `steer.calibrate`. El PID entra en modo de calibracion, mueve la direccion hacia la izquierda hasta activar el final de carrera, luego hacia la derecha. Durante el proceso veras logs `[PID] Calibracion ...`.
+4. Cuando termine, vuelve a consultar `steer.status` para confirmar los nuevos limites (`left/right`) y el centro ajustado. El campo `offsetRange` indica el desplazamiento permitido sin tocar los topes.
+5. Si la mecanica es asimetrica, aplica un corrimiento con `steer.offset <grados>` (ejemplo `steer.offset -2.5`). El valor real aplicado se devuelve junto al rango permitido.
+6. Repite `steer.status` para validar el offset final. Desde ese momento el mapeo RC usa los limites calibrados y el PID mantiene el centro compensado cuando el input vuelve a cero.
 
 ## Recursos compartidos y sincronizacion
 

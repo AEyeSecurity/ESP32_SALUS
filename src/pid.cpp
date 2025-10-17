@@ -10,6 +10,7 @@
 #include "fs_ia6.h"
 #include "h_bridge.h"
 #include "ota_telnet.h"
+#include "steering_calibration.h"
 
 constexpr float kFullRotationDegrees = 360.0f;  // Degrees in one full turn for normalization
 
@@ -56,6 +57,13 @@ float ticksToSeconds(TickType_t ticks) {
   const float tickPeriodMs = static_cast<float>(portTICK_PERIOD_MS);
   return (static_cast<float>(ticks) * tickPeriodMs) / 1000.0f;
 }
+}  // namespace
+
+namespace {
+constexpr uint8_t kCalibrationDutyPercent = 35;
+constexpr uint8_t kCalibrationReleaseDutyPercent = 20;
+const TickType_t kCalibrationTimeout = pdMS_TO_TICKS(4000);
+const TickType_t kCalibrationReleaseDuration = pdMS_TO_TICKS(250);
 }  // namespace
 
 PidController::PidController()
@@ -166,9 +174,41 @@ float computeAngleError(float setpointDeg, float measurementDeg) {
   return wrapAngleDegrees(normalizedSetpoint - normalizedMeasurement);
 }
 
-float mapRcValueToAngle(int rcValue, float centerDeg, float spanDeg) {
-  const float rawTarget = centerDeg + (spanDeg * static_cast<float>(rcValue) / 100.0f);
-  return normalizeAngleDegrees(rawTarget);
+float mapRcValueToAngle(int rcValue,
+                        const SteeringCalibrationData& calibration,
+                        float fallbackCenterDeg,
+                        float fallbackSpanDeg) {
+  const float normalizedFallbackCenter = normalizeAngleDegrees(fallbackCenterDeg);
+  float center = normalizedFallbackCenter;
+  float leftLimit = normalizeAngleDegrees(fallbackCenterDeg - fallbackSpanDeg);
+  float rightLimit = normalizeAngleDegrees(fallbackCenterDeg + fallbackSpanDeg);
+  bool useCalibration = calibration.initialized;
+
+  if (useCalibration) {
+    center = normalizeAngleDegrees(calibration.adjustedCenterDeg);
+    leftLimit = normalizeAngleDegrees(calibration.leftLimitDeg);
+    rightLimit = normalizeAngleDegrees(calibration.rightLimitDeg);
+  }
+
+  float rcNorm = clampf(static_cast<float>(rcValue), -100.0f, 100.0f) / 100.0f;
+  float leftSpan = useCalibration ? fabsf(wrapAngleDegrees(center - leftLimit)) : fabsf(fallbackSpanDeg);
+  float rightSpan =
+      useCalibration ? fabsf(wrapAngleDegrees(rightLimit - center)) : fabsf(fallbackSpanDeg);
+
+  if (leftSpan < 0.001f) {
+    leftSpan = fabsf(fallbackSpanDeg);
+  }
+  if (rightSpan < 0.001f) {
+    rightSpan = fabsf(fallbackSpanDeg);
+  }
+
+  float target = center;
+  if (rcNorm > 0.0f) {
+    target = center + rightSpan * rcNorm;
+  } else if (rcNorm < 0.0f) {
+    target = center + leftSpan * rcNorm;
+  }
+  return normalizeAngleDegrees(target);
 }
 
 void taskPidControl(void* parameter) {
@@ -206,6 +246,13 @@ void taskPidControl(void* parameter) {
   TickType_t lastDtWarningTick = 0;
   TickType_t lastRuntimeWarningTick = 0;
 
+  enum class CalibrationState { Idle, MoveLeft, ReleaseLeft, MoveRight, ReleaseRight };
+  CalibrationState calibrationState = CalibrationState::Idle;
+  TickType_t calibrationStateStart = 0;
+  float calibrationLeftAngleDeg = 0.0f;
+  float calibrationRightAngleDeg = 0.0f;
+  bool calibrationActive = false;
+
   for (;;) {
     const int64_t iterationStartUs = esp_timer_get_time();
     const uint32_t notificationCount = ulTaskNotifyTake(pdTRUE, period);
@@ -234,19 +281,148 @@ void taskPidControl(void* parameter) {
       }
     }
 
+    if (!calibrationActive && steeringCalibrationConsumeRequest()) {
+      calibrationActive = true;
+      calibrationState = CalibrationState::MoveLeft;
+      calibrationStateStart = nowTicks;
+      calibrationLeftAngleDeg = 0.0f;
+      calibrationRightAngleDeg = 0.0f;
+      cfg->controller->reset();
+      if (!bridgeEnabled) {
+        enable_bridge_h();
+        bridgeEnabled = true;
+      }
+      broadcastIf(true, "[PID] Iniciando calibracion de limites de direccion");
+    }
+
     RcSharedState rcSnapshot{};
     const bool rcValid = rcGetStateCopy(rcSnapshot);
     if (!rcValid || !rcSnapshot.valid || (nowTicks - rcSnapshot.lastUpdateTick) > pdMS_TO_TICKS(50)) {
       rcSnapshot.steering = 0;
     }
     const int rcValue = rcSnapshot.steering;
-    const float targetDeg = mapRcValueToAngle(rcValue, cfg->centerDeg, cfg->spanDeg);
     const float measuredDeg = cfg->sensor->getAngleDegrees();
 
     const bool limitLeftActive = bridge_limit_left_active();
     const bool limitRightActive = bridge_limit_right_active();
 
     const bool shouldLog = cfg->log && (logInterval == 0 || (nowTicks - lastLog) >= logInterval);
+
+    if (calibrationActive) {
+      bool keepCalibrating = true;
+      switch (calibrationState) {
+        case CalibrationState::MoveLeft: {
+          if (measuredDeg < 0.0f) {
+            broadcastIf(true, "[PID] Calibracion abortada: lectura AS5600 invalida");
+            keepCalibrating = false;
+            break;
+          }
+          bridge_turn_left(kCalibrationDutyPercent);
+          if (limitLeftActive) {
+            calibrationLeftAngleDeg = measuredDeg;
+            bridge_stop();
+            calibrationState = CalibrationState::ReleaseLeft;
+            calibrationStateStart = nowTicks;
+            String msg = "[PID] Calibracion: limite izquierdo registrado en ";
+            msg += String(calibrationLeftAngleDeg, 2);
+            msg += "deg";
+            broadcastIf(true, msg);
+          } else if ((nowTicks - calibrationStateStart) >= kCalibrationTimeout) {
+            broadcastIf(true, "[PID] Calibracion abortada: timeout alcanzando limite izquierdo");
+            keepCalibrating = false;
+          }
+          break;
+        }
+        case CalibrationState::ReleaseLeft: {
+          if (!limitLeftActive && (nowTicks - calibrationStateStart) >= pdMS_TO_TICKS(50)) {
+            bridge_stop();
+            calibrationState = CalibrationState::MoveRight;
+            calibrationStateStart = nowTicks;
+            String msg = "[PID] Calibracion: iniciando busqueda de limite derecho";
+            broadcastIf(true, msg);
+          } else if ((nowTicks - calibrationStateStart) >= kCalibrationReleaseDuration) {
+            bridge_stop();
+            calibrationState = CalibrationState::MoveRight;
+            calibrationStateStart = nowTicks;
+          } else {
+            bridge_turn_right(kCalibrationReleaseDutyPercent);
+          }
+          break;
+        }
+        case CalibrationState::MoveRight: {
+          if (measuredDeg < 0.0f) {
+            broadcastIf(true, "[PID] Calibracion abortada: lectura AS5600 invalida");
+            keepCalibrating = false;
+            break;
+          }
+          bridge_turn_right(kCalibrationDutyPercent);
+          if (limitRightActive) {
+            calibrationRightAngleDeg = measuredDeg;
+            bridge_stop();
+            calibrationState = CalibrationState::ReleaseRight;
+            calibrationStateStart = nowTicks;
+            String msg = "[PID] Calibracion: limite derecho registrado en ";
+            msg += String(calibrationRightAngleDeg, 2);
+            msg += "deg";
+            broadcastIf(true, msg);
+          } else if ((nowTicks - calibrationStateStart) >= kCalibrationTimeout) {
+            broadcastIf(true, "[PID] Calibracion abortada: timeout alcanzando limite derecho");
+            keepCalibrating = false;
+          }
+          break;
+        }
+        case CalibrationState::ReleaseRight: {
+          if (!limitRightActive && (nowTicks - calibrationStateStart) >= pdMS_TO_TICKS(50)) {
+            bridge_stop();
+            if (measuredDeg >= 0.0f) {
+              steeringCalibrationApply(calibrationLeftAngleDeg, calibrationRightAngleDeg);
+              String msg = "[PID] Calibracion completa. Izq=";
+              msg += String(calibrationLeftAngleDeg, 2);
+              msg += "deg, Der=";
+              msg += String(calibrationRightAngleDeg, 2);
+              msg += "deg";
+              broadcastIf(true, msg);
+            } else {
+              broadcastIf(true, "[PID] Calibracion completa pero sin lectura de angulo valida");
+            }
+            keepCalibrating = false;
+          } else if ((nowTicks - calibrationStateStart) >= kCalibrationReleaseDuration) {
+            bridge_stop();
+            if (measuredDeg >= 0.0f) {
+              steeringCalibrationApply(calibrationLeftAngleDeg, calibrationRightAngleDeg);
+              String msg = "[PID] Calibracion completa. Izq=";
+              msg += String(calibrationLeftAngleDeg, 2);
+              msg += "deg, Der=";
+              msg += String(calibrationRightAngleDeg, 2);
+              msg += "deg";
+              broadcastIf(true, msg);
+            } else {
+              broadcastIf(true, "[PID] Calibracion completa pero sin lectura de angulo valida");
+            }
+            keepCalibrating = false;
+          } else {
+            bridge_turn_left(kCalibrationReleaseDutyPercent);
+          }
+          break;
+        }
+        case CalibrationState::Idle:
+        default:
+          keepCalibrating = false;
+          break;
+      }
+
+      if (!keepCalibrating) {
+        bridge_stop();
+        calibrationActive = false;
+        calibrationState = CalibrationState::Idle;
+        calibrationStateStart = 0;
+        cfg->controller->reset();
+      }
+      continue;
+    }
+
+    const SteeringCalibrationData calibrationData = steeringCalibrationSnapshot();
+    const float targetDeg = mapRcValueToAngle(rcValue, calibrationData, cfg->centerDeg, cfg->spanDeg);
 
     bool skipControl = false;
     if (measuredDeg < 0.0f) {
@@ -317,6 +493,9 @@ void taskPidControl(void* parameter) {
         msg.reserve(160);
         msg += "[PID] sensor=";
         msg += String(measuredDeg, 2);
+        msg += "deg";
+        msg += " center=";
+        msg += String(calibrationData.adjustedCenterDeg, 2);
         msg += "deg";
         msg += " rcGPIO16=";
         msg += rcValue;

@@ -7,6 +7,7 @@
 #include <freertos/task.h>
 #include "freertos_utils.h"
 #include "pid.h"
+#include "steering_calibration.h"
 #include "quad_functions.h"
 
 const char* ssid = "ESPcuatri";
@@ -145,6 +146,8 @@ void setup() {
   g_pidController.setOutputLimits(-100.0f, 100.0f);
   g_pidController.setIntegralLimits(-PID_INTEGRAL_LIMIT, PID_INTEGRAL_LIMIT);
   g_pidController.reset();
+
+  steeringCalibrationInit(PID_CENTER_DEG, PID_SPAN_DEG);
 
   broadcastIf(
       debug::kLogRc,
