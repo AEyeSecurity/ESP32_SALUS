@@ -87,7 +87,7 @@ void taskRcSampler(void* parameter) {
 
     if (log) {
       const TickType_t now = snapshot.lastUpdateTick;
-      if (now - g_lastRcLogTick >= pdMS_TO_TICKS(100)) {
+      if (now - g_lastRcLogTick >= pdMS_TO_TICKS(500)) {
         String rcMsg = "RC sampler -> GPIO0: " + String(snapshot.ch0) + " | GPIO2: " + String(snapshot.ch2) +
                        " | acelerador GPIO4: " + String(snapshot.throttle) +
                        " | direccion GPIO16: " + String(snapshot.steering);

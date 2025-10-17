@@ -93,13 +93,16 @@ int updateThrottleFilter(int rawValue) {
   }
   if (!g_filterInitialized) {
     g_filteredThrottleValue = rawValue;
-    g_filterOffset = rawValue;
+    if (abs(rawValue) <= 15) {
+      g_filterOffset = rawValue;
+    } else {
+      g_filterOffset = 0;
+    }
     g_filterOffsetReady = true;
     g_filterInitialized = true;
   } else {
     g_filteredThrottleValue = (g_filteredThrottleValue * 2 + rawValue) / 3;
-    const int deviation = g_filteredThrottleValue - g_filterOffset;
-    if (abs(deviation) < 8) {
+    if (abs(rawValue) < 15) {
       g_filterOffset = (g_filterOffset * 3 + g_filteredThrottleValue) / 4;
     }
   }
@@ -260,18 +263,21 @@ void taskQuadThrottleControl(void* parameter) {
   TickType_t lastWake = xTaskGetTickCount();
   int lastRcValue = 9999;
   int lastDutyReported = -1;
+  TickType_t lastStaleLog = 0;
 
   for (;;) {
     RcSharedState rcSnapshot{};
     const bool rcValid = rcGetStateCopy(rcSnapshot);
     const TickType_t sampleTick = xTaskGetTickCount();
-    int rawValue = 0;
-    if (rcValid && rcSnapshot.valid && (sampleTick - rcSnapshot.lastUpdateTick) <= pdMS_TO_TICKS(50)) {
-      rawValue = rcSnapshot.throttle;
-    }
+    const TickType_t snapshotTick = rcSnapshot.lastUpdateTick;
+    const bool snapshotFresh =
+        rcValid && rcSnapshot.valid && snapshotTick != 0 && (sampleTick - snapshotTick) <= pdMS_TO_TICKS(50);
+    int rawValue = snapshotFresh ? rcSnapshot.throttle : 0;
 
     const int rcValue = updateThrottleFilter(rawValue);
-    g_lastThrottleUpdateTick = (rcValid && rcSnapshot.valid) ? rcSnapshot.lastUpdateTick : sampleTick;
+    if (snapshotFresh) {
+      g_lastThrottleUpdateTick = snapshotTick;
+    }
     const int duty = quadThrottleUpdate(rcValue);
 
     if (cfg->log && (rcValue != lastRcValue || duty != lastDutyReported)) {
@@ -283,9 +289,27 @@ void taskQuadThrottleControl(void* parameter) {
       msg += duty;
       msg += "/";
       msg += static_cast<int>(g_maxDuty);
+      if (snapshotFresh) {
+        msg += " raw=";
+        msg += rawValue;
+      } else {
+        msg += " raw=STALE";
+      }
+      msg += " ageMs=";
+      msg += static_cast<int>((sampleTick - snapshotTick) * portTICK_PERIOD_MS);
       broadcastIf(true, msg);
       lastRcValue = rcValue;
       lastDutyReported = duty;
+    }
+
+    if (cfg->log && !snapshotFresh) {
+      if ((sampleTick - lastStaleLog) >= pdMS_TO_TICKS(500)) {
+        String warn = "[THROTTLE] sin datos frescos del RC (>50ms); usando 0";
+        broadcastIf(true, warn);
+        lastStaleLog = sampleTick;
+      }
+    } else {
+      lastStaleLog = sampleTick;
     }
 
     vTaskDelayUntil(&lastWake, period);

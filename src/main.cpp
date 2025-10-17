@@ -39,7 +39,7 @@ constexpr uint8_t THROTTLE_PWM_RESOLUTION = 8;
 
 constexpr double kArduinoPwmReferenceVolts = 5.0;
 constexpr double kEsp32PwmReferenceVolts = 3.3;
-constexpr int kArduinoThrottlePwmMin = 40;
+constexpr int kArduinoThrottlePwmMin = 60;
 constexpr int kArduinoThrottlePwmMax = 150;
 
 constexpr int scaleAnalogWriteValue(int arduinoValue) {
@@ -81,7 +81,7 @@ constexpr bool kLogRc = true;
 constexpr bool kLogAs5600 = false;
 constexpr bool kLogPid = false;
 constexpr bool kLogThrottle = false;
-constexpr bool kLogBrake = false;
+constexpr bool kLogBrake = true;
 constexpr bool kEnableBridgeTask = false;
 constexpr bool kEnableRcTask = false;
 constexpr bool kEnablePidTask = true;
