@@ -34,23 +34,14 @@ void initQuadBrake(const QuadBrakeConfig& config);
 void quadBrakeUpdate(int rcValue);
 void quadBrakeRelease();
 
-struct QuadThrottleTaskConfig {
+struct QuadDriveTaskConfig {
   QuadThrottleConfig throttle;
-  uint8_t rcInputPin;
-  bool autoInitHardware;
-  TickType_t period;
-  bool log;
-};
-
-struct QuadBrakeTaskConfig {
   QuadBrakeConfig brake;
-  uint8_t rcInputPin;
   bool autoInitHardware;
   TickType_t period;
   bool log;
 };
 
-void taskQuadThrottleControl(void* parameter);
-void taskQuadBrakeControl(void* parameter);
+void taskQuadDriveControl(void* parameter);
 
 #endif  // QUAD_FUNCTIONS_H

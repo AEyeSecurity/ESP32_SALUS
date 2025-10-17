@@ -17,8 +17,7 @@ constexpr uint16_t STACK_BRIDGE = 4096;
 constexpr uint16_t STACK_RC = 2048;
 constexpr uint16_t STACK_AS5600 = 3072;
 constexpr uint16_t STACK_PID = 4096;
-constexpr uint16_t STACK_THROTTLE = 2048;
-constexpr uint16_t STACK_BRAKE = 2048;
+constexpr uint16_t STACK_DRIVE = 4096;
 
 constexpr int AS5600_SDA_PIN = 25;
 constexpr int AS5600_SCL_PIN = 26;
@@ -70,23 +69,20 @@ constexpr TickType_t AS5600_LOG_INTERVAL = pdMS_TO_TICKS(500);
 constexpr TickType_t PID_PERIOD = pdMS_TO_TICKS(30);
 constexpr TickType_t PID_LOG_INTERVAL = pdMS_TO_TICKS(200);
 constexpr TickType_t THROTTLE_PERIOD = pdMS_TO_TICKS(30);
-constexpr TickType_t BRAKE_PERIOD = pdMS_TO_TICKS(30);
 
 namespace debug {
 constexpr bool kLogSystem = false;
 constexpr bool kLogOta = false;
 constexpr bool kLogBridge = false;
 constexpr bool kLogLoop = false;
-constexpr bool kLogRc = true;
+constexpr bool kLogRc = false;
 constexpr bool kLogAs5600 = false;
-constexpr bool kLogPid = false;
-constexpr bool kLogThrottle = false;
-constexpr bool kLogBrake = true;
+constexpr bool kLogPid = true;
+constexpr bool kLogDrive = false;
 constexpr bool kEnableBridgeTask = false;
 constexpr bool kEnableRcTask = false;
 constexpr bool kEnablePidTask = true;
-constexpr bool kEnableThrottleTask = true;
-constexpr bool kEnableBrakeTask = true;
+constexpr bool kEnableDriveTask = true;
 }  // namespace debug
 
 static AS5600 g_as5600;
@@ -94,7 +90,11 @@ static PidController g_pidController;
 
 static OtaTelnetTaskConfig g_otaConfig = {debug::kLogOta, pdMS_TO_TICKS(5000), OTA_PERIOD};
 static HBridgeTaskConfig g_bridgeConfig = {debug::kLogBridge};
-static FsIa6SamplerConfig g_rcSamplerConfig = {debug::kLogRc, RC_SAMPLER_PERIOD};
+static FsIa6SamplerConfig g_rcSamplerConfig = {
+    debug::kLogRc,
+    RC_SAMPLER_PERIOD,
+    pdMS_TO_TICKS(75),
+    pdMS_TO_TICKS(5)};
 static FsIa6TaskConfig g_rcConfig = {debug::kLogRc, RC_MONITOR_PERIOD};
 static AS5600MonitorConfig g_as5600TaskConfig = {&g_as5600, debug::kLogAs5600, AS5600_PERIOD, AS5600_LOG_INTERVAL};
 static PidTaskConfig g_pidTaskConfig = {
@@ -109,7 +109,7 @@ static PidTaskConfig g_pidTaskConfig = {
     PID_LOG_INTERVAL,
     debug::kLogPid,
     true};
-static QuadThrottleTaskConfig g_throttleTaskConfig = {
+static QuadDriveTaskConfig g_driveTaskConfig = {
     {
         THROTTLE_PWM_PIN,
         THROTTLE_LEDC_CHANNEL,
@@ -119,11 +119,6 @@ static QuadThrottleTaskConfig g_throttleTaskConfig = {
         THROTTLE_PWM_MAX_DUTY,
         THROTTLE_THRESHOLD,
     },
-    kRcThrottlePin,
-    true,
-    THROTTLE_PERIOD,
-    debug::kLogThrottle};
-static QuadBrakeTaskConfig g_brakeTaskConfig = {
     {
         BRAKE_SERVO_PIN_A,
         BRAKE_SERVO_PIN_B,
@@ -135,10 +130,9 @@ static QuadBrakeTaskConfig g_brakeTaskConfig = {
         BRAKE_APPLY_ANGLE,
         BRAKE_THRESHOLD,
     },
-    kRcThrottlePin,
-    false,
-    BRAKE_PERIOD,
-    debug::kLogBrake};
+    true,
+    THROTTLE_PERIOD,
+    debug::kLogDrive};
 
 void setup() {
   InicializaUart();
@@ -161,8 +155,6 @@ void setup() {
   pinMode(kRcThrottlePin, INPUT);
   pinMode(kRcSteeringPin, INPUT);
 
-  initQuadBrake(g_brakeTaskConfig.brake);
-
   if (debug::kEnableBridgeTask) {
     init_h_bridge();
     broadcastIf(debug::kLogBridge, "Inicializado H-bridge (pins 21 enable, 19 left PWM, 18 right PWM)");
@@ -172,15 +164,12 @@ void setup() {
   if (debug::kEnableBridgeTask) {
     startTaskPinned(taskBridgeTest, "BridgeTest", STACK_BRIDGE, &g_bridgeConfig, 2, nullptr, 1);
   }
-  startTaskPinned(taskRcSampler, "RCSampler", STACK_RC, &g_rcSamplerConfig, 3, nullptr, 1);
+  startTaskPinned(taskRcSampler, "RCSampler", STACK_RC, &g_rcSamplerConfig, 4, nullptr, 1);
   if (debug::kEnableRcTask) {
     startTaskPinned(taskRcMonitor, "RCMonitor", STACK_RC, &g_rcConfig, 1, nullptr, 1);
   }
-  if (debug::kEnableThrottleTask) {
-    startTaskPinned(taskQuadThrottleControl, "Throttle", STACK_THROTTLE, &g_throttleTaskConfig, 2, nullptr, 1);
-  }
-  if (debug::kEnableBrakeTask) {
-    startTaskPinned(taskQuadBrakeControl, "Brake", STACK_BRAKE, &g_brakeTaskConfig, 2, nullptr, 1);
+  if (debug::kEnableDriveTask) {
+    startTaskPinned(taskQuadDriveControl, "Drive", STACK_DRIVE, &g_driveTaskConfig, 3, nullptr, 1);
   }
 
   g_as5600.begin(AS5600_SDA_PIN, AS5600_SCL_PIN);
@@ -192,7 +181,7 @@ void setup() {
       broadcastIf(true, "[PID] BridgeTest habilitado; omitiendo tarea PID para evitar conflictos");
     } else {
       broadcastIf(debug::kLogPid, "[PID] Tarea PID iniciada");
-      startTaskPinned(taskPidControl, "PID", STACK_PID, &g_pidTaskConfig, 2, nullptr, 1);
+      startTaskPinned(taskPidControl, "PID", STACK_PID, &g_pidTaskConfig, 4, nullptr, 0);
     }
   }
 }
