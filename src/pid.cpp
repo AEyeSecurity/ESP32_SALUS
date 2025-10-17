@@ -4,6 +4,8 @@
 
 #include <freertos/task.h>
 
+#include <esp_timer.h>
+
 #include "AS5600.h"
 #include "fs_ia6.h"
 #include "h_bridge.h"
@@ -177,9 +179,13 @@ void taskPidControl(void* parameter) {
     return;
   }
 
-  const TickType_t period = (cfg->period > 0) ? cfg->period : pdMS_TO_TICKS(20);
+  const TickType_t period = (cfg->period > 0) ? cfg->period : pdMS_TO_TICKS(30);
   const TickType_t logInterval = (cfg->logInterval > 0) ? cfg->logInterval : pdMS_TO_TICKS(200);
   TickType_t lastLog = xTaskGetTickCount();
+
+  if (!rcRegisterConsumer(xTaskGetCurrentTaskHandle())) {
+    broadcastIf(true, "[PID] No se pudo registrar la tarea para notificaciones RC");
+  }
 
   if (cfg->autoInitBridge) {
     init_h_bridge();
@@ -188,114 +194,157 @@ void taskPidControl(void* parameter) {
 
   bool bridgeEnabled = cfg->autoInitBridge;
   uint32_t lastMicros = micros();
-  TickType_t lastWake = xTaskGetTickCount();
   bool leftLimitLatched = false;
   bool rightLimitLatched = false;
+  float expectedPeriodSeconds = ticksToSeconds(period);
+  if (expectedPeriodSeconds <= 0.0f) {
+    expectedPeriodSeconds = 0.001f;
+  }
+  const float dtOverrunThreshold = expectedPeriodSeconds + 0.010f;
+  const TickType_t dtWarningCooldown = pdMS_TO_TICKS(500);
+  const TickType_t runtimeWarningCooldown = pdMS_TO_TICKS(1000);
+  TickType_t lastDtWarningTick = 0;
+  TickType_t lastRuntimeWarningTick = 0;
 
   for (;;) {
+    const int64_t iterationStartUs = esp_timer_get_time();
+    const uint32_t notificationCount = ulTaskNotifyTake(pdTRUE, period);
+    (void)notificationCount;
+
     const uint32_t nowMicros = micros();
     float dtSeconds = computeDtSeconds(lastMicros, nowMicros);
     lastMicros = nowMicros;
 
+    TickType_t nowTicks = xTaskGetTickCount();
     if (dtSeconds <= 0.0f || dtSeconds > 1.0f) {
-      dtSeconds = ticksToSeconds(period);
+      dtSeconds = expectedPeriodSeconds;
     }
 
-    const int rcValue = readChannel(cfg->rcPin, -100, 100, 0);
+    if (dtSeconds > dtOverrunThreshold) {
+      if ((nowTicks - lastDtWarningTick) >= dtWarningCooldown) {
+        String warn;
+        warn.reserve(80);
+        warn += "[PID] dt=";
+        warn += dtSeconds * 1000.0f;
+        warn += "ms (objetivo ";
+        warn += expectedPeriodSeconds * 1000.0f;
+        warn += "ms)";
+        broadcastIf(true, warn);
+        lastDtWarningTick = nowTicks;
+      }
+    }
+
+    RcSharedState rcSnapshot{};
+    const bool rcValid = rcGetStateCopy(rcSnapshot);
+    if (!rcValid || !rcSnapshot.valid || (nowTicks - rcSnapshot.lastUpdateTick) > pdMS_TO_TICKS(50)) {
+      rcSnapshot.steering = 0;
+    }
+    const int rcValue = rcSnapshot.steering;
     const float targetDeg = mapRcValueToAngle(rcValue, cfg->centerDeg, cfg->spanDeg);
     const float measuredDeg = cfg->sensor->getAngleDegrees();
 
     const bool limitLeftActive = bridge_limit_left_active();
     const bool limitRightActive = bridge_limit_right_active();
 
-    TickType_t nowTicks = xTaskGetTickCount();
     const bool shouldLog = cfg->log && (logInterval == 0 || (nowTicks - lastLog) >= logInterval);
 
+    bool skipControl = false;
     if (measuredDeg < 0.0f) {
       cfg->controller->reset();
       bridge_stop();
+      skipControl = true;
       if (shouldLog) {
         broadcastIf(true, "[PID] Lectura AS5600 invalida, deteniendo puente H");
         lastLog = nowTicks;
       }
-      vTaskDelayUntil(&lastWake, period);
-      continue;
     }
 
-    const float errorDeg = computeAngleError(targetDeg, measuredDeg);
-    float outputPercent = cfg->controller->update(errorDeg, dtSeconds);
-    outputPercent = applyDeadband(outputPercent, cfg->deadbandPercent);
-    outputPercent = applyMinActive(outputPercent, cfg->minActivePercent);
-    outputPercent = clampf(outputPercent, -100.0f, 100.0f);
+    float outputPercent = 0.0f;
+    float errorDeg = 0.0f;
 
-    bool blockedByLimit = false;
-    if (limitLeftActive && outputPercent < -0.001f) {
-      outputPercent = 0.0f;
-      blockedByLimit = true;
-      if (!leftLimitLatched) {
-        broadcastIf(true, "[PID] Final de carrera izquierda activo; deteniendo giro hacia la izquierda");
-        leftLimitLatched = true;
+    if (!skipControl) {
+      errorDeg = computeAngleError(targetDeg, measuredDeg);
+      outputPercent = cfg->controller->update(errorDeg, dtSeconds);
+      outputPercent = applyDeadband(outputPercent, cfg->deadbandPercent);
+      outputPercent = applyMinActive(outputPercent, cfg->minActivePercent);
+      outputPercent = clampf(outputPercent, -100.0f, 100.0f);
+
+      bool blockedByLimit = false;
+      if (limitLeftActive && outputPercent < -0.001f) {
+        outputPercent = 0.0f;
+        blockedByLimit = true;
+        if (!leftLimitLatched) {
+          broadcastIf(true, "[PID] Final de carrera izquierda activo; deteniendo giro hacia la izquierda");
+          leftLimitLatched = true;
+        }
+      } else if (!limitLeftActive) {
+        leftLimitLatched = false;
       }
-    } else if (!limitLeftActive) {
-      leftLimitLatched = false;
-    }
 
-    if (limitRightActive && outputPercent > 0.001f) {
-      outputPercent = 0.0f;
-      blockedByLimit = true;
-      if (!rightLimitLatched) {
-        broadcastIf(true, "[PID] Final de carrera derecha activo; deteniendo giro hacia la derecha");
-        rightLimitLatched = true;
+      if (limitRightActive && outputPercent > 0.001f) {
+        outputPercent = 0.0f;
+        blockedByLimit = true;
+        if (!rightLimitLatched) {
+          broadcastIf(true, "[PID] Final de carrera derecha activo; deteniendo giro hacia la derecha");
+          rightLimitLatched = true;
+        }
+      } else if (!limitRightActive) {
+        rightLimitLatched = false;
       }
-    } else if (!limitRightActive) {
-      rightLimitLatched = false;
-    }
 
-    if (blockedByLimit) {
-      cfg->controller->reset();
-    }
-
-    if (fabsf(outputPercent) < 0.001f) {
-      bridge_stop();
-    } else if (outputPercent > 0.0f) {
-      if (!bridgeEnabled) {
-        enable_bridge_h();
-        bridgeEnabled = true;
+      if (blockedByLimit) {
+        cfg->controller->reset();
       }
-      bridge_turn_right(static_cast<uint8_t>(outputPercent));
-    } else {  // outputPercent < 0
-      if (!bridgeEnabled) {
-        enable_bridge_h();
-        bridgeEnabled = true;
+
+      if (fabsf(outputPercent) < 0.001f) {
+        bridge_stop();
+      } else if (outputPercent > 0.0f) {
+        if (!bridgeEnabled) {
+          enable_bridge_h();
+          bridgeEnabled = true;
+        }
+        bridge_turn_right(static_cast<uint8_t>(outputPercent));
+      } else {  // outputPercent < 0
+        if (!bridgeEnabled) {
+          enable_bridge_h();
+          bridgeEnabled = true;
+        }
+        bridge_turn_left(static_cast<uint8_t>(-outputPercent));
       }
-      bridge_turn_left(static_cast<uint8_t>(-outputPercent));
+
+      if (shouldLog) {
+        String msg;
+        msg.reserve(160);
+        msg += "[PID] sensor=";
+        msg += String(measuredDeg, 2);
+        msg += "deg";
+        msg += " rcGPIO16=";
+        msg += rcValue;
+        msg += " target=";
+        msg += String(targetDeg, 2);
+        msg += "deg";
+        msg += " error=";
+        msg += String(errorDeg, 2);
+        msg += "deg";
+        msg += " salida=";
+        msg += String(outputPercent, 1);
+        msg += "%";
+        broadcastIf(true, msg);
+        lastLog = nowTicks;
+      }
     }
 
-    if (shouldLog) {
-      String msg;
-      msg.reserve(160);
-      msg += "[PID] sensor=";
-      msg += String(measuredDeg, 2);
-      msg += "deg";
-      msg += " rcGPIO16=";
-      msg += rcValue;
-      msg += " target=";
-      msg += String(targetDeg, 2);
-      msg += "deg";
-      msg += " error=";
-      msg += String(errorDeg, 2);
-      msg += "deg";
-      msg += " salida=";
-      msg += String(outputPercent, 1);
-      msg += "%";
-      broadcastIf(true, msg);
-      lastLog = nowTicks;
+    const int64_t iterationDurationUs = esp_timer_get_time() - iterationStartUs;
+    if (iterationDurationUs > 4000) {
+      if ((nowTicks - lastRuntimeWarningTick) >= runtimeWarningCooldown) {
+        String perf;
+        perf.reserve(64);
+        perf += "[PID] ciclo tardo ";
+        perf += iterationDurationUs / 1000.0f;
+        perf += "ms";
+        broadcastIf(true, perf);
+        lastRuntimeWarningTick = nowTicks;
+      }
     }
-
-    vTaskDelayUntil(&lastWake, period);
   }
 }
-
-
-
-

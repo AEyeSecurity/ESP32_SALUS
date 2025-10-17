@@ -35,7 +35,27 @@ struct FsIa6TaskConfig {
   TickType_t period;
 };
 
+struct FsIa6SamplerConfig {
+  bool log;
+  TickType_t period;
+  TickType_t staleThreshold;
+  TickType_t rmtReceiveTimeout;
+};
+
+struct RcSharedState {
+  int ch0;
+  int ch2;
+  int throttle;
+  int steering;
+  TickType_t lastUpdateTick;
+  bool valid;
+};
+
 constexpr uint8_t kRcSteeringPin = 16;
 constexpr uint8_t kRcThrottlePin = 4;
 
+void taskRcSampler(void* parameter);
 void taskRcMonitor(void* parameter);
+bool rcGetStateCopy(RcSharedState& out);
+bool rcRegisterConsumer(TaskHandle_t handle);
+void rcUnregisterConsumer(TaskHandle_t handle);
