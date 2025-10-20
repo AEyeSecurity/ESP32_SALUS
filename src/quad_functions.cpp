@@ -19,7 +19,13 @@ QuadBrakeConfig g_brakeConfig{};
 uint32_t g_brakeMaxDuty = 0;
 uint32_t g_brakePeriodUs = 20000;
 bool g_brakeInitialized = false;
-int g_brakeCurrentAngle = 0;
+
+struct BrakeServoAngles {
+  int servoA;
+  int servoB;
+};
+
+BrakeServoAngles g_brakeCurrentAngles{0, 0};
 
 // Filtro simple con offset auto-calibrado para el acelerador
 volatile int g_filteredThrottleValue = 0;
@@ -77,14 +83,16 @@ void writeServoAngle(uint8_t channel, int angleDeg) {
   ledcWrite(channel, duty);
 }
 
-void applyBrakeAngle(int angleDeg) {
+void applyBrakeAngles(int angleServoADeg, int angleServoBDeg) {
   if (!g_brakeInitialized) {
     return;
   }
-  const int clamped = clampAngle(angleDeg);
-  writeServoAngle(g_brakeConfig.ledcChannelA, clamped);
-  writeServoAngle(g_brakeConfig.ledcChannelB, clamped);
-  g_brakeCurrentAngle = clamped;
+  const int clampedA = clampAngle(angleServoADeg);
+  const int clampedB = clampAngle(angleServoBDeg);
+  writeServoAngle(g_brakeConfig.ledcChannelA, clampedA);
+  writeServoAngle(g_brakeConfig.ledcChannelB, clampedB);
+  g_brakeCurrentAngles.servoA = clampedA;
+  g_brakeCurrentAngles.servoB = clampedB;
 }
 
 int updateThrottleFilter(int rawValue) {
@@ -207,8 +215,10 @@ void quadThrottleStop() {
 
 void initQuadBrake(const QuadBrakeConfig& config) {
   g_brakeConfig = config;
-  g_brakeConfig.releaseAngleDeg = clampAngle(g_brakeConfig.releaseAngleDeg);
-  g_brakeConfig.brakeAngleDeg = clampAngle(g_brakeConfig.brakeAngleDeg);
+  g_brakeConfig.releaseAngleServoADeg = clampAngle(g_brakeConfig.releaseAngleServoADeg);
+  g_brakeConfig.brakeAngleServoADeg = clampAngle(g_brakeConfig.brakeAngleServoADeg);
+  g_brakeConfig.releaseAngleServoBDeg = clampAngle(g_brakeConfig.releaseAngleServoBDeg);
+  g_brakeConfig.brakeAngleServoBDeg = clampAngle(g_brakeConfig.brakeAngleServoBDeg);
   if (g_brakeConfig.activationThreshold > 0) {
     g_brakeConfig.activationThreshold = -abs(g_brakeConfig.activationThreshold);
   }
@@ -223,7 +233,7 @@ void initQuadBrake(const QuadBrakeConfig& config) {
   ledcAttachPin(g_brakeConfig.servoPinB, g_brakeConfig.ledcChannelB);
 
   g_brakeInitialized = true;
-  applyBrakeAngle(g_brakeConfig.releaseAngleDeg);
+  applyBrakeAngles(g_brakeConfig.releaseAngleServoADeg, g_brakeConfig.releaseAngleServoBDeg);
 }
 
 void quadBrakeUpdate(int rcValue) {
@@ -231,14 +241,14 @@ void quadBrakeUpdate(int rcValue) {
     return;
   }
 
-  if (rcValue < g_brakeConfig.activationThreshold) {
-    if (g_brakeCurrentAngle != g_brakeConfig.brakeAngleDeg) {
-      applyBrakeAngle(g_brakeConfig.brakeAngleDeg);
-    }
-  } else {
-    if (g_brakeCurrentAngle != g_brakeConfig.releaseAngleDeg) {
-      applyBrakeAngle(g_brakeConfig.releaseAngleDeg);
-    }
+  const bool brakeActive = rcValue < g_brakeConfig.activationThreshold;
+  const int targetAngleA =
+      brakeActive ? g_brakeConfig.brakeAngleServoADeg : g_brakeConfig.releaseAngleServoADeg;
+  const int targetAngleB =
+      brakeActive ? g_brakeConfig.brakeAngleServoBDeg : g_brakeConfig.releaseAngleServoBDeg;
+
+  if (g_brakeCurrentAngles.servoA != targetAngleA || g_brakeCurrentAngles.servoB != targetAngleB) {
+    applyBrakeAngles(targetAngleA, targetAngleB);
   }
 }
 
@@ -246,7 +256,7 @@ void quadBrakeRelease() {
   if (!g_brakeInitialized) {
     return;
   }
-  applyBrakeAngle(g_brakeConfig.releaseAngleDeg);
+  applyBrakeAngles(g_brakeConfig.releaseAngleServoADeg, g_brakeConfig.releaseAngleServoBDeg);
 }
 
 void taskQuadDriveControl(void* parameter) {
@@ -267,7 +277,8 @@ void taskQuadDriveControl(void* parameter) {
   TickType_t lastPerfLog = 0;
   int lastThrottleRcValue = 9999;
   int lastDutyReported = -1;
-  int lastBrakeReported = -1;
+  int lastBrakeReportedA = -1;
+  int lastBrakeReportedB = -1;
 
   TaskHandle_t self = xTaskGetCurrentTaskHandle();
   if (!rcRegisterConsumer(self)) {
@@ -297,7 +308,8 @@ void taskQuadDriveControl(void* parameter) {
     quadBrakeUpdate(brakeInput);
 
     if (cfg->log && (rcValue != lastThrottleRcValue || duty != lastDutyReported ||
-                     g_brakeCurrentAngle != lastBrakeReported)) {
+                     g_brakeCurrentAngles.servoA != lastBrakeReportedA ||
+                     g_brakeCurrentAngles.servoB != lastBrakeReportedB)) {
       String msg;
       msg.reserve(96);
       msg += "[DRIVE] rc=";
@@ -306,8 +318,10 @@ void taskQuadDriveControl(void* parameter) {
       msg += duty;
       msg += "/";
       msg += static_cast<int>(g_maxDuty);
-      msg += " brake=";
-      msg += g_brakeCurrentAngle;
+      msg += " brakeA=";
+      msg += g_brakeCurrentAngles.servoA;
+      msg += "deg brakeB=";
+      msg += g_brakeCurrentAngles.servoB;
       msg += "deg";
       if (snapshotFresh) {
         msg += " raw=";
@@ -320,7 +334,8 @@ void taskQuadDriveControl(void* parameter) {
       broadcastIf(true, msg);
       lastThrottleRcValue = rcValue;
       lastDutyReported = duty;
-      lastBrakeReported = g_brakeCurrentAngle;
+      lastBrakeReportedA = g_brakeCurrentAngles.servoA;
+      lastBrakeReportedB = g_brakeCurrentAngles.servoB;
     }
 
     if (cfg->log && !snapshotFresh) {
