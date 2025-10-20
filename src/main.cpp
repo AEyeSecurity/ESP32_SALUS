@@ -57,8 +57,10 @@ constexpr uint8_t BRAKE_SERVO_CHANNEL_A = 8;
 constexpr uint8_t BRAKE_SERVO_CHANNEL_B = 9;
 constexpr uint32_t BRAKE_PWM_FREQ = 50;
 constexpr uint8_t BRAKE_PWM_RESOLUTION = 16;
-constexpr int BRAKE_RELEASE_ANGLE = 30;
-constexpr int BRAKE_APPLY_ANGLE = 100;
+constexpr int BRAKE_RELEASE_ANGLE_SERVO_A = 30;
+constexpr int BRAKE_APPLY_ANGLE_SERVO_A = 100;
+constexpr int BRAKE_RELEASE_ANGLE_SERVO_B = 120;
+constexpr int BRAKE_APPLY_ANGLE_SERVO_B = 90;
 constexpr int BRAKE_THRESHOLD = -15;
 
 constexpr TickType_t OTA_PERIOD = pdMS_TO_TICKS(20);
@@ -126,8 +128,10 @@ static QuadDriveTaskConfig g_driveTaskConfig = {
         BRAKE_SERVO_CHANNEL_B,
         BRAKE_PWM_FREQ,
         BRAKE_PWM_RESOLUTION,
-        BRAKE_RELEASE_ANGLE,
-        BRAKE_APPLY_ANGLE,
+        BRAKE_RELEASE_ANGLE_SERVO_A,
+        BRAKE_APPLY_ANGLE_SERVO_A,
+        BRAKE_RELEASE_ANGLE_SERVO_B,
+        BRAKE_APPLY_ANGLE_SERVO_B,
         BRAKE_THRESHOLD,
     },
     true,

@@ -25,8 +25,10 @@ struct QuadBrakeConfig {
   uint8_t ledcChannelB;
   uint32_t pwmFrequencyHz;
   uint8_t pwmResolutionBits;
-  int releaseAngleDeg;
-  int brakeAngleDeg;
+  int releaseAngleServoADeg;
+  int brakeAngleServoADeg;
+  int releaseAngleServoBDeg;
+  int brakeAngleServoBDeg;
   int activationThreshold;  // negative threshold (e.g. -15)
 };
 
