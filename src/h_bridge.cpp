@@ -19,9 +19,6 @@ static const int LIMIT_ACTIVE_STATE = LOW; // usando pull-ups internos
 struct LimitDebugState {
   bool initialized = false;
   bool lastState = false;
-  uint32_t stateSinceMs = 0;
-  uint32_t lastReleaseMs = 0;
-  uint32_t lastReportMs = 0;
 };
 
 static LimitDebugState leftLimitDebug;
@@ -30,53 +27,23 @@ static uint32_t lastLeftBlockLogMs = 0;
 static uint32_t lastRightBlockLogMs = 0;
 
 static void logLimitStatus(const char* label, LimitDebugState& debug, bool isActive) {
-  const uint32_t nowMs = millis();
-
   if (!debug.initialized) {
     debug.initialized = true;
     debug.lastState = isActive;
-    debug.stateSinceMs = nowMs;
-    debug.lastReportMs = nowMs;
     if (!isActive) {
-      debug.lastReleaseMs = nowMs;
+      return;
     }
-
-    String msg = String("[HBRIDGE] Estado inicial FC ") + label + ": " + (isActive ? "ACTIVO" : "INACTIVO");
-    msg += " t=" + String(nowMs) + "ms";
-    broadcastIf(true, msg);
+    broadcastIf(true, String("[HBRIDGE] FC ") + label + " ACTIVO");
     return;
   }
 
   if (isActive == debug.lastState) {
-    const uint32_t heldMs = nowMs - debug.stateSinceMs;
-    if (nowMs - debug.lastReportMs >= 1000) {
-      String msg = String("[HBRIDGE] FC ") + label + (isActive ? " activo " : " inactivo ");
-      msg += "por " + String(heldMs) + "ms";
-      broadcastIf(true, msg);
-      debug.lastReportMs = nowMs;
-    }
     return;
   }
 
-  debug.lastReportMs = nowMs;
-  if (isActive) {
-    const uint32_t inactiveMs = (debug.lastReleaseMs > 0) ? (nowMs - debug.lastReleaseMs) : 0;
-    String msg = String("[HBRIDGE] FC ") + label + " ACTIVADO (t=" + String(nowMs) + "ms";
-    if (debug.lastReleaseMs > 0) {
-      msg += ", inactivo " + String(inactiveMs) + "ms";
-    }
-    msg += ")";
-    broadcastIf(true, msg);
-    debug.stateSinceMs = nowMs;
-  } else {
-    const uint32_t activeMs = nowMs - debug.stateSinceMs;
-    String msg = String("[HBRIDGE] FC ") + label + " LIBERADO tras " + String(activeMs) + "ms activo";
-    broadcastIf(true, msg);
-    debug.lastReleaseMs = nowMs;
-    debug.stateSinceMs = nowMs;
-  }
-
   debug.lastState = isActive;
+  const char* stateText = isActive ? "ACTIVO" : "INACTIVO";
+  broadcastIf(true, String("[HBRIDGE] FC ") + label + " " + stateText);
 }
 
 // LEDC settings

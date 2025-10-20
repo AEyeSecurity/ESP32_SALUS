@@ -123,9 +123,19 @@ void processTelnetInput() {
     if (c == '\r') {
       continue;
     }
+    if (c == '\b' || c == 0x7f) {  // Backspace/Delete
+      if (!g_telnetCommandBuffer.isEmpty()) {
+        g_telnetCommandBuffer.remove(g_telnetCommandBuffer.length() - 1);
+      }
+      continue;
+    }
     if (c == '\n') {
       handleTelnetCommand(g_telnetCommandBuffer);
       g_telnetCommandBuffer = "";
+      continue;
+    }
+    const unsigned char uc = static_cast<unsigned char>(c);
+    if (uc < 0x20 || uc >= 0x7F) {
       continue;
     }
     if (g_telnetCommandBuffer.length() >= 120) {

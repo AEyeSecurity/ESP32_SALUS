@@ -267,7 +267,7 @@ void taskPidControl(void* parameter) {
       dtSeconds = expectedPeriodSeconds;
     }
 
-    if (dtSeconds > dtOverrunThreshold) {
+    if (cfg->log && dtSeconds > dtOverrunThreshold) {
       if ((nowTicks - lastDtWarningTick) >= dtWarningCooldown) {
         String warn;
         warn.reserve(80);
@@ -514,7 +514,7 @@ void taskPidControl(void* parameter) {
     }
 
     const int64_t iterationDurationUs = esp_timer_get_time() - iterationStartUs;
-    if (iterationDurationUs > 4000) {
+    if (cfg->log && iterationDurationUs > 4000) {
       if ((nowTicks - lastRuntimeWarningTick) >= runtimeWarningCooldown) {
         String perf;
         perf.reserve(64);
