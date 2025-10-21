@@ -62,7 +62,7 @@ float ticksToSeconds(TickType_t ticks) {
 namespace {
 constexpr uint8_t kCalibrationDutyPercent = 35;
 constexpr uint8_t kCalibrationReleaseDutyPercent = 20;
-const TickType_t kCalibrationTimeout = pdMS_TO_TICKS(4000);
+const TickType_t kCalibrationTimeout = pdMS_TO_TICKS(10000);
 const TickType_t kCalibrationReleaseDuration = pdMS_TO_TICKS(250);
 }  // namespace
 
