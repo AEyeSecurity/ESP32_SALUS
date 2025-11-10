@@ -25,7 +25,7 @@ constexpr int AS5600_SCL_PIN = 26;
 
 constexpr float PID_CENTER_DEG = 240.0f;
 constexpr float PID_SPAN_DEG = 40.0f;
-constexpr float PID_DEADBAND_PERCENT = 5.0f;
+constexpr float PID_DEADBAND_PERCENT = 2.0f;
 constexpr float PID_MIN_ACTIVE_PERCENT = 15.0f;
 constexpr float PID_KP = 3.0f;
 constexpr float PID_KI = 0.0f;
