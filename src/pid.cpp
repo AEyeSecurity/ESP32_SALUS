@@ -60,10 +60,12 @@ float ticksToSeconds(TickType_t ticks) {
 }  // namespace
 
 namespace {
-constexpr uint8_t kCalibrationDutyPercent = 35;
-constexpr uint8_t kCalibrationReleaseDutyPercent = 20;
+constexpr uint8_t kCalibrationDutyPercent = 65;
+constexpr uint8_t kCalibrationReleaseDutyPercent = 30;
+constexpr float kCalibrationStallThresholdDeg = 0.5f;
 const TickType_t kCalibrationTimeout = pdMS_TO_TICKS(10000);
 const TickType_t kCalibrationReleaseDuration = pdMS_TO_TICKS(250);
+const TickType_t kCalibrationStallDuration = pdMS_TO_TICKS(1200);
 }  // namespace
 
 PidController::PidController()
@@ -243,15 +245,37 @@ void taskPidControl(void* parameter) {
   const float dtOverrunThreshold = expectedPeriodSeconds + 0.010f;
   const TickType_t dtWarningCooldown = pdMS_TO_TICKS(500);
   const TickType_t runtimeWarningCooldown = pdMS_TO_TICKS(1000);
+  const TickType_t calibrationDebugInterval = pdMS_TO_TICKS(250);
   TickType_t lastDtWarningTick = 0;
   TickType_t lastRuntimeWarningTick = 0;
+  TickType_t lastCalibrationDebugTick = 0;
 
   enum class CalibrationState { Idle, MoveLeft, ReleaseLeft, MoveRight, ReleaseRight };
   CalibrationState calibrationState = CalibrationState::Idle;
+  CalibrationState lastCalibrationState = CalibrationState::Idle;
   TickType_t calibrationStateStart = 0;
   float calibrationLeftAngleDeg = 0.0f;
   float calibrationRightAngleDeg = 0.0f;
   bool calibrationActive = false;
+  float calibrationLastAngleDeg = 0.0f;
+  TickType_t calibrationLastMoveTick = 0;
+  bool calibrationMotionValid = false;
+
+  auto calibrationStateName = [](CalibrationState state) -> const char* {
+    switch (state) {
+      case CalibrationState::MoveLeft:
+        return "MoveLeft";
+      case CalibrationState::ReleaseLeft:
+        return "ReleaseLeft";
+      case CalibrationState::MoveRight:
+        return "MoveRight";
+      case CalibrationState::ReleaseRight:
+        return "ReleaseRight";
+      case CalibrationState::Idle:
+      default:
+        return "Idle";
+    }
+  };
 
   for (;;) {
     const int64_t iterationStartUs = esp_timer_get_time();
@@ -283,10 +307,13 @@ void taskPidControl(void* parameter) {
 
     if (!calibrationActive && steeringCalibrationConsumeRequest()) {
       calibrationActive = true;
-      calibrationState = CalibrationState::MoveLeft;
+      calibrationState = CalibrationState::MoveRight;
+      lastCalibrationState = CalibrationState::Idle;
       calibrationStateStart = nowTicks;
       calibrationLeftAngleDeg = 0.0f;
       calibrationRightAngleDeg = 0.0f;
+      calibrationMotionValid = false;
+      calibrationLastMoveTick = nowTicks;
       cfg->controller->reset();
       if (!bridgeEnabled) {
         enable_bridge_h();
@@ -308,7 +335,33 @@ void taskPidControl(void* parameter) {
 
     const bool shouldLog = cfg->log && (logInterval == 0 || (nowTicks - lastLog) >= logInterval);
 
+    if (calibrationActive && calibrationState != lastCalibrationState) {
+      calibrationMotionValid = false;
+      calibrationLastMoveTick = nowTicks;
+      lastCalibrationState = calibrationState;
+    }
+
     if (calibrationActive) {
+      if ((nowTicks - lastCalibrationDebugTick) >= calibrationDebugInterval) {
+        String dbg = "[PID][CAL] estado=";
+        dbg += calibrationStateName(calibrationState);
+        dbg += " limL=";
+        dbg += limitLeftActive ? "1" : "0";
+        dbg += " limR=";
+        dbg += limitRightActive ? "1" : "0";
+        dbg += " ang=";
+        if (measuredDeg >= 0.0f) {
+          dbg += String(measuredDeg, 2);
+          dbg += "deg";
+        } else {
+          dbg += "ERR";
+        }
+        dbg += " t=";
+        dbg += static_cast<int>((nowTicks - calibrationStateStart) * portTICK_PERIOD_MS);
+        dbg += "ms";
+        broadcastIf(true, dbg);
+        lastCalibrationDebugTick = nowTicks;
+      }
       bool keepCalibrating = true;
       switch (calibrationState) {
         case CalibrationState::MoveLeft: {
@@ -318,6 +371,31 @@ void taskPidControl(void* parameter) {
             break;
           }
           bridge_turn_left(kCalibrationDutyPercent);
+          bool stallDetected = false;
+          if (measuredDeg >= 0.0f) {
+            if (!calibrationMotionValid) {
+              calibrationMotionValid = true;
+              calibrationLastAngleDeg = measuredDeg;
+              calibrationLastMoveTick = nowTicks;
+            } else if (fabsf(measuredDeg - calibrationLastAngleDeg) > kCalibrationStallThresholdDeg) {
+              calibrationLastAngleDeg = measuredDeg;
+              calibrationLastMoveTick = nowTicks;
+            } else if ((nowTicks - calibrationLastMoveTick) >= kCalibrationStallDuration) {
+              stallDetected = true;
+            }
+          }
+          if (stallDetected) {
+            calibrationLeftAngleDeg = (measuredDeg >= 0.0f) ? measuredDeg : calibrationLastAngleDeg;
+            String msg = "[PID] Calibracion: limite izquierdo inferido por estancamiento (sin FC)";
+            msg += " ang=";
+            msg += String(calibrationLeftAngleDeg, 2);
+            msg += "deg";
+            broadcastIf(true, msg);
+            bridge_stop();
+            calibrationState = CalibrationState::ReleaseLeft;
+            calibrationStateStart = nowTicks;
+            break;
+          }
           if (limitLeftActive) {
             calibrationLeftAngleDeg = measuredDeg;
             bridge_stop();
@@ -336,14 +414,34 @@ void taskPidControl(void* parameter) {
         case CalibrationState::ReleaseLeft: {
           if (!limitLeftActive && (nowTicks - calibrationStateStart) >= pdMS_TO_TICKS(50)) {
             bridge_stop();
-            calibrationState = CalibrationState::MoveRight;
-            calibrationStateStart = nowTicks;
-            String msg = "[PID] Calibracion: iniciando busqueda de limite derecho";
-            broadcastIf(true, msg);
+            if (measuredDeg >= 0.0f) {
+              steeringCalibrationApply(calibrationLeftAngleDeg, calibrationRightAngleDeg);
+              String msg = "[PID] Calibracion completa. Izq=";
+              msg += String(calibrationLeftAngleDeg, 2);
+              msg += "deg, Der=";
+              msg += String(calibrationRightAngleDeg, 2);
+              msg += "deg";
+              broadcastIf(true, msg);
+            } else {
+              broadcastIf(true, "[PID] Calibracion completa pero sin lectura de angulo valida");
+            }
+            keepCalibrating = false;
           } else if ((nowTicks - calibrationStateStart) >= kCalibrationReleaseDuration) {
+            broadcastIf(true,
+                        "[PID] Calibracion: forzando finalizacion tras liberar el limite izquierdo (timeout)");
             bridge_stop();
-            calibrationState = CalibrationState::MoveRight;
-            calibrationStateStart = nowTicks;
+            if (measuredDeg >= 0.0f) {
+              steeringCalibrationApply(calibrationLeftAngleDeg, calibrationRightAngleDeg);
+              String msg = "[PID] Calibracion completa. Izq=";
+              msg += String(calibrationLeftAngleDeg, 2);
+              msg += "deg, Der=";
+              msg += String(calibrationRightAngleDeg, 2);
+              msg += "deg";
+              broadcastIf(true, msg);
+            } else {
+              broadcastIf(true, "[PID] Calibracion completa pero sin lectura de angulo valida");
+            }
+            keepCalibrating = false;
           } else {
             bridge_turn_right(kCalibrationReleaseDutyPercent);
           }
@@ -356,6 +454,31 @@ void taskPidControl(void* parameter) {
             break;
           }
           bridge_turn_right(kCalibrationDutyPercent);
+          bool stallDetected = false;
+          if (measuredDeg >= 0.0f) {
+            if (!calibrationMotionValid) {
+              calibrationMotionValid = true;
+              calibrationLastAngleDeg = measuredDeg;
+              calibrationLastMoveTick = nowTicks;
+            } else if (fabsf(measuredDeg - calibrationLastAngleDeg) > kCalibrationStallThresholdDeg) {
+              calibrationLastAngleDeg = measuredDeg;
+              calibrationLastMoveTick = nowTicks;
+            } else if ((nowTicks - calibrationLastMoveTick) >= kCalibrationStallDuration) {
+              stallDetected = true;
+            }
+          }
+          if (stallDetected) {
+            calibrationRightAngleDeg = (measuredDeg >= 0.0f) ? measuredDeg : calibrationLastAngleDeg;
+            bridge_stop();
+            calibrationState = CalibrationState::ReleaseRight;
+            calibrationStateStart = nowTicks;
+            String msg = "[PID] Calibracion: limite derecho inferido por estancamiento (sin FC)";
+            msg += " ang=";
+            msg += String(calibrationRightAngleDeg, 2);
+            msg += "deg";
+            broadcastIf(true, msg);
+            break;
+          }
           if (limitRightActive) {
             calibrationRightAngleDeg = measuredDeg;
             bridge_stop();
@@ -366,7 +489,19 @@ void taskPidControl(void* parameter) {
             msg += "deg";
             broadcastIf(true, msg);
           } else if ((nowTicks - calibrationStateStart) >= kCalibrationTimeout) {
-            broadcastIf(true, "[PID] Calibracion abortada: timeout alcanzando limite derecho");
+            String msg = "[PID] Calibracion abortada: timeout alcanzando limite derecho (limL=";
+            msg += limitLeftActive ? "1" : "0";
+            msg += ", limR=";
+            msg += limitRightActive ? "1" : "0";
+            msg += ", ang=";
+            if (measuredDeg >= 0.0f) {
+              msg += String(measuredDeg, 2);
+              msg += "deg";
+            } else {
+              msg += "ERR";
+            }
+            msg += ")";
+            broadcastIf(true, msg);
             keepCalibrating = false;
           }
           break;
@@ -374,32 +509,17 @@ void taskPidControl(void* parameter) {
         case CalibrationState::ReleaseRight: {
           if (!limitRightActive && (nowTicks - calibrationStateStart) >= pdMS_TO_TICKS(50)) {
             bridge_stop();
-            if (measuredDeg >= 0.0f) {
-              steeringCalibrationApply(calibrationLeftAngleDeg, calibrationRightAngleDeg);
-              String msg = "[PID] Calibracion completa. Izq=";
-              msg += String(calibrationLeftAngleDeg, 2);
-              msg += "deg, Der=";
-              msg += String(calibrationRightAngleDeg, 2);
-              msg += "deg";
-              broadcastIf(true, msg);
-            } else {
-              broadcastIf(true, "[PID] Calibracion completa pero sin lectura de angulo valida");
-            }
-            keepCalibrating = false;
+            calibrationState = CalibrationState::MoveLeft;
+            calibrationStateStart = nowTicks;
+            String msg = "[PID] Calibracion: iniciando busqueda de limite izquierdo";
+            broadcastIf(true, msg);
           } else if ((nowTicks - calibrationStateStart) >= kCalibrationReleaseDuration) {
             bridge_stop();
-            if (measuredDeg >= 0.0f) {
-              steeringCalibrationApply(calibrationLeftAngleDeg, calibrationRightAngleDeg);
-              String msg = "[PID] Calibracion completa. Izq=";
-              msg += String(calibrationLeftAngleDeg, 2);
-              msg += "deg, Der=";
-              msg += String(calibrationRightAngleDeg, 2);
-              msg += "deg";
-              broadcastIf(true, msg);
-            } else {
-              broadcastIf(true, "[PID] Calibracion completa pero sin lectura de angulo valida");
-            }
-            keepCalibrating = false;
+            calibrationState = CalibrationState::MoveLeft;
+            calibrationStateStart = nowTicks;
+            broadcastIf(
+                true,
+                "[PID] Calibracion: forzando busqueda de limite izquierdo (timeout liberando derecho)");
           } else {
             bridge_turn_left(kCalibrationReleaseDutyPercent);
           }
@@ -416,6 +536,9 @@ void taskPidControl(void* parameter) {
         calibrationActive = false;
         calibrationState = CalibrationState::Idle;
         calibrationStateStart = 0;
+        calibrationMotionValid = false;
+        lastCalibrationState = CalibrationState::Idle;
+        lastCalibrationDebugTick = 0;
         cfg->controller->reset();
       }
       continue;

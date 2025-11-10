@@ -51,7 +51,6 @@ static const int LEDC_FREQ = 20000;      // 20 kHz
 static const int LEDC_RESOLUTION = 8;    // 8 bits -> duty 0..255
 static const int LEFT_LEDC_CHANNEL = 0;
 static const int RIGHT_LEDC_CHANNEL = 1;
-static const int LEDC_TIMER = 0; // timer index
 
 static bool limit_active(int pin) {
   return digitalRead(pin) == LIMIT_ACTIVE_STATE;
@@ -78,10 +77,11 @@ void init_h_bridge() {
   pinMode(LIMIT_LEFT_PIN, INPUT_PULLUP);
   pinMode(LIMIT_RIGHT_PIN, INPUT_PULLUP);
 
-  // Configure LEDC timer
-  ledcSetup(LEDC_TIMER, LEDC_FREQ, LEDC_RESOLUTION);
+  // Configure each LEDC channel (ESP32 API expects channel id, not timer)
+  ledcSetup(LEFT_LEDC_CHANNEL, LEDC_FREQ, LEDC_RESOLUTION);
+  ledcSetup(RIGHT_LEDC_CHANNEL, LEDC_FREQ, LEDC_RESOLUTION);
 
-  // Attach channels to timer
+  // Attach pins to their LEDC channels
   ledcAttachPin(LEFT_PWM_PIN, LEFT_LEDC_CHANNEL);
   ledcAttachPin(RIGHT_PWM_PIN, RIGHT_LEDC_CHANNEL);
 
