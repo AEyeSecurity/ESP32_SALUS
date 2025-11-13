@@ -12,7 +12,6 @@ bool startTaskPinned(TaskFunction_t task,
   BaseType_t result = xTaskCreatePinnedToCore(task, name, stackSize, parameter, priority, handle, coreId);
   if (result != pdPASS) {
     String msg = String("No se pudo crear la tarea ") + name;
-    EnviarMensaje(msg);
     EnviarMensajeTelnet(msg);
     return false;
   }

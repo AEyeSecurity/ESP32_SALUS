@@ -9,6 +9,7 @@
 #include "pid.h"
 #include "steering_calibration.h"
 #include "quad_functions.h"
+#include "pi_comms.h"
 
 const char* ssid = "ESPcuatri";
 const char* contrasena = "teamcit2024";
@@ -19,6 +20,8 @@ constexpr uint16_t STACK_RC = 2048;
 constexpr uint16_t STACK_AS5600 = 3072;
 constexpr uint16_t STACK_PID = 4096;
 constexpr uint16_t STACK_DRIVE = 4096;
+constexpr uint16_t STACK_PI_RX = 3072;
+constexpr uint16_t STACK_PI_TX = 2048;
 
 constexpr int AS5600_SDA_PIN = 25;
 constexpr int AS5600_SCL_PIN = 26;
@@ -82,6 +85,7 @@ constexpr bool kLogRc = false;
 constexpr bool kLogAs5600 = false;
 constexpr bool kLogPid = false;
 constexpr bool kLogDrive = false;
+constexpr bool kLogPiComms = false;
 constexpr bool kEnableBridgeTask = false;
 constexpr bool kEnableRcTask = false;
 constexpr bool kEnablePidTask = true;
@@ -138,9 +142,20 @@ static QuadDriveTaskConfig g_driveTaskConfig = {
     true,
     THROTTLE_PERIOD,
     debug::kLogDrive};
+static PiCommsConfig g_piCommsConfig = {
+    UART_NUM_0,
+    1,
+    3,
+    460800,
+    512,
+    256,
+    pdMS_TO_TICKS(1),
+    pdMS_TO_TICKS(10),
+    pdMS_TO_TICKS(2),
+    debug::kLogPiComms,
+    debug::kLogPiComms};
 
 void setup() {
-  InicializaUart();
   InicializaWiFi(ssid, contrasena);
   InicializaOTA();
   delay(1000);
@@ -191,14 +206,16 @@ void setup() {
       startTaskPinned(taskPidControl, "PID", STACK_PID, &g_pidTaskConfig, 4, nullptr, 0);
     }
   }
+
+  if (piCommsInit(g_piCommsConfig)) {
+    startTaskPinned(taskPiCommsRx, "PiUartRx", STACK_PI_RX, &g_piCommsConfig, 3, nullptr, 0);
+    startTaskPinned(taskPiCommsTx, "PiUartTx", STACK_PI_TX, &g_piCommsConfig, 3, nullptr, 0);
+  } else {
+    broadcastIf(true, "[PI][UART] Error inicializando UART0 para Raspberry Pi");
+  }
 }
 
 void loop() {
-  String mensaje;
-  if (RecibirMensaje(mensaje) && debug::kLogLoop) {
-    EnviarMensaje("Mensaje recibido: " + mensaje);
-    EnviarMensajeTelnet("UART: " + mensaje);
-  }
   vTaskDelay(pdMS_TO_TICKS(50));
 }
 

@@ -25,7 +25,7 @@ bool AS5600::isConnected() {
 void AS5600::printStatus() {
     uint8_t status = getStatus();
     if (status == 0xFF) {
-        Serial.println(F("[ERROR] No se pudo leer STATUS (0x0B)."));
+        broadcastIf(true, "[AS5600] ERROR leyendo STATUS (0x0B)");
         return;
     }
 
@@ -33,63 +33,88 @@ void AS5600::printStatus() {
     bool ml = status & STATUS_ML;
     bool mh = status & STATUS_MH;
 
-    Serial.print(F("STATUS 0x0B = 0b"));
-    for (int i = 7; i >= 0; --i) Serial.print((status >> i) & 1);
-    Serial.println();
-
-    Serial.print(F("  MD (magnet detected): ")); Serial.println(md ? "SI" : "NO");
-    Serial.print(F("  ML (muy débil): "));      Serial.println(ml ? "SI" : "NO");
-    Serial.print(F("  MH (muy fuerte): "));     Serial.println(mh ? "SI" : "NO");
-
+    String msg;
+    msg.reserve(128);
+    msg += "[AS5600] STATUS=0x";
+    msg += String(status, HEX);
+    msg += " md=";
+    msg += md ? "1" : "0";
+    msg += " ml=";
+    msg += ml ? "1" : "0";
+    msg += " mh=";
+    msg += mh ? "1" : "0";
     if (!md) {
-        Serial.println(F("  -> Sin imán o campo insuficiente: la salida OUT queda LOW (sin PWM)."));
+        msg += " (sin iman o campo insuficiente)";
     }
+    broadcastIf(true, msg);
 }
 
 void AS5600::printAgcMagnitude() {
     uint8_t agc = getAgc();
     uint16_t mag = getMagnitude();
 
-    if (agc == 0xFF) Serial.println(F("[ERROR] No se pudo leer AGC (0x1A)."));
-    if (mag == 0xFFFF) Serial.println(F("[ERROR] No se pudo leer MAGNITUDE (0x1B–0x1C)."));
-    
-    Serial.print(F("AGC: ")); Serial.println(agc);
-    Serial.print(F("MAGNITUDE: ")); Serial.println(mag);
+    String msg;
+    msg.reserve(96);
+    if (agc == 0xFF) {
+        msg += "[AS5600] ERROR leyendo AGC";
+    } else {
+        msg += "[AS5600] AGC=";
+        msg += String(agc);
+    }
+    if (mag == 0xFFFF) {
+        msg += " MAG=ERR";
+    } else {
+        msg += " MAG=";
+        msg += String(mag);
+    }
+    broadcastIf(true, msg);
 }
 
 void AS5600::printAngles() {
     uint16_t ang = getAngle();
     uint16_t raw = getRawAngle();
-
-    if (ang == 0xFFFF) Serial.println(F("[ERROR] No se pudo leer ANGLE (0x0E–0x0F)."));
-    if (raw == 0xFFFF) Serial.println(F("[ERROR] No se pudo leer RAW_ANGLE (0x0C–0x0D)."));
     
     float ang_deg = (ang * 360.0f) / 4096.0f;
     float raw_deg = (raw * 360.0f) / 4096.0f;
 
-    Serial.print(F("ANGLE: ")); Serial.print(ang);
-    Serial.print(F(" (")); Serial.print(ang_deg, 2); Serial.println(F("°)"));
-    Serial.print(F("RAW_ANGLE: ")); Serial.print(raw);
-    Serial.print(F(" (")); Serial.print(raw_deg, 2); Serial.println(F("°)"));
+    String msg;
+    msg.reserve(120);
+    msg += "[AS5600] ANGLE=";
+    if (ang == 0xFFFF) {
+        msg += "ERR";
+    } else {
+        msg += String(ang);
+        msg += " (";
+        msg += String(ang_deg, 2);
+        msg += "deg)";
+    }
+    msg += " RAW=";
+    if (raw == 0xFFFF) {
+        msg += "ERR";
+    } else {
+        msg += String(raw);
+        msg += " (";
+        msg += String(raw_deg, 2);
+        msg += "deg)";
+    }
+    broadcastIf(true, msg);
 }
 
 void AS5600::printConf() {
     uint16_t conf = getConf();
     if (conf == 0xFFFF) {
-        Serial.println(F("[ERROR] No se pudo leer CONF (0x07–0x08)."));
+        broadcastIf(true, "[AS5600] ERROR leyendo CONF (0x07-0x08)");
         return;
     }
-    Serial.print(F("CONF = 0x"));
-    Serial.println(conf, HEX);
-
     uint16_t outs = (conf & CONF_OUTS_MASK) >> 10;
-    Serial.print(F("  OUTS (bits 11:10) = 0b"));
-    Serial.println(outs, BIN);
-    if (outs == 0b10) {
-        Serial.println(F("  -> Salida configurada en PWM."));
-    } else {
-        Serial.println(F("  -> Salida NO está en PWM (prob. analógica)."));
-    }
+    String msg;
+    msg.reserve(96);
+    msg += "[AS5600] CONF=0x";
+    msg += String(conf, HEX);
+    msg += " outs=0b";
+    msg += String(outs, BIN);
+    msg += (outs == 0b10) ? " (PWM)" : " (no PWM)";
+    broadcastIf(true, msg);
 }
 
 uint8_t AS5600::getStatus() {
