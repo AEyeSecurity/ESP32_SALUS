@@ -7,6 +7,7 @@
 #include <freertos/task.h>
 #include "freertos_utils.h"
 #include "pid.h"
+#include "steering_calibration.h"
 #include "quad_functions.h"
 
 const char* ssid = "ESPcuatri";
@@ -22,9 +23,9 @@ constexpr uint16_t STACK_DRIVE = 4096;
 constexpr int AS5600_SDA_PIN = 25;
 constexpr int AS5600_SCL_PIN = 26;
 
-constexpr float PID_CENTER_DEG = 292.0f;
+constexpr float PID_CENTER_DEG = 240.0f;
 constexpr float PID_SPAN_DEG = 40.0f;
-constexpr float PID_DEADBAND_PERCENT = 5.0f;
+constexpr float PID_DEADBAND_PERCENT = 2.0f;
 constexpr float PID_MIN_ACTIVE_PERCENT = 15.0f;
 constexpr float PID_KP = 3.0f;
 constexpr float PID_KI = 0.0f;
@@ -79,7 +80,7 @@ constexpr bool kLogBridge = false;
 constexpr bool kLogLoop = false;
 constexpr bool kLogRc = false;
 constexpr bool kLogAs5600 = false;
-constexpr bool kLogPid = true;
+constexpr bool kLogPid = false;
 constexpr bool kLogDrive = false;
 constexpr bool kEnableBridgeTask = false;
 constexpr bool kEnableRcTask = false;
@@ -149,6 +150,8 @@ void setup() {
   g_pidController.setOutputLimits(-100.0f, 100.0f);
   g_pidController.setIntegralLimits(-PID_INTEGRAL_LIMIT, PID_INTEGRAL_LIMIT);
   g_pidController.reset();
+
+  steeringCalibrationInit(PID_CENTER_DEG, PID_SPAN_DEG);
 
   broadcastIf(
       debug::kLogRc,

@@ -6,6 +6,8 @@
 
 #include <stdint.h>
 
+#include "steering_calibration.h"
+
 class AS5600;
 
 class PidController {
@@ -44,7 +46,10 @@ class PidController {
 float normalizeAngleDegrees(float angle);
 float wrapAngleDegrees(float angle);
 float computeAngleError(float setpointDeg, float measurementDeg);
-float mapRcValueToAngle(int rcValue, float centerDeg, float spanDeg);
+float mapRcValueToAngle(int rcValue,
+                        const SteeringCalibrationData& calibration,
+                        float fallbackCenterDeg,
+                        float fallbackSpanDeg);
 
 struct PidTaskConfig {
   AS5600* sensor;
