@@ -1,5 +1,6 @@
 #include "steering_calibration.h"
 
+#include <Preferences.h>
 #include <freertos/FreeRTOS.h>
 
 #include <math.h>
@@ -8,6 +9,24 @@ namespace {
 portMUX_TYPE g_calibrationMux = portMUX_INITIALIZER_UNLOCKED;
 SteeringCalibrationData g_state{};
 volatile bool g_calibrationRequested = false;
+Preferences g_calibrationPrefs;
+
+constexpr const char* kPrefsNamespace = "steer_cal";
+constexpr uint32_t kPrefsVersion = 1;
+constexpr const char* kPrefsKeyVersion = "ver";
+constexpr const char* kPrefsKeyHasCalibration = "has";
+constexpr const char* kPrefsKeyLeft = "left";
+constexpr const char* kPrefsKeyRight = "right";
+constexpr const char* kPrefsKeyCenter = "center";
+constexpr const char* kPrefsKeyOffset = "offset";
+
+struct PersistedCalibration {
+  bool hasCalibration = false;
+  float leftLimitDeg = NAN;
+  float rightLimitDeg = NAN;
+  float centerDeg = NAN;
+  float userOffsetDeg = 0.0f;
+};
 
 float normalizeDeg(float angle) {
   angle = fmodf(angle, 360.0f);
@@ -67,6 +86,66 @@ void recalcAdjustedCenterLocked() {
   g_state.userOffsetDeg = clampedOffset;
   g_state.adjustedCenterDeg = normalizeDeg(g_state.rawCenterDeg + clampedOffset);
 }
+
+bool loadPersistedCalibration(PersistedCalibration* out) {
+  if (!g_calibrationPrefs.begin(kPrefsNamespace, true)) {
+    return false;
+  }
+
+  const uint32_t storedVersion = g_calibrationPrefs.getUInt(kPrefsKeyVersion, 0);
+  if (storedVersion != kPrefsVersion) {
+    g_calibrationPrefs.end();
+    return false;
+  }
+
+  out->hasCalibration = g_calibrationPrefs.getBool(kPrefsKeyHasCalibration, false);
+  out->leftLimitDeg = g_calibrationPrefs.getFloat(kPrefsKeyLeft, NAN);
+  out->rightLimitDeg = g_calibrationPrefs.getFloat(kPrefsKeyRight, NAN);
+  out->centerDeg = g_calibrationPrefs.getFloat(kPrefsKeyCenter, NAN);
+  out->userOffsetDeg = g_calibrationPrefs.getFloat(kPrefsKeyOffset, 0.0f);
+  g_calibrationPrefs.end();
+
+  if (!out->hasCalibration) {
+    return false;
+  }
+
+  if (isnan(out->leftLimitDeg) || isnan(out->rightLimitDeg) || isnan(out->centerDeg)) {
+    return false;
+  }
+
+  return true;
+}
+
+void persistCalibrationSnapshot(const SteeringCalibrationData& data) {
+  if (!g_calibrationPrefs.begin(kPrefsNamespace, false)) {
+    return;
+  }
+  g_calibrationPrefs.putUInt(kPrefsKeyVersion, kPrefsVersion);
+  g_calibrationPrefs.putBool(kPrefsKeyHasCalibration, data.hasCalibration);
+  g_calibrationPrefs.putFloat(kPrefsKeyLeft, data.leftLimitDeg);
+  g_calibrationPrefs.putFloat(kPrefsKeyRight, data.rightLimitDeg);
+  g_calibrationPrefs.putFloat(kPrefsKeyCenter, data.rawCenterDeg);
+  g_calibrationPrefs.putFloat(kPrefsKeyOffset, data.userOffsetDeg);
+  g_calibrationPrefs.end();
+}
+
+void loadCalibrationFromStorage() {
+  PersistedCalibration persisted;
+  if (!loadPersistedCalibration(&persisted)) {
+    return;
+  }
+
+  portENTER_CRITICAL(&g_calibrationMux);
+  g_state.initialized = true;
+  g_state.hasCalibration = persisted.hasCalibration;
+  g_state.leftLimitDeg = normalizeDeg(persisted.leftLimitDeg);
+  g_state.rightLimitDeg = normalizeDeg(persisted.rightLimitDeg);
+  g_state.rawCenterDeg = normalizeDeg(persisted.centerDeg);
+  g_state.userOffsetDeg = persisted.userOffsetDeg;
+  g_state.lastCalibrationMs = persisted.hasCalibration ? millis() : 0;
+  recalcAdjustedCenterLocked();
+  portEXIT_CRITICAL(&g_calibrationMux);
+}
 }  // namespace
 
 void steeringCalibrationInit(float defaultCenterDeg, float defaultSpanDeg) {
@@ -83,6 +162,8 @@ void steeringCalibrationInit(float defaultCenterDeg, float defaultSpanDeg) {
   g_state.lastCalibrationMs = 0;
   recalcAdjustedCenterLocked();
   portEXIT_CRITICAL(&g_calibrationMux);
+
+  loadCalibrationFromStorage();
 }
 
 SteeringCalibrationData steeringCalibrationSnapshot() {
@@ -108,13 +189,17 @@ bool steeringCalibrationConsumeRequest() {
 }
 
 void steeringCalibrationSetOffset(float offsetDeg) {
+  SteeringCalibrationData snapshot;
   portENTER_CRITICAL(&g_calibrationMux);
   g_state.userOffsetDeg = offsetDeg;
   recalcAdjustedCenterLocked();
+  snapshot = g_state;
   portEXIT_CRITICAL(&g_calibrationMux);
+  persistCalibrationSnapshot(snapshot);
 }
 
 void steeringCalibrationApply(float leftDeg, float rightDeg) {
+  SteeringCalibrationData snapshot;
   portENTER_CRITICAL(&g_calibrationMux);
   g_state.initialized = true;
   g_state.hasCalibration = true;
@@ -123,5 +208,7 @@ void steeringCalibrationApply(float leftDeg, float rightDeg) {
   g_state.rawCenterDeg = normalizeDeg((leftDeg + rightDeg) * 0.5f);
   g_state.lastCalibrationMs = millis();
   recalcAdjustedCenterLocked();
+  snapshot = g_state;
   portEXIT_CRITICAL(&g_calibrationMux);
+  persistCalibrationSnapshot(snapshot);
 }
