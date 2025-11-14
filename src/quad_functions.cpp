@@ -96,6 +96,13 @@ void applyBrakeAngles(int angleServoADeg, int angleServoBDeg) {
   g_brakeCurrentAngles.servoB = clampedB;
 }
 
+int interpolateAngle(int releaseAngleDeg, int brakeAngleDeg, uint8_t percent) {
+  const int delta = brakeAngleDeg - releaseAngleDeg;
+  const int interpolated =
+      releaseAngleDeg + static_cast<int>((delta * static_cast<int>(percent)) / 100);
+  return clampAngle(interpolated);
+}
+
 int updateThrottleFilter(int rawValue) {
   if (rawValue > 100) {
     rawValue = 100;
@@ -262,6 +269,23 @@ void quadBrakeRelease() {
   applyBrakeAngles(g_brakeConfig.releaseAngleServoADeg, g_brakeConfig.releaseAngleServoBDeg);
 }
 
+void quadBrakeApplyPercent(uint8_t percent) {
+  if (!g_brakeInitialized) {
+    return;
+  }
+  if (percent > 100u) {
+    percent = 100u;
+  }
+  const int targetAngleA =
+      interpolateAngle(g_brakeConfig.releaseAngleServoADeg, g_brakeConfig.brakeAngleServoADeg, percent);
+  const int targetAngleB =
+      interpolateAngle(g_brakeConfig.releaseAngleServoBDeg, g_brakeConfig.brakeAngleServoBDeg, percent);
+  if (g_brakeCurrentAngles.servoA == targetAngleA && g_brakeCurrentAngles.servoB == targetAngleB) {
+    return;
+  }
+  applyBrakeAngles(targetAngleA, targetAngleB);
+}
+
 void taskQuadDriveControl(void* parameter) {
   const QuadDriveTaskConfig* cfg = static_cast<const QuadDriveTaskConfig*>(parameter);
   if (cfg == nullptr) {
@@ -328,15 +352,14 @@ void taskQuadDriveControl(void* parameter) {
 
     const int duty = quadThrottleUpdate(commandValue);
 
-    int brakeInput = throttleDataFresh(pdMS_TO_TICKS(60)) ? getFilteredThrottleValue() : 0;
-    if (commandFromPi) {
-      int piBrakeValue = static_cast<int>(piBrakePercent);
-      if (piBrakeValue > 100) {
-        piBrakeValue = 100;
-      }
-      brakeInput = piEstopActive ? -100 : -piBrakeValue;
+    const bool piBrakeActive = piFresh;
+    const uint8_t appliedPiBrakePercent = piEstopActive ? 100 : piBrakePercent;
+    if (piBrakeActive) {
+      quadBrakeApplyPercent(appliedPiBrakePercent);
+    } else {
+      const int brakeInput = throttleDataFresh(pdMS_TO_TICKS(60)) ? getFilteredThrottleValue() : 0;
+      quadBrakeUpdate(brakeInput);
     }
-    quadBrakeUpdate(brakeInput);
 
     if (cfg->log && (commandValue != lastThrottleCmdValue || duty != lastDutyReported ||
                      g_brakeCurrentAngles.servoA != lastBrakeReportedA ||
@@ -355,11 +378,11 @@ void taskQuadDriveControl(void* parameter) {
       msg += "deg brakeB=";
       msg += g_brakeCurrentAngles.servoB;
       msg += "deg";
-      if (commandFromPi && piFresh) {
+      if (piFresh) {
         msg += " piAgeMs=";
         msg += static_cast<int>((sampleTick - piSnapshot.lastFrameTick) * portTICK_PERIOD_MS);
         msg += " piBrake=";
-        msg += piBrakePercent;
+        msg += appliedPiBrakePercent;
       } else if (snapshotFresh) {
         msg += " raw=";
         msg += rawThrottle;

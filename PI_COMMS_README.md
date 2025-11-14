@@ -63,7 +63,8 @@ Implementación de CRC: `crc8_maxim` en `src/pi_comms.cpp`.
 
 - El bit `DRIVE_EN` debe estar en 1.  
 - `accel_i8` se mapea directamente a `accelEffective` y alimenta al cálculo de PWM (`quadThrottleUpdate`).  
-- `brake_u8` reduce los servos de freno de 0 % (liberado) a 100 % (freno total).
+- `brake_u8` (0..100) se traduce en `quadBrakeApplyPercent`: 0 % mantiene los servos en la posición de liberado y 100 % corresponde al ángulo de freno total definido en `QuadBrakeConfig`.  
+- Cuando la Pi está comandando, `taskQuadDriveControl` ignora el valor de freno derivado del RC y solo respeta el porcentaje solicitado por `brake_u8`.
 
 ### 4.2 Reversa segura
 
@@ -74,13 +75,13 @@ Implementación de CRC: `crc8_maxim` en `src/pi_comms.cpp`.
 
 ### 4.3 ESTOP y failsafe
 
-- `ESTOP` (bit 0) provoca freno inmediato y duty mínimo, ignorando cualquier otro comando.  
+- `ESTOP` (bit 0) provoca freno inmediato y duty mínimo, ignorando cualquier otro comando. Mientras `ESTOP` permanezca activo se fuerza `brake_u8 = 100%` aunque la Pi envíe otro valor.  
 - Si no llegan frames válidos en ~120 ms, `PiUartRx` marca el snapshot como viejo; `taskQuadDriveControl` cae a control RC con freno al 100 %.
 
 ### 4.4 Dirección y freno
 
 - `steer_i8` todavía no se usa directamente; el PID continúa leyendo el receptor RC.  
-- `brake_u8` (0..100) se convierte a un valor negativo equivalente para reutilizar la lógica existente de freno basado en throttle filtrado.
+- `brake_u8` (0..100) controla los servos mediante `quadBrakeApplyPercent`. Cuando no hay datos frescos de la Pi el proyecto vuelve a su modo original (freno automático derivado del throttle filtrado del RC).
 
 ---
 
