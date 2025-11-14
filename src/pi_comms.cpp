@@ -88,6 +88,71 @@ struct FrameParser {
   }
 };
 
+void appendFlag(String& out, bool enabled, const char* label) {
+  if (!enabled) {
+    return;
+  }
+  if (out.length() > 0) {
+    out += '|';
+  }
+  out += label;
+}
+
+String describeCommandFlags(uint8_t verFlags) {
+  String msg;
+  msg.reserve(48);
+  msg += "ver=";
+  msg += (verFlags >> 4) & 0x0F;
+  msg += " flags=";
+  String flags;
+  appendFlag(flags, (verFlags & 0x01) != 0, "ESTOP");
+  appendFlag(flags, (verFlags & 0x02) != 0, "DRIVE_EN");
+  appendFlag(flags, (verFlags & 0x04) != 0, "ALLOW_REV");
+  appendFlag(flags, (verFlags & 0x08) != 0, "RESV");
+  msg += (flags.length() > 0) ? flags : "none";
+  return msg;
+}
+
+String describeStatusFlags(uint8_t status) {
+  String flags;
+  flags.reserve(48);
+  appendFlag(flags, (status & 0x01) != 0, "READY");
+  appendFlag(flags, (status & 0x02) != 0, "FAULT");
+  appendFlag(flags, (status & 0x04) != 0, "OVERCURRENT");
+  appendFlag(flags, (status & 0x08) != 0, "REV_REQ");
+  String msg;
+  msg.reserve(64);
+  msg += "status=0x";
+  msg += String(status, HEX);
+  msg += " (";
+  msg += (flags.length() > 0) ? flags : "none";
+  msg += ")";
+  return msg;
+}
+
+String describeTelemetry(uint8_t telemetry) {
+  if (telemetry <= 100) {
+    String pct = String(telemetry);
+    pct += "%";
+    return pct;
+  }
+  switch (telemetry) {
+    case 101:
+      return "TEMP_HIGH";
+    case 102:
+      return "SENSOR_ERR";
+    case 103:
+      return "ENC_ERR";
+    case 255:
+      return "N/A";
+    default: {
+      String hex = "0x";
+      hex += String(telemetry, HEX);
+      return hex;
+    }
+  }
+}
+
 void logRxFrame(const PiCommsConfig& cfg, const PiRxState& state, TickType_t nowTick) {
   if (!cfg.logRx) {
     return;
@@ -98,21 +163,25 @@ void logRxFrame(const PiCommsConfig& cfg, const PiRxState& state, TickType_t now
     return;
   }
   String msg;
-  msg.reserve(96);
-  msg += "[PI][RX] verFlags=0x";
-  msg += String(state.verFlags, HEX);
+  msg.reserve(160);
+  msg += "[PI][RX] ";
+  msg += describeCommandFlags(state.verFlags);
   msg += " steer=";
   msg += state.steer;
+  msg += "%";
   msg += " accel=";
   msg += state.accel;
+  msg += "%";
   msg += " brake=";
   msg += state.brake;
-  msg += " ok=";
+  msg += "%";
+  msg += " stats{ok=";
   msg += state.framesOk;
   msg += " crcErr=";
   msg += state.framesCrcError;
   msg += " malformed=";
   msg += state.framesMalformed;
+  msg += "}";
   broadcastIf(true, msg);
   s_lastLogTick = nowTick;
 }
@@ -126,10 +195,21 @@ void logRxError(const PiCommsConfig& cfg, const char* reason, TickType_t nowTick
   if (s_lastErrorLogTick != 0 && (nowTick - s_lastErrorLogTick) < minInterval) {
     return;
   }
+  PiRxState snapshot{};
+  portENTER_CRITICAL(&g_stateMux);
+  snapshot = g_rxState;
+  portEXIT_CRITICAL(&g_stateMux);
   String msg;
-  msg.reserve(64);
+  msg.reserve(128);
   msg += "[PI][RX][WARN] ";
   msg += reason;
+  msg += " stats{ok=";
+  msg += snapshot.framesOk;
+  msg += " crcErr=";
+  msg += snapshot.framesCrcError;
+  msg += " malformed=";
+  msg += snapshot.framesMalformed;
+  msg += "}";
   broadcastIf(true, msg);
   s_lastErrorLogTick = nowTick;
 }
@@ -144,11 +224,11 @@ void logTxFrame(const PiCommsConfig& cfg, uint8_t status, uint8_t telemetry, Tic
     return;
   }
   String msg;
-  msg.reserve(64);
-  msg += "[PI][TX] status=0x";
-  msg += String(status, HEX);
+  msg.reserve(112);
+  msg += "[PI][TX] ";
+  msg += describeStatusFlags(status);
   msg += " telemetry=";
-  msg += telemetry;
+  msg += describeTelemetry(telemetry);
   broadcastIf(true, msg);
   s_lastLogTick = nowTick;
 }
