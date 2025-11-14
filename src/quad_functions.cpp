@@ -7,6 +7,7 @@
 
 #include "fs_ia6.h"
 #include "ota_telnet.h"
+#include "pi_comms.h"
 
 namespace {
 
@@ -143,6 +144,8 @@ bool throttleDataFresh(TickType_t maxAgeTicks) {
   return (now - g_lastThrottleUpdateTick) <= maxAgeTicks;
 }
 
+constexpr TickType_t kPiSnapshotFreshTicks = pdMS_TO_TICKS(120);
+
 }  // namespace
 
 void initQuadThrottle(const QuadThrottleConfig& config) {
@@ -275,7 +278,7 @@ void taskQuadDriveControl(void* parameter) {
   const TickType_t period = (cfg->period > 0) ? cfg->period : pdMS_TO_TICKS(30);
   TickType_t lastStaleLog = 0;
   TickType_t lastPerfLog = 0;
-  int lastThrottleRcValue = 9999;
+  int lastThrottleCmdValue = 9999;
   int lastDutyReported = -1;
   int lastBrakeReportedA = -1;
   int lastBrakeReportedB = -1;
@@ -302,18 +305,47 @@ void taskQuadDriveControl(void* parameter) {
     if (snapshotFresh) {
       g_lastThrottleUpdateTick = snapshotTick;
     }
-    const int duty = quadThrottleUpdate(rcValue);
 
-    const int brakeInput = throttleDataFresh(pdMS_TO_TICKS(60)) ? getFilteredThrottleValue() : 0;
+    PiCommsRxSnapshot piSnapshot{};
+    const bool piDriverReady = piCommsGetRxSnapshot(piSnapshot);
+    const bool piFresh = piDriverReady && piSnapshot.hasFrame && piSnapshot.lastFrameTick != 0 &&
+                         (sampleTick - piSnapshot.lastFrameTick) <= kPiSnapshotFreshTicks;
+    bool commandFromPi = false;
+    bool piEstopActive = false;
+    int commandValue = rcValue;
+    uint8_t piBrakePercent = 0;
+    if (piFresh) {
+      piBrakePercent = piSnapshot.brake;
+      if (piSnapshot.estop) {
+        commandValue = -100;
+        commandFromPi = true;
+        piEstopActive = true;
+      } else if (piSnapshot.driveEnabled) {
+        commandValue = piSnapshot.accelEffective;
+        commandFromPi = true;
+      }
+    }
+
+    const int duty = quadThrottleUpdate(commandValue);
+
+    int brakeInput = throttleDataFresh(pdMS_TO_TICKS(60)) ? getFilteredThrottleValue() : 0;
+    if (commandFromPi) {
+      int piBrakeValue = static_cast<int>(piBrakePercent);
+      if (piBrakeValue > 100) {
+        piBrakeValue = 100;
+      }
+      brakeInput = piEstopActive ? -100 : -piBrakeValue;
+    }
     quadBrakeUpdate(brakeInput);
 
-    if (cfg->log && (rcValue != lastThrottleRcValue || duty != lastDutyReported ||
+    if (cfg->log && (commandValue != lastThrottleCmdValue || duty != lastDutyReported ||
                      g_brakeCurrentAngles.servoA != lastBrakeReportedA ||
                      g_brakeCurrentAngles.servoB != lastBrakeReportedB)) {
       String msg;
       msg.reserve(96);
-      msg += "[DRIVE] rc=";
-      msg += rcValue;
+      msg += "[DRIVE] cmd=";
+      msg += commandValue;
+      msg += commandFromPi ? " (PI)" : " (RC)";
       msg += " duty=";
       msg += duty;
       msg += "/";
@@ -323,7 +355,12 @@ void taskQuadDriveControl(void* parameter) {
       msg += "deg brakeB=";
       msg += g_brakeCurrentAngles.servoB;
       msg += "deg";
-      if (snapshotFresh) {
+      if (commandFromPi && piFresh) {
+        msg += " piAgeMs=";
+        msg += static_cast<int>((sampleTick - piSnapshot.lastFrameTick) * portTICK_PERIOD_MS);
+        msg += " piBrake=";
+        msg += piBrakePercent;
+      } else if (snapshotFresh) {
         msg += " raw=";
         msg += rawThrottle;
       } else {
@@ -332,13 +369,13 @@ void taskQuadDriveControl(void* parameter) {
       msg += " ageMs=";
       msg += static_cast<int>((sampleTick - snapshotTick) * portTICK_PERIOD_MS);
       broadcastIf(true, msg);
-      lastThrottleRcValue = rcValue;
+      lastThrottleCmdValue = commandValue;
       lastDutyReported = duty;
       lastBrakeReportedA = g_brakeCurrentAngles.servoA;
       lastBrakeReportedB = g_brakeCurrentAngles.servoB;
     }
 
-    if (cfg->log && !snapshotFresh) {
+    if (cfg->log && !snapshotFresh && !commandFromPi) {
       if ((sampleTick - lastStaleLog) >= pdMS_TO_TICKS(500)) {
         broadcastIf(true, "[DRIVE] sin datos frescos del RC (>50ms); usando 0");
         lastStaleLog = sampleTick;

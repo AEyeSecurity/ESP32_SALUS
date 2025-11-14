@@ -22,7 +22,15 @@ struct PiRxState {
   TickType_t lastFrameTick = 0;
   uint8_t verFlags = 0;
   int8_t steer = 0;
-  int8_t accel = 0;
+  int8_t accelRaw = 0;
+  int8_t accelEffective = 0;
+  bool driveEnabled = false;
+  bool estop = false;
+  bool allowReverse = false;
+  bool wantsReverse = false;
+  bool reverseRequestActive = false;
+  bool reverseAwaitingGrant = false;
+  bool reverseGranted = false;
   uint8_t brake = 0;
   uint32_t framesOk = 0;
   uint32_t framesCrcError = 0;
@@ -36,8 +44,19 @@ struct PiTxState {
 
 PiRxState g_rxState{};
 PiTxState g_txState{};
+uint8_t g_manualStatusFlags = 0;
+bool g_reverseRequestActive = false;
 
 portMUX_TYPE g_stateMux = portMUX_INITIALIZER_UNLOCKED;
+
+constexpr uint8_t kCmdFlagEstop = 1 << 0;
+constexpr uint8_t kCmdFlagDriveEnable = 1 << 1;
+constexpr uint8_t kCmdFlagAllowReverse = 1 << 2;
+
+constexpr uint8_t kStatusReady = 1 << 0;
+constexpr uint8_t kStatusFault = 1 << 1;
+constexpr uint8_t kStatusOvercurrent = 1 << 2;
+constexpr uint8_t kStatusReverseReq = 1 << 3;
 
 uint8_t crc8_maxim(const uint8_t* data, size_t len) {
   uint8_t c = 0x00;
@@ -169,12 +188,30 @@ void logRxFrame(const PiCommsConfig& cfg, const PiRxState& state, TickType_t now
   msg += " steer=";
   msg += state.steer;
   msg += "%";
-  msg += " accel=";
-  msg += state.accel;
+  msg += " accelRaw=";
+  msg += state.accelRaw;
+  msg += "%";
+  msg += " accelEff=";
+  msg += state.accelEffective;
   msg += "%";
   msg += " brake=";
   msg += state.brake;
   msg += "%";
+  msg += " estop=";
+  msg += state.estop ? "Y" : "N";
+  msg += " drive=";
+  msg += state.driveEnabled ? "Y" : "N";
+  msg += " reverse{allow=";
+  msg += state.allowReverse ? "Y" : "N";
+  msg += " wants=";
+  msg += state.wantsReverse ? "Y" : "N";
+  msg += " req=";
+  msg += state.reverseRequestActive ? "Y" : "N";
+  msg += " wait=";
+  msg += state.reverseAwaitingGrant ? "Y" : "N";
+  msg += " granted=";
+  msg += state.reverseGranted ? "Y" : "N";
+  msg += "}";
   msg += " stats{ok=";
   msg += state.framesOk;
   msg += " crcErr=";
@@ -267,8 +304,10 @@ bool piCommsInit(const PiCommsConfig& config) {
   portENTER_CRITICAL(&g_stateMux);
   g_rxState = PiRxState{};
   g_txState = PiTxState{};
-  g_txState.statusFlags = 0x01;
+  g_txState.statusFlags = kStatusReady;
   g_txState.telemetry = 255;
+  g_manualStatusFlags = 0;
+  g_reverseRequestActive = false;
   portEXIT_CRITICAL(&g_stateMux);
 
   g_initialized = true;
@@ -282,8 +321,16 @@ bool piCommsGetRxSnapshot(PiCommsRxSnapshot& snapshot) {
   snapshot.lastFrameTick = g_rxState.lastFrameTick;
   snapshot.verFlags = g_rxState.verFlags;
   snapshot.steer = g_rxState.steer;
-  snapshot.accel = g_rxState.accel;
+  snapshot.accelRaw = g_rxState.accelRaw;
+  snapshot.accelEffective = g_rxState.accelEffective;
   snapshot.brake = g_rxState.brake;
+  snapshot.driveEnabled = g_rxState.driveEnabled;
+  snapshot.estop = g_rxState.estop;
+  snapshot.allowReverse = g_rxState.allowReverse;
+  snapshot.wantsReverse = g_rxState.wantsReverse;
+  snapshot.reverseRequestActive = g_rxState.reverseRequestActive;
+  snapshot.reverseAwaitingGrant = g_rxState.reverseAwaitingGrant;
+  snapshot.reverseGranted = g_rxState.reverseGranted;
   snapshot.framesOk = g_rxState.framesOk;
   snapshot.framesCrcError = g_rxState.framesCrcError;
   snapshot.framesMalformed = g_rxState.framesMalformed;
@@ -301,7 +348,8 @@ void piCommsResetStats() {
 
 void piCommsSetStatusFlags(uint8_t flags) {
   portENTER_CRITICAL(&g_stateMux);
-  g_txState.statusFlags = flags | 0x01;  // READY siempre activo
+  const uint8_t sanitized = (flags | kStatusReady) & ~kStatusReverseReq;
+  g_txState.statusFlags = sanitized;
   portEXIT_CRITICAL(&g_stateMux);
 }
 
@@ -365,16 +413,35 @@ void taskPiCommsRx(void* parameter) {
         newState.lastFrameTick = nowTick;
         newState.verFlags = frame[1];
         newState.steer = static_cast<int8_t>(frame[2]);
-        newState.accel = static_cast<int8_t>(frame[3]);
+        newState.accelRaw = static_cast<int8_t>(frame[3]);
         newState.brake = frame[4];
+        newState.estop = (newState.verFlags & kCmdFlagEstop) != 0;
+        newState.driveEnabled = (newState.verFlags & kCmdFlagDriveEnable) != 0;
+        newState.allowReverse = (newState.verFlags & kCmdFlagAllowReverse) != 0;
+        newState.wantsReverse = (newState.accelRaw < 0);
+        newState.reverseRequestActive = newState.wantsReverse;
+        newState.reverseAwaitingGrant = newState.wantsReverse && !newState.allowReverse;
+        const bool reverseGranted = newState.wantsReverse && newState.allowReverse;
+        newState.reverseGranted = reverseGranted;
+        newState.accelEffective =
+            reverseGranted ? newState.accelRaw : ((newState.accelRaw > 0) ? newState.accelRaw : 0);
 
         portENTER_CRITICAL(&g_stateMux);
         g_rxState.hasFrame = newState.hasFrame;
         g_rxState.lastFrameTick = newState.lastFrameTick;
         g_rxState.verFlags = newState.verFlags;
         g_rxState.steer = newState.steer;
-        g_rxState.accel = newState.accel;
+        g_rxState.accelRaw = newState.accelRaw;
+        g_rxState.accelEffective = newState.accelEffective;
+        g_rxState.estop = newState.estop;
+        g_rxState.driveEnabled = newState.driveEnabled;
+        g_rxState.allowReverse = newState.allowReverse;
+        g_rxState.wantsReverse = newState.wantsReverse;
+        g_rxState.reverseRequestActive = newState.reverseRequestActive;
+        g_rxState.reverseAwaitingGrant = newState.reverseAwaitingGrant;
+        g_rxState.reverseGranted = newState.reverseGranted;
         g_rxState.brake = newState.brake;
+        g_reverseRequestActive = newState.reverseRequestActive;
         g_rxState.framesOk++;
         newState.framesOk = g_rxState.framesOk;
         newState.framesCrcError = g_rxState.framesCrcError;
@@ -404,10 +471,17 @@ void taskPiCommsTx(void* parameter) {
     if (g_initialized) {
       uint8_t status = 0;
       uint8_t telemetry = 255;
+      bool reverseRequest = false;
       portENTER_CRITICAL(&g_stateMux);
       status = g_txState.statusFlags;
       telemetry = g_txState.telemetry;
+      reverseRequest = g_reverseRequestActive;
       portEXIT_CRITICAL(&g_stateMux);
+      if (reverseRequest) {
+        status |= kStatusReverseReq;
+      } else {
+        status &= ~kStatusReverseReq;
+      }
 
       uint8_t frame[kTxFrameSize];
       frame[0] = kHeaderTx;

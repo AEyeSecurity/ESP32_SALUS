@@ -26,8 +26,16 @@ struct PiCommsRxSnapshot {
   TickType_t lastFrameTick;
   uint8_t verFlags;
   int8_t steer;
-  int8_t accel;
+  int8_t accelRaw;
+  int8_t accelEffective;
   uint8_t brake;
+  bool driveEnabled;
+  bool estop;
+  bool allowReverse;
+  bool wantsReverse;
+  bool reverseRequestActive;
+  bool reverseAwaitingGrant;
+  bool reverseGranted;
   uint32_t framesOk;
   uint32_t framesCrcError;
   uint32_t framesMalformed;
