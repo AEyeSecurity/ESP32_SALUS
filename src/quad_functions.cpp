@@ -332,8 +332,14 @@ void taskQuadDriveControl(void* parameter) {
 
     PiCommsRxSnapshot piSnapshot{};
     const bool piDriverReady = piCommsGetRxSnapshot(piSnapshot);
-    const bool piFresh = piDriverReady && piSnapshot.hasFrame && piSnapshot.lastFrameTick != 0 &&
-                         (sampleTick - piSnapshot.lastFrameTick) <= kPiSnapshotFreshTicks;
+    TickType_t piAgeTicks = 0;
+    bool piAgeValid = false;
+    if (piSnapshot.lastFrameTick != 0) {
+      piAgeTicks = xTaskGetTickCount() - piSnapshot.lastFrameTick;
+      piAgeValid = true;
+    }
+    const bool piFresh =
+        piDriverReady && piSnapshot.hasFrame && piAgeValid && piAgeTicks <= kPiSnapshotFreshTicks;
     bool commandFromPi = false;
     bool piEstopActive = false;
     int commandValue = rcValue;
@@ -380,7 +386,7 @@ void taskQuadDriveControl(void* parameter) {
       msg += "deg";
       if (piFresh) {
         msg += " piAgeMs=";
-        msg += static_cast<int>((sampleTick - piSnapshot.lastFrameTick) * portTICK_PERIOD_MS);
+        msg += static_cast<int>(piAgeTicks * portTICK_PERIOD_MS);
         msg += " piBrake=";
         msg += appliedPiBrakePercent;
       } else if (snapshotFresh) {

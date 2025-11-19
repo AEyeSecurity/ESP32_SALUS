@@ -419,8 +419,8 @@ void taskPiCommsRx(void* parameter) {
         newState.driveEnabled = (newState.verFlags & kCmdFlagDriveEnable) != 0;
         newState.allowReverse = (newState.verFlags & kCmdFlagAllowReverse) != 0;
         newState.wantsReverse = (newState.accelRaw < 0);
-        newState.reverseRequestActive = newState.wantsReverse;
-        newState.reverseAwaitingGrant = newState.wantsReverse && !newState.allowReverse;
+        newState.reverseRequestActive = newState.wantsReverse && !newState.allowReverse;
+        newState.reverseAwaitingGrant = newState.reverseRequestActive;
         const bool reverseGranted = newState.wantsReverse && newState.allowReverse;
         newState.reverseGranted = reverseGranted;
         newState.accelEffective =
