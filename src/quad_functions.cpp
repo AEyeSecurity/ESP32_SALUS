@@ -190,20 +190,24 @@ int quadThrottleUpdate(int rcValue) {
     rcValue = -100;
   }
 
+  // Usar la magnitud del comando tanto para avance como reversa; el sentido se
+  // resuelve fuera (relé) pero el PWM refleja la intensidad solicitada.
+  const int magnitude = abs(rcValue);
+
   const int threshold = g_config.activationThreshold;
   int duty = g_config.pwmMinDuty;
 
-  if (rcValue > threshold) {
+  if (magnitude > threshold) {
     const int span = g_config.pwmMaxDuty - g_config.pwmMinDuty;
     const int range = 100 - threshold;
     if (range <= 0) {
       duty = g_config.pwmMaxDuty;
     } else {
-      duty = g_config.pwmMinDuty + ((rcValue - threshold) * span) / range;
+      duty = g_config.pwmMinDuty + ((magnitude - threshold) * span) / range;
     }
   }
 
-  if (rcValue <= threshold) {
+  if (magnitude <= threshold) {
     duty = g_config.pwmMinDuty;
   }
 
