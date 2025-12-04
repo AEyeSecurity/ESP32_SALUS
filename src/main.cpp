@@ -28,10 +28,10 @@ constexpr int AS5600_SCL_PIN = 26;
 
 constexpr float PID_CENTER_DEG = 240.0f;
 constexpr float PID_SPAN_DEG = 40.0f;
-constexpr float PID_DEADBAND_PERCENT = 2.0f;
+constexpr float PID_DEADBAND_PERCENT = 0.25f;
 constexpr float PID_MIN_ACTIVE_PERCENT = 15.0f;
 constexpr float PID_KP = 3.0f;
-constexpr float PID_KI = 0.0f;
+constexpr float PID_KI = 0.5f;
 constexpr float PID_KD = 0.0f;
 constexpr float PID_INTEGRAL_LIMIT = 50.0f;
 
@@ -83,9 +83,9 @@ constexpr bool kLogBridge = false;
 constexpr bool kLogLoop = false;
 constexpr bool kLogRc = false;
 constexpr bool kLogAs5600 = false;
-constexpr bool kLogPid = false;
-constexpr bool kLogDrive = true;
-constexpr bool kLogPiComms = true;
+constexpr bool kLogPid = true;
+constexpr bool kLogDrive = false;
+constexpr bool kLogPiComms = false;
 constexpr bool kEnableBridgeTask = false;
 constexpr bool kEnableRcTask = false;
 constexpr bool kEnablePidTask = true;
