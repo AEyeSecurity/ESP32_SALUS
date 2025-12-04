@@ -4,7 +4,7 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 
 ## Flujo de arranque (src/main.cpp)
 
-1. `setup()` inicializa UART (`InicializaUart`), WiFi en modo AP (`InicializaWiFi`), OTA (`InicializaOTA`) y el servidor Telnet (`InicializaTelnet`).
+1. `setup()` inicializa el enlace UART con la Raspberry Pi (`piCommsInit`), WiFi en modo AP (`InicializaWiFi`), OTA (`InicializaOTA`) y el servidor Telnet (`InicializaTelnet`).
 2. Se configuran los limites del controlador PID (`PidController::setTunings`, `setOutputLimits`, `setIntegralLimits`, `reset`).
 3. Se configuran pines de entrada para los canales RC (GPIO0, GPIO2, GPIO4, GPIO16) y se habilita el lector RMT que captura los pulsos del receptor FS-iA6.
 4. Se crean las tareas FreeRTOS usando `startTaskPinned` (`src/freertos_utils.cpp`), pasando los `*_TaskConfig` con parametros de periodo, logging y auto-inicializacion de hardware.
@@ -22,6 +22,8 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 | `taskQuadDriveControl`   | `src/quad_functions.cpp` | 4096 (~16 KB)        | 3    | 1      | Notificacin RC (timeout 30 ms)             | `debug::kEnableDriveTask` (true) | Filtra acelerador, actualiza LEDC y servos de freno en una nica tarea coherente. |
 | `taskRcMonitor`          | `src/fs_ia6.cpp`         | 2048 (~8 KB)         | 1    | 1      | 100 ms periodica (`vTaskDelay`)              | `debug::kEnableRcTask` (false) | Solo loguea el snapshot compartido; ideal para calibracion. |
 | `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~16 KB)        | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
+| `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~12 KB)        | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA`, mantiene `PiCommsRxSnapshot` y levanta `REVERSE_REQ`. |
+| `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~8 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status telemetry crc]`, reflejando `READY/FAULT/REV_REQ`. |
 | `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Maneja mensajes UART y reenvia a Telnet cuando `debug::kLogLoop` esta activo. |
 
 > Nota: FreeRTOS en ESP32 interpreta el parametro `stackSize` en palabras de 32 bits. 4096 palabras equivalen a ~16 KB.
@@ -72,6 +74,18 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 - Funcionamiento: habilita el puente H, recorre rampas de duty 0-100% a izquierda y derecha con pasos de 5% y retardos de 80/60 ms. Entre rampas hay pausas de 300 ms y 2 s.
 - Seguridad: usa `bridge_limit_*` para impedir movimiento contra el final de carrera. Muestra mensajes `[HBRIDGE]` periodicamente.
 - Cadencia: no tiene un periodo fijo; la tarea usa multiples `vTaskDelay` en cada etapa del ciclo.
+
+## Comunicaciones UART con Raspberry Pi
+
+- El enlace binario se implementa en `taskPiCommsRx`/`taskPiCommsTx` (`src/pi_comms.cpp`) y usa `GPIO3/GPIO1` a **460 800 bps**.  
+- `taskPiCommsRx` publica un `PiCommsRxSnapshot` con `steer`, `accelRaw`, `accelEffective`, `brake`, `estop`, `driveEnabled` y el estado del pedido de reversa.  
+- `taskPICommsTx` levanta el flag `REVERSE_REQ` cuando la Pi pide aceleraciones negativas y lo mantiene hasta que llega `ALLOW_REVERSE`.  
+- `taskQuadDriveControl` consume el snapshot:  
+  - `ESTOP` → freno completo y duty mínimo.  
+  - `DRIVE_EN` + `accelEffective` (0..100) → aceleración proporcional.  
+  - `brake_u8` → manda los servos a la posición equivalente (0 % liberado, 100 % freno).  
+- Para inspeccionar el estado usa Telnet (`comms.status`, `comms.reset`) o activa `debug::kLogPiComms`.  
+- Documentación detallada, pasos de prueba y troubleshooting: **[PI_COMMS_README.md](PI_COMMS_README.md)**.
 
 ### `loop()` (src/main.cpp)
 - Corre en el contexto de Arduino (core 1). Si `debug::kLogLoop` es true, reenvia cualquier mensaje recibido por UART al Telnet (`EnviarMensajeTelnet`).

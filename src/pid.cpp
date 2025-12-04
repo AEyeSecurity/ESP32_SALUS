@@ -11,6 +11,7 @@
 #include "h_bridge.h"
 #include "ota_telnet.h"
 #include "steering_calibration.h"
+#include "pi_comms.h"
 
 constexpr float kFullRotationDegrees = 360.0f;  // Degrees in one full turn for normalization
 
@@ -57,6 +58,8 @@ float ticksToSeconds(TickType_t ticks) {
   const float tickPeriodMs = static_cast<float>(portTICK_PERIOD_MS);
   return (static_cast<float>(ticks) * tickPeriodMs) / 1000.0f;
 }
+
+constexpr TickType_t kPiSnapshotFreshTicks = pdMS_TO_TICKS(120);
 }  // namespace
 
 namespace {
@@ -328,6 +331,25 @@ void taskPidControl(void* parameter) {
       rcSnapshot.steering = 0;
     }
     const int rcValue = rcSnapshot.steering;
+
+    PiCommsRxSnapshot piSnapshot{};
+    const bool piDriverReady = piCommsGetRxSnapshot(piSnapshot);
+    TickType_t piAgeTicks = 0;
+    bool piAgeValid = false;
+    if (piSnapshot.lastFrameTick != 0) {
+      piAgeTicks = nowTicks - piSnapshot.lastFrameTick;
+      piAgeValid = true;
+    }
+    const bool piFresh =
+        piDriverReady && piSnapshot.hasFrame && piAgeValid && piAgeTicks <= kPiSnapshotFreshTicks;
+
+    int steeringCommand = rcValue;
+    bool steeringFromPi = false;
+    if (piFresh) {
+      steeringCommand = piSnapshot.steer;
+      steeringFromPi = true;
+    }
+
     const float measuredDeg = cfg->sensor->getAngleDegrees();
 
     const bool limitLeftActive = bridge_limit_left_active();
@@ -545,7 +567,8 @@ void taskPidControl(void* parameter) {
     }
 
     const SteeringCalibrationData calibrationData = steeringCalibrationSnapshot();
-    const float targetDeg = mapRcValueToAngle(rcValue, calibrationData, cfg->centerDeg, cfg->spanDeg);
+    const float targetDeg =
+        mapRcValueToAngle(steeringCommand, calibrationData, cfg->centerDeg, cfg->spanDeg);
 
     bool skipControl = false;
     if (measuredDeg < 0.0f) {
@@ -620,6 +643,14 @@ void taskPidControl(void* parameter) {
         msg += " center=";
         msg += String(calibrationData.adjustedCenterDeg, 2);
         msg += "deg";
+        msg += " cmd=";
+        msg += steeringCommand;
+        msg += steeringFromPi ? " (PI" : " (RC";
+        if (steeringFromPi && piAgeValid) {
+          msg += " ageMs=";
+          msg += static_cast<int>(piAgeTicks * portTICK_PERIOD_MS);
+        }
+        msg += ")";
         msg += " rcGPIO16=";
         msg += rcValue;
         msg += " target=";

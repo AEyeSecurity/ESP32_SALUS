@@ -7,6 +7,7 @@
 
 #include "fs_ia6.h"
 #include "ota_telnet.h"
+#include "pi_comms.h"
 
 namespace {
 
@@ -95,6 +96,13 @@ void applyBrakeAngles(int angleServoADeg, int angleServoBDeg) {
   g_brakeCurrentAngles.servoB = clampedB;
 }
 
+int interpolateAngle(int releaseAngleDeg, int brakeAngleDeg, uint8_t percent) {
+  const int delta = brakeAngleDeg - releaseAngleDeg;
+  const int interpolated =
+      releaseAngleDeg + static_cast<int>((delta * static_cast<int>(percent)) / 100);
+  return clampAngle(interpolated);
+}
+
 int updateThrottleFilter(int rawValue) {
   if (rawValue > 100) {
     rawValue = 100;
@@ -143,6 +151,8 @@ bool throttleDataFresh(TickType_t maxAgeTicks) {
   return (now - g_lastThrottleUpdateTick) <= maxAgeTicks;
 }
 
+constexpr TickType_t kPiSnapshotFreshTicks = pdMS_TO_TICKS(120);
+
 }  // namespace
 
 void initQuadThrottle(const QuadThrottleConfig& config) {
@@ -180,20 +190,24 @@ int quadThrottleUpdate(int rcValue) {
     rcValue = -100;
   }
 
+  // Usar la magnitud del comando tanto para avance como reversa; el sentido se
+  // resuelve fuera (relé) pero el PWM refleja la intensidad solicitada.
+  const int magnitude = abs(rcValue);
+
   const int threshold = g_config.activationThreshold;
   int duty = g_config.pwmMinDuty;
 
-  if (rcValue > threshold) {
+  if (magnitude > threshold) {
     const int span = g_config.pwmMaxDuty - g_config.pwmMinDuty;
     const int range = 100 - threshold;
     if (range <= 0) {
       duty = g_config.pwmMaxDuty;
     } else {
-      duty = g_config.pwmMinDuty + ((rcValue - threshold) * span) / range;
+      duty = g_config.pwmMinDuty + ((magnitude - threshold) * span) / range;
     }
   }
 
-  if (rcValue <= threshold) {
+  if (magnitude <= threshold) {
     duty = g_config.pwmMinDuty;
   }
 
@@ -259,6 +273,23 @@ void quadBrakeRelease() {
   applyBrakeAngles(g_brakeConfig.releaseAngleServoADeg, g_brakeConfig.releaseAngleServoBDeg);
 }
 
+void quadBrakeApplyPercent(uint8_t percent) {
+  if (!g_brakeInitialized) {
+    return;
+  }
+  if (percent > 100u) {
+    percent = 100u;
+  }
+  const int targetAngleA =
+      interpolateAngle(g_brakeConfig.releaseAngleServoADeg, g_brakeConfig.brakeAngleServoADeg, percent);
+  const int targetAngleB =
+      interpolateAngle(g_brakeConfig.releaseAngleServoBDeg, g_brakeConfig.brakeAngleServoBDeg, percent);
+  if (g_brakeCurrentAngles.servoA == targetAngleA && g_brakeCurrentAngles.servoB == targetAngleB) {
+    return;
+  }
+  applyBrakeAngles(targetAngleA, targetAngleB);
+}
+
 void taskQuadDriveControl(void* parameter) {
   const QuadDriveTaskConfig* cfg = static_cast<const QuadDriveTaskConfig*>(parameter);
   if (cfg == nullptr) {
@@ -275,7 +306,7 @@ void taskQuadDriveControl(void* parameter) {
   const TickType_t period = (cfg->period > 0) ? cfg->period : pdMS_TO_TICKS(30);
   TickType_t lastStaleLog = 0;
   TickType_t lastPerfLog = 0;
-  int lastThrottleRcValue = 9999;
+  int lastThrottleCmdValue = 9999;
   int lastDutyReported = -1;
   int lastBrakeReportedA = -1;
   int lastBrakeReportedB = -1;
@@ -302,18 +333,52 @@ void taskQuadDriveControl(void* parameter) {
     if (snapshotFresh) {
       g_lastThrottleUpdateTick = snapshotTick;
     }
-    const int duty = quadThrottleUpdate(rcValue);
 
-    const int brakeInput = throttleDataFresh(pdMS_TO_TICKS(60)) ? getFilteredThrottleValue() : 0;
-    quadBrakeUpdate(brakeInput);
+    PiCommsRxSnapshot piSnapshot{};
+    const bool piDriverReady = piCommsGetRxSnapshot(piSnapshot);
+    TickType_t piAgeTicks = 0;
+    bool piAgeValid = false;
+    if (piSnapshot.lastFrameTick != 0) {
+      piAgeTicks = xTaskGetTickCount() - piSnapshot.lastFrameTick;
+      piAgeValid = true;
+    }
+    const bool piFresh =
+        piDriverReady && piSnapshot.hasFrame && piAgeValid && piAgeTicks <= kPiSnapshotFreshTicks;
+    bool commandFromPi = false;
+    bool piEstopActive = false;
+    int commandValue = rcValue;
+    uint8_t piBrakePercent = 0;
+    if (piFresh) {
+      piBrakePercent = piSnapshot.brake;
+      if (piSnapshot.estop) {
+        commandValue = -100;
+        commandFromPi = true;
+        piEstopActive = true;
+      } else if (piSnapshot.driveEnabled) {
+        commandValue = piSnapshot.accelEffective;
+        commandFromPi = true;
+      }
+    }
 
-    if (cfg->log && (rcValue != lastThrottleRcValue || duty != lastDutyReported ||
+    const int duty = quadThrottleUpdate(commandValue);
+
+    const bool piBrakeActive = piFresh;
+    const uint8_t appliedPiBrakePercent = piEstopActive ? 100 : piBrakePercent;
+    if (piBrakeActive) {
+      quadBrakeApplyPercent(appliedPiBrakePercent);
+    } else {
+      const int brakeInput = throttleDataFresh(pdMS_TO_TICKS(60)) ? getFilteredThrottleValue() : 0;
+      quadBrakeUpdate(brakeInput);
+    }
+
+    if (cfg->log && (commandValue != lastThrottleCmdValue || duty != lastDutyReported ||
                      g_brakeCurrentAngles.servoA != lastBrakeReportedA ||
                      g_brakeCurrentAngles.servoB != lastBrakeReportedB)) {
       String msg;
       msg.reserve(96);
-      msg += "[DRIVE] rc=";
-      msg += rcValue;
+      msg += "[DRIVE] cmd=";
+      msg += commandValue;
+      msg += commandFromPi ? " (PI)" : " (RC)";
       msg += " duty=";
       msg += duty;
       msg += "/";
@@ -323,7 +388,12 @@ void taskQuadDriveControl(void* parameter) {
       msg += "deg brakeB=";
       msg += g_brakeCurrentAngles.servoB;
       msg += "deg";
-      if (snapshotFresh) {
+      if (piFresh) {
+        msg += " piAgeMs=";
+        msg += static_cast<int>(piAgeTicks * portTICK_PERIOD_MS);
+        msg += " piBrake=";
+        msg += appliedPiBrakePercent;
+      } else if (snapshotFresh) {
         msg += " raw=";
         msg += rawThrottle;
       } else {
@@ -332,13 +402,13 @@ void taskQuadDriveControl(void* parameter) {
       msg += " ageMs=";
       msg += static_cast<int>((sampleTick - snapshotTick) * portTICK_PERIOD_MS);
       broadcastIf(true, msg);
-      lastThrottleRcValue = rcValue;
+      lastThrottleCmdValue = commandValue;
       lastDutyReported = duty;
       lastBrakeReportedA = g_brakeCurrentAngles.servoA;
       lastBrakeReportedB = g_brakeCurrentAngles.servoB;
     }
 
-    if (cfg->log && !snapshotFresh) {
+    if (cfg->log && !snapshotFresh && !commandFromPi) {
       if ((sampleTick - lastStaleLog) >= pdMS_TO_TICKS(500)) {
         broadcastIf(true, "[DRIVE] sin datos frescos del RC (>50ms); usando 0");
         lastStaleLog = sampleTick;

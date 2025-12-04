@@ -8,6 +8,7 @@
 #include <stdlib.h>
 
 #include "steering_calibration.h"
+#include "pi_comms.h"
 
 namespace {
 String g_telnetCommandBuffer;
@@ -114,6 +115,61 @@ void handleTelnetCommand(String line) {
     return;
   }
 
+  if (command.equalsIgnoreCase("comms.status")) {
+    PiCommsRxSnapshot snapshot{};
+    piCommsGetRxSnapshot(snapshot);
+    String msg = "[PI][STATUS] driver=";
+    msg += snapshot.driverReady ? "READY" : "NOT_READY";
+    msg += " lastFrame=";
+    if (snapshot.hasFrame) {
+      const TickType_t ageTicks = xTaskGetTickCount() - snapshot.lastFrameTick;
+      const uint32_t ageMs = ageTicks * portTICK_PERIOD_MS;
+      msg += String(ageMs);
+      msg += "ms";
+    } else {
+      msg += "NONE";
+    }
+    msg += " verFlags=0x";
+    msg += String(snapshot.verFlags, HEX);
+    msg += " steer=";
+    msg += snapshot.steer;
+    msg += " accelRaw=";
+    msg += snapshot.accelRaw;
+    msg += " accelEff=";
+    msg += snapshot.accelEffective;
+    msg += " brake=";
+    msg += snapshot.brake;
+    msg += " estop=";
+    msg += snapshot.estop ? "Y" : "N";
+    msg += " drive=";
+    msg += snapshot.driveEnabled ? "Y" : "N";
+    msg += " reverse{allow=";
+    msg += snapshot.allowReverse ? "Y" : "N";
+    msg += " wants=";
+    msg += snapshot.wantsReverse ? "Y" : "N";
+    msg += " req=";
+    msg += snapshot.reverseRequestActive ? "Y" : "N";
+    msg += " wait=";
+    msg += snapshot.reverseAwaitingGrant ? "Y" : "N";
+    msg += " granted=";
+    msg += snapshot.reverseGranted ? "Y" : "N";
+    msg += "}";
+    msg += " ok=";
+    msg += snapshot.framesOk;
+    msg += " crcErr=";
+    msg += snapshot.framesCrcError;
+    msg += " malformed=";
+    msg += snapshot.framesMalformed;
+    sendTelnet(msg);
+    return;
+  }
+
+  if (command.equalsIgnoreCase("comms.reset")) {
+    piCommsResetStats();
+    sendTelnet("[PI][STATUS] Contadores reseteados");
+    return;
+  }
+
   sendTelnet("[STEER] Comando desconocido: " + line);
 }
 
@@ -147,40 +203,23 @@ void processTelnetInput() {
 }  // namespace
 
 
-/* ========= UART ========= */
-void InicializaUart(long baud) { Serial.begin(baud); }
-
-void EnviarMensaje(const String& txt) { Serial.println(txt); }
-
-bool RecibirMensaje(String& txt) {
-  if (Serial.available()) {
-    txt = Serial.readStringUntil('\n');
-    return true;
-  }
-  return false;
-}
-
 /* ========= Wi-Fi ========= */
 void InicializaWiFi(const char* ssid, const char* pass) {
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ssid, pass);
-  IPAddress IP = WiFi.softAPIP();
-  Serial.print("AP IP address: ");
-  Serial.println(IP);
 }
 
 /* ========= OTA ========= */
 void InicializaOTA() {
-  ArduinoOTA.onStart([]() { EnviarMensaje("*** OTA INICIO ***"); });
-  ArduinoOTA.onEnd([]() { EnviarMensaje("*** OTA FIN ***"); });
-  ArduinoOTA.onError([](ota_error_t e) { EnviarMensaje("Error OTA: " + String(e)); });
+  ArduinoOTA.onStart([]() { EnviarMensajeTelnet("*** OTA INICIO ***"); });
+  ArduinoOTA.onEnd([]() { EnviarMensajeTelnet("*** OTA FIN ***"); });
+  ArduinoOTA.onError([](ota_error_t e) { EnviarMensajeTelnet("Error OTA: " + String(e)); });
   ArduinoOTA.begin();
 }
 
 void InicializaTelnet() {  // Inicia Telnet en puerto 23
   TelnetStream.begin(23);
   delay(1000);  // Esperar a que se inicie el servidor
-  EnviarMensaje("Servidor Telnet iniciado en puerto 23");
   TelnetStream.println("=== Servidor Telnet ESP32 ===");
   TelnetStream.println("Conexion establecida correctamente");
 }
@@ -190,10 +229,8 @@ void EnviarMensajeTelnet(const String& txt) {  // Envia mensaje por Telnet
 }
 
 void serialIf(bool enabled, const String& message) {
-  if (!enabled) {
-    return;
-  }
-  EnviarMensaje(message);
+  (void)enabled;
+  (void)message;
 }
 
 void telnetIf(bool enabled, const String& message) {
