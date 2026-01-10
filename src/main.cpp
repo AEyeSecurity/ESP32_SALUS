@@ -24,7 +24,7 @@ constexpr uint16_t STACK_PI_RX = 3072;
 constexpr uint16_t STACK_PI_TX = 2048;
 
 constexpr int AS5600_SDA_PIN = 25;
-constexpr int AS5600_SCL_PIN = 26;
+constexpr int AS5600_SCL_PIN = 33;
 
 constexpr float PID_CENTER_DEG = 240.0f;
 constexpr float PID_SPAN_DEG = 40.0f;
@@ -35,7 +35,7 @@ constexpr float PID_KI = 0.5f;
 constexpr float PID_KD = 0.0f;
 constexpr float PID_INTEGRAL_LIMIT = 50.0f;
 
-constexpr uint8_t THROTTLE_PWM_PIN = 17;
+constexpr uint8_t THROTTLE_PWM_PIN = 13;
 constexpr uint8_t THROTTLE_LEDC_CHANNEL = 4;
 constexpr uint32_t THROTTLE_PWM_FREQ = 20000;
 constexpr uint8_t THROTTLE_PWM_RESOLUTION = 8;
@@ -55,8 +55,8 @@ constexpr int THROTTLE_PWM_MAX_VALUE = (1 << THROTTLE_PWM_RESOLUTION) - 1;
 static_assert(THROTTLE_PWM_MAX_DUTY <= THROTTLE_PWM_MAX_VALUE, "Throttle max duty exceeds LEDC resolution");
 constexpr int THROTTLE_THRESHOLD = 15;
 
-constexpr uint8_t BRAKE_SERVO_PIN_A = 23;
-constexpr uint8_t BRAKE_SERVO_PIN_B = 22;
+constexpr uint8_t BRAKE_SERVO_PIN_A = 18;
+constexpr uint8_t BRAKE_SERVO_PIN_B = 5;
 constexpr uint8_t BRAKE_SERVO_CHANNEL_A = 8;
 constexpr uint8_t BRAKE_SERVO_CHANNEL_B = 9;
 constexpr uint32_t BRAKE_PWM_FREQ = 50;
@@ -168,12 +168,13 @@ void setup() {
 
   steeringCalibrationInit(PID_CENTER_DEG, PID_SPAN_DEG);
 
-  broadcastIf(
-      debug::kLogRc,
-      "Iniciando pruebas FS-iA6 (GPIO0, GPIO2, acelerador GPIO4, direccion izquierda/derecha GPIO16)");
+  String rcInitMsg = "Iniciando pruebas FS-iA6 (AUX1 GPIO" + String(kRcAux1Pin) + ", AUX2 GPIO" +
+                     String(kRcAux2Pin) + ", acelerador GPIO" + String(kRcThrottlePin) +
+                     ", direccion izquierda/derecha GPIO" + String(kRcSteeringPin) + ")";
+  broadcastIf(debug::kLogRc, rcInitMsg);
 
-  pinMode(0, INPUT);
-  pinMode(2, INPUT);
+  pinMode(kRcAux1Pin, INPUT);
+  pinMode(kRcAux2Pin, INPUT);
   pinMode(kRcThrottlePin, INPUT);
   pinMode(kRcSteeringPin, INPUT);
 

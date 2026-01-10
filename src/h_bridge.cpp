@@ -10,10 +10,10 @@
 
 // GPIO assignments
 static const int ENABLE_PIN = 21;
-static const int LEFT_PWM_PIN = 19;  // girar a la izquierda
-static const int RIGHT_PWM_PIN = 18; // girar a la derecha
-static const int LIMIT_LEFT_PIN = 27;  // final de carrera izquierda
-static const int LIMIT_RIGHT_PIN = 14; // final de carrera derecha
+static const int LEFT_PWM_PIN = 22;  // girar a la izquierda
+static const int RIGHT_PWM_PIN = 23; // girar a la derecha
+static const int LIMIT_LEFT_PIN = 2;  // final de carrera izquierda
+static const int LIMIT_RIGHT_PIN = 15; // final de carrera derecha
 static const int LIMIT_ACTIVE_STATE = LOW; // usando pull-ups internos
 
 struct LimitDebugState {

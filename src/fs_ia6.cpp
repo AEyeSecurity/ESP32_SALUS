@@ -48,8 +48,8 @@ bool g_rmtInitialized = false;
 RcConsumerRegistry g_consumerRegistry[kMaxRcConsumers];
 
 RcChannelRuntime g_rcChannels[kRcChannelCount] = {
-    RcChannelRuntime{0, RMT_CHANNEL_0, "GPIO0"},
-    RcChannelRuntime{2, RMT_CHANNEL_1, "GPIO2"},
+    RcChannelRuntime{kRcAux1Pin, RMT_CHANNEL_0, "AUX1"},
+    RcChannelRuntime{kRcAux2Pin, RMT_CHANNEL_1, "AUX2"},
     RcChannelRuntime{kRcThrottlePin, RMT_CHANNEL_2, "THROTTLE"},
     RcChannelRuntime{kRcSteeringPin, RMT_CHANNEL_3, "STEERING"},
 };
@@ -307,9 +307,10 @@ void taskRcSampler(void* parameter) {
     if (log && anyUpdated) {
       const TickType_t lastLogDelta = now - g_lastRcLogTick;
       if (lastLogDelta >= pdMS_TO_TICKS(500)) {
-        String rcMsg = "RC sampler -> GPIO0: " + String(snapshot.ch0) + " | GPIO2: " + String(snapshot.ch2) +
-                       " | acelerador GPIO4: " + String(snapshot.throttle) +
-                       " | direccion GPIO16: " + String(snapshot.steering);
+        String rcMsg = "RC sampler -> AUX1 GPIO" + String(kRcAux1Pin) + ": " + String(snapshot.ch0) +
+                       " | AUX2 GPIO" + String(kRcAux2Pin) + ": " + String(snapshot.ch2) +
+                       " | acelerador GPIO" + String(kRcThrottlePin) + ": " + String(snapshot.throttle) +
+                       " | direccion GPIO" + String(kRcSteeringPin) + ": " + String(snapshot.steering);
         broadcastIf(true, rcMsg);
         g_lastRcLogTick = now;
       }
@@ -347,9 +348,10 @@ void taskRcMonitor(void* parameter) {
 
     if (ch0 != lastCh0 || ch2 != lastCh2 || throttle != lastThrottle || steering != lastSteering) {
       if (log) {
-        String rcMsg = "FS-iA6 -> GPIO0: " + String(ch0) + " | GPIO2: " + String(ch2) +
-                       " | acelerador GPIO4: " + String(throttle) +
-                       " | direccion GPIO16: " + String(steering);
+        String rcMsg = "FS-iA6 -> AUX1 GPIO" + String(kRcAux1Pin) + ": " + String(ch0) +
+                       " | AUX2 GPIO" + String(kRcAux2Pin) + ": " + String(ch2) +
+                       " | acelerador GPIO" + String(kRcThrottlePin) + ": " + String(throttle) +
+                       " | direccion GPIO" + String(kRcSteeringPin) + ": " + String(steering);
         broadcastIf(true, rcMsg);
       }
       lastCh0 = ch0;

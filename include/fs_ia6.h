@@ -51,8 +51,10 @@ struct RcSharedState {
   bool valid;
 };
 
-constexpr uint8_t kRcSteeringPin = 16;
-constexpr uint8_t kRcThrottlePin = 4;
+constexpr uint8_t kRcAux1Pin = 4;
+constexpr uint8_t kRcAux2Pin = 0;
+constexpr uint8_t kRcThrottlePin = 16;
+constexpr uint8_t kRcSteeringPin = 17;
 
 void taskRcSampler(void* parameter);
 void taskRcMonitor(void* parameter);
