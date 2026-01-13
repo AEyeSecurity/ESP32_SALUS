@@ -346,29 +346,43 @@ void taskQuadDriveControl(void* parameter) {
         piDriverReady && piSnapshot.hasFrame && piAgeValid && piAgeTicks <= kPiSnapshotFreshTicks;
     bool commandFromPi = false;
     bool piEstopActive = false;
+    bool throttleInhibit = false;
     int commandValue = rcValue;
     uint8_t piBrakePercent = 0;
     if (piFresh) {
       piBrakePercent = piSnapshot.brake;
       if (piSnapshot.estop) {
-        commandValue = -100;
+        commandValue = 0;
         commandFromPi = true;
         piEstopActive = true;
+        throttleInhibit = true;
       } else if (piSnapshot.driveEnabled) {
         commandValue = piSnapshot.accelEffective;
         commandFromPi = true;
       }
     }
 
-    const int duty = quadThrottleUpdate(commandValue);
-
     const bool piBrakeActive = piFresh;
     const uint8_t appliedPiBrakePercent = piEstopActive ? 100 : piBrakePercent;
     if (piBrakeActive) {
+      if (appliedPiBrakePercent > 0) {
+        throttleInhibit = true;
+      }
       quadBrakeApplyPercent(appliedPiBrakePercent);
     } else {
       const int brakeInput = throttleDataFresh(pdMS_TO_TICKS(60)) ? getFilteredThrottleValue() : 0;
+      if (brakeInput < g_brakeConfig.activationThreshold) {
+        throttleInhibit = true;
+      }
       quadBrakeUpdate(brakeInput);
+    }
+
+    int duty = 0;
+    if (throttleInhibit) {
+      quadThrottleStop();
+      duty = g_lastDuty;
+    } else {
+      duty = quadThrottleUpdate(commandValue);
     }
 
     if (cfg->log && (commandValue != lastThrottleCmdValue || duty != lastDutyReported ||
