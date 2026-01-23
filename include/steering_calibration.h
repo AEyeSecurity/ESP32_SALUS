@@ -25,5 +25,6 @@ bool steeringCalibrationConsumeRequest();
 void steeringCalibrationSetOffset(float offsetDeg);
 
 void steeringCalibrationApply(float leftDeg, float rightDeg);
+void steeringCalibrationReset(bool clearStorage);
 
 #endif  // STEERING_CALIBRATION_H

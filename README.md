@@ -95,11 +95,12 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 
 1. Conectate al AP `ESPcuatri` (password `teamcit2024` por defecto) y abre una sesion Telnet contra el puerto 23 (ej: `telnet 192.168.4.1 23`).
 2. Ejecuta `steer.help` para ver los comandos disponibles y `steer.status` para revisar los limites actuales. Si nunca calibraste se mostraran los valores por defecto definidos en firmware.
-3. Lanza `steer.calibrate`. El PID entra en modo de calibracion, mueve la direccion hacia la izquierda hasta activar el final de carrera, luego hacia la derecha. Durante el proceso veras logs `[PID] Calibracion ...`.
-4. Cuando termine, vuelve a consultar `steer.status` para confirmar los nuevos limites (`left/right`) y el centro ajustado. El campo `offsetRange` indica el desplazamiento permitido sin tocar los topes.
-5. Si la mecanica es asimetrica, aplica un corrimiento con `steer.offset <grados>` (ejemplo `steer.offset -2.5`). El valor real aplicado se devuelve junto al rango permitido y queda guardado en NVS.
-6. Repite `steer.status` para validar el offset final. Desde ese momento el mapeo RC usa los limites calibrados y el PID mantiene el centro compensado cuando el input vuelve a cero.
-7. Tras un reinicio, `steer.status` deberia mostrar los mismos limites y centro sin necesidad de relanzar `steer.calibrate`. Vuelve a calibrar solo cuando reemplaces componentes mecanicos o detectes drift significativo.
+3. Si una calibracion previa quedo corrupta (por ejemplo corte de energia en medio del proceso), usa `steer.reset` para borrar NVS y volver a los valores por defecto antes de recalibrar.
+4. Lanza `steer.calibrate`. El PID entra en modo de calibracion, mueve la direccion hacia la izquierda hasta activar el final de carrera, luego hacia la derecha. Durante el proceso veras logs `[PID] Calibracion ...`.
+5. Cuando termine, vuelve a consultar `steer.status` para confirmar los nuevos limites (`left/right`) y el centro ajustado. El campo `offsetRange` indica el desplazamiento permitido sin tocar los topes.
+6. Si la mecanica es asimetrica, aplica un corrimiento con `steer.offset <grados>` (ejemplo `steer.offset -2.5`). El valor real aplicado se devuelve junto al rango permitido y queda guardado en NVS.
+7. Repite `steer.status` para validar el offset final. Desde ese momento el mapeo RC usa los limites calibrados y el PID mantiene el centro compensado cuando el input vuelve a cero.
+8. Tras un reinicio, `steer.status` deberia mostrar los mismos limites y centro sin necesidad de relanzar `steer.calibrate`. Vuelve a calibrar solo cuando reemplaces componentes mecanicos o detectes drift significativo.
 
 ## Recursos compartidos y sincronizacion
 

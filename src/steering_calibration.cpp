@@ -10,6 +10,8 @@ portMUX_TYPE g_calibrationMux = portMUX_INITIALIZER_UNLOCKED;
 SteeringCalibrationData g_state{};
 volatile bool g_calibrationRequested = false;
 Preferences g_calibrationPrefs;
+float g_defaultCenterDeg = 0.0f;
+float g_defaultSpanDeg = 0.0f;
 
 constexpr const char* kPrefsNamespace = "steer_cal";
 constexpr uint32_t kPrefsVersion = 1;
@@ -54,6 +56,19 @@ float clampf(float value, float minValue, float maxValue) {
     return maxValue;
   }
   return value;
+}
+
+void recalcAdjustedCenterLocked();
+
+void applyDefaultsLocked() {
+  g_state.initialized = true;
+  g_state.hasCalibration = false;
+  g_state.rawCenterDeg = normalizeDeg(g_defaultCenterDeg);
+  g_state.userOffsetDeg = 0.0f;
+  g_state.leftLimitDeg = normalizeDeg(g_defaultCenterDeg - g_defaultSpanDeg);
+  g_state.rightLimitDeg = normalizeDeg(g_defaultCenterDeg + g_defaultSpanDeg);
+  g_state.lastCalibrationMs = 0;
+  recalcAdjustedCenterLocked();
 }
 
 void recalcAdjustedCenterLocked() {
@@ -113,6 +128,11 @@ bool loadPersistedCalibration(PersistedCalibration* out) {
     return false;
   }
 
+  const float span = fabsf(wrapDeg(out->rightLimitDeg - out->leftLimitDeg));
+  if (span < 1.0f) {
+    return false;
+  }
+
   return true;
 }
 
@@ -150,17 +170,9 @@ void loadCalibrationFromStorage() {
 
 void steeringCalibrationInit(float defaultCenterDeg, float defaultSpanDeg) {
   portENTER_CRITICAL(&g_calibrationMux);
-  g_state.initialized = true;
-  g_state.hasCalibration = false;
-  g_state.rawCenterDeg = normalizeDeg(defaultCenterDeg);
-  g_state.adjustedCenterDeg = g_state.rawCenterDeg;
-  g_state.userOffsetDeg = 0.0f;
-  g_state.leftLimitDeg = normalizeDeg(defaultCenterDeg - defaultSpanDeg);
-  g_state.rightLimitDeg = normalizeDeg(defaultCenterDeg + defaultSpanDeg);
-  g_state.maxOffsetLeftDeg = -defaultSpanDeg;
-  g_state.maxOffsetRightDeg = defaultSpanDeg;
-  g_state.lastCalibrationMs = 0;
-  recalcAdjustedCenterLocked();
+  g_defaultCenterDeg = defaultCenterDeg;
+  g_defaultSpanDeg = defaultSpanDeg;
+  applyDefaultsLocked();
   portEXIT_CRITICAL(&g_calibrationMux);
 
   loadCalibrationFromStorage();
@@ -211,4 +223,21 @@ void steeringCalibrationApply(float leftDeg, float rightDeg) {
   snapshot = g_state;
   portEXIT_CRITICAL(&g_calibrationMux);
   persistCalibrationSnapshot(snapshot);
+}
+
+void steeringCalibrationReset(bool clearStorage) {
+  SteeringCalibrationData snapshot;
+  portENTER_CRITICAL(&g_calibrationMux);
+  applyDefaultsLocked();
+  snapshot = g_state;
+  portEXIT_CRITICAL(&g_calibrationMux);
+
+  if (clearStorage) {
+    if (g_calibrationPrefs.begin(kPrefsNamespace, false)) {
+      g_calibrationPrefs.clear();
+      g_calibrationPrefs.end();
+    }
+  } else {
+    persistCalibrationSnapshot(snapshot);
+  }
 }

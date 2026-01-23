@@ -105,13 +105,20 @@ void handleTelnetCommand(String line) {
     return;
   }
 
+  if (command.equalsIgnoreCase("steer.reset") || command.equalsIgnoreCase("steer.clear")) {
+    steeringCalibrationReset(true);
+    sendTelnet("[STEER] Calibracion reseteada a valores por defecto (NVS borrado)");
+    reportSteeringStatus();
+    return;
+  }
+
   if (command.equalsIgnoreCase("steer.status")) {
     reportSteeringStatus();
     return;
   }
 
   if (command.equalsIgnoreCase("steer.help")) {
-    sendTelnet("Comandos: steer.calibrate | steer.offset <deg> | steer.status");
+    sendTelnet("Comandos: steer.calibrate | steer.offset <deg> | steer.reset | steer.status");
     return;
   }
 
