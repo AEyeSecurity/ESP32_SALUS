@@ -29,9 +29,9 @@ constexpr int AS5600_SCL_PIN = 33;
 constexpr float PID_CENTER_DEG = 240.0f;
 constexpr float PID_SPAN_DEG = 40.0f;
 constexpr float PID_DEADBAND_PERCENT = 0.25f;
-constexpr float PID_MIN_ACTIVE_PERCENT = 15.0f;
-constexpr float PID_KP = 3.0f;
-constexpr float PID_KI = 0.5f;
+constexpr float PID_MIN_ACTIVE_PERCENT = 10.0f;
+constexpr float PID_KP = 6.0f;
+constexpr float PID_KI = 6.0f;
 constexpr float PID_KD = 0.0f;
 constexpr float PID_INTEGRAL_LIMIT = 50.0f;
 
@@ -83,7 +83,7 @@ constexpr bool kLogBridge = false;
 constexpr bool kLogLoop = false;
 constexpr bool kLogRc = false;
 constexpr bool kLogAs5600 = false;
-constexpr bool kLogPid = false;
+constexpr bool kLogPid = true;
 constexpr bool kLogDrive = false;
 constexpr bool kLogPiComms = false;
 constexpr bool kEnableBridgeTask = false;
@@ -165,6 +165,8 @@ void setup() {
   g_pidController.setOutputLimits(-100.0f, 100.0f);
   g_pidController.setIntegralLimits(-PID_INTEGRAL_LIMIT, PID_INTEGRAL_LIMIT);
   g_pidController.reset();
+  pidRegisterController(&g_pidController);
+  pidRegisterConfig(&g_pidTaskConfig);
 
   steeringCalibrationInit(PID_CENTER_DEG, PID_SPAN_DEG);
 

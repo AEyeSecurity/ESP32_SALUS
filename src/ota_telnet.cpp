@@ -9,6 +9,7 @@
 
 #include "steering_calibration.h"
 #include "pi_comms.h"
+#include "pid.h"
 
 namespace {
 String g_telnetCommandBuffer;
@@ -36,6 +37,42 @@ bool parseFloatArg(const String& text, float& valueOut) {
   return true;
 }
 
+bool parseNextFloat(const char*& cursor, float& valueOut) {
+  if (cursor == nullptr) {
+    return false;
+  }
+  while (*cursor != '\0' && isspace(static_cast<unsigned char>(*cursor))) {
+    ++cursor;
+  }
+  if (*cursor == '\0') {
+    return false;
+  }
+  char* endPtr = nullptr;
+  valueOut = static_cast<float>(strtod(cursor, &endPtr));
+  if (endPtr == cursor) {
+    return false;
+  }
+  cursor = endPtr;
+  return true;
+}
+
+bool parseFloatTriplet(const String& text, float& a, float& b, float& c) {
+  const char* cursor = text.c_str();
+  if (!parseNextFloat(cursor, a)) {
+    return false;
+  }
+  if (!parseNextFloat(cursor, b)) {
+    return false;
+  }
+  if (!parseNextFloat(cursor, c)) {
+    return false;
+  }
+  while (*cursor != '\0' && isspace(static_cast<unsigned char>(*cursor))) {
+    ++cursor;
+  }
+  return *cursor == '\0';
+}
+
 void reportSteeringStatus() {
   const SteeringCalibrationData data = steeringCalibrationSnapshot();
   String msg = "[STEER] estado=";
@@ -61,6 +98,32 @@ void reportSteeringStatus() {
     msg += " tCal=";
     msg += String(data.lastCalibrationMs);
     msg += "ms";
+  }
+  sendTelnet(msg);
+}
+
+void reportPidStatus() {
+  float kp = 0.0f;
+  float ki = 0.0f;
+  float kd = 0.0f;
+  float deadband = 0.0f;
+  float minActive = 0.0f;
+  if (!pidGetTunings(kp, ki, kd)) {
+    sendTelnet("[PID] Controlador no registrado");
+    return;
+  }
+  String msg = "[PID] kp=";
+  msg += String(kp, 3);
+  msg += " ki=";
+  msg += String(ki, 3);
+  msg += " kd=";
+  msg += String(kd, 3);
+  if (pidGetOutputModifiers(deadband, minActive)) {
+    msg += " deadband=";
+    msg += String(deadband, 3);
+    msg += "% minActive=";
+    msg += String(minActive, 3);
+    msg += "%";
   }
   sendTelnet(msg);
 }
@@ -119,6 +182,143 @@ void handleTelnetCommand(String line) {
 
   if (command.equalsIgnoreCase("steer.help")) {
     sendTelnet("Comandos: steer.calibrate | steer.offset <deg> | steer.reset | steer.status");
+    return;
+  }
+
+  if (command.equalsIgnoreCase("pid.set")) {
+    float kp = 0.0f;
+    float ki = 0.0f;
+    float kd = 0.0f;
+    if (!parseFloatTriplet(args, kp, ki, kd)) {
+      sendTelnet("[PID] Uso: pid.set <kp> <ki> <kd>");
+      return;
+    }
+    if (!pidSetTunings(kp, ki, kd)) {
+      sendTelnet("[PID] Controlador no registrado");
+      return;
+    }
+    reportPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("pid.kp")) {
+    if (args.isEmpty()) {
+      reportPidStatus();
+      return;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[PID] Kp invalido (ej: pid.kp 2.5)");
+      return;
+    }
+    float kp = 0.0f;
+    float ki = 0.0f;
+    float kd = 0.0f;
+    if (!pidGetTunings(kp, ki, kd)) {
+      sendTelnet("[PID] Controlador no registrado");
+      return;
+    }
+    if (!pidSetTunings(value, ki, kd)) {
+      sendTelnet("[PID] Controlador no registrado");
+      return;
+    }
+    reportPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("pid.ki")) {
+    if (args.isEmpty()) {
+      reportPidStatus();
+      return;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[PID] Ki invalido (ej: pid.ki 0.5)");
+      return;
+    }
+    float kp = 0.0f;
+    float ki = 0.0f;
+    float kd = 0.0f;
+    if (!pidGetTunings(kp, ki, kd)) {
+      sendTelnet("[PID] Controlador no registrado");
+      return;
+    }
+    if (!pidSetTunings(kp, value, kd)) {
+      sendTelnet("[PID] Controlador no registrado");
+      return;
+    }
+    reportPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("pid.kd")) {
+    if (args.isEmpty()) {
+      reportPidStatus();
+      return;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[PID] Kd invalido (ej: pid.kd 0.1)");
+      return;
+    }
+    float kp = 0.0f;
+    float ki = 0.0f;
+    float kd = 0.0f;
+    if (!pidGetTunings(kp, ki, kd)) {
+      sendTelnet("[PID] Controlador no registrado");
+      return;
+    }
+    if (!pidSetTunings(kp, ki, value)) {
+      sendTelnet("[PID] Controlador no registrado");
+      return;
+    }
+    reportPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("pid.status")) {
+    reportPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("pid.help")) {
+    sendTelnet("Comandos: pid.set <kp> <ki> <kd> | pid.kp <v> | pid.ki <v> | pid.kd <v> | pid.deadband <pct> | pid.minactive <pct> | pid.status");
+    return;
+  }
+
+  if (command.equalsIgnoreCase("pid.deadband")) {
+    if (args.isEmpty()) {
+      reportPidStatus();
+      return;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[PID] Deadband invalido (ej: pid.deadband 0.3)");
+      return;
+    }
+    if (!pidSetDeadband(value)) {
+      sendTelnet("[PID] Configuracion PID no registrada");
+      return;
+    }
+    reportPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("pid.minactive")) {
+    if (args.isEmpty()) {
+      reportPidStatus();
+      return;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[PID] MinActive invalido (ej: pid.minactive 10)");
+      return;
+    }
+    if (!pidSetMinActive(value)) {
+      sendTelnet("[PID] Configuracion PID no registrada");
+      return;
+    }
+    reportPidStatus();
     return;
   }
 

@@ -67,5 +67,13 @@ struct PidTaskConfig {
 
 void taskPidControl(void* parameter);
 
+void pidRegisterController(PidController* controller);
+void pidRegisterConfig(PidTaskConfig* config);
+bool pidGetTunings(float& kp, float& ki, float& kd);
+bool pidSetTunings(float kp, float ki, float kd);
+bool pidGetOutputModifiers(float& deadbandPercent, float& minActivePercent);
+bool pidSetDeadband(float deadbandPercent);
+bool pidSetMinActive(float minActivePercent);
+
 #endif  // PID_H
 

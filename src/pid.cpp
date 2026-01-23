@@ -2,6 +2,7 @@
 
 #include <math.h>
 
+#include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 #include <esp_timer.h>
@@ -60,6 +61,9 @@ float ticksToSeconds(TickType_t ticks) {
 }
 
 constexpr TickType_t kPiSnapshotFreshTicks = pdMS_TO_TICKS(120);
+portMUX_TYPE g_pidMux = portMUX_INITIALIZER_UNLOCKED;
+PidController* g_pidController = nullptr;
+PidTaskConfig* g_pidConfig = nullptr;
 }  // namespace
 
 namespace {
@@ -214,6 +218,81 @@ float mapRcValueToAngle(int rcValue,
     target = center + leftSpan * rcNorm;
   }
   return normalizeAngleDegrees(target);
+}
+
+void pidRegisterController(PidController* controller) {
+  portENTER_CRITICAL(&g_pidMux);
+  g_pidController = controller;
+  portEXIT_CRITICAL(&g_pidMux);
+}
+
+void pidRegisterConfig(PidTaskConfig* config) {
+  portENTER_CRITICAL(&g_pidMux);
+  g_pidConfig = config;
+  portEXIT_CRITICAL(&g_pidMux);
+}
+
+bool pidGetTunings(float& kp, float& ki, float& kd) {
+  portENTER_CRITICAL(&g_pidMux);
+  PidController* controller = g_pidController;
+  if (controller == nullptr) {
+    portEXIT_CRITICAL(&g_pidMux);
+    return false;
+  }
+  kp = controller->kp();
+  ki = controller->ki();
+  kd = controller->kd();
+  portEXIT_CRITICAL(&g_pidMux);
+  return true;
+}
+
+bool pidSetTunings(float kp, float ki, float kd) {
+  portENTER_CRITICAL(&g_pidMux);
+  PidController* controller = g_pidController;
+  if (controller == nullptr) {
+    portEXIT_CRITICAL(&g_pidMux);
+    return false;
+  }
+  controller->setTunings(kp, ki, kd);
+  portEXIT_CRITICAL(&g_pidMux);
+  return true;
+}
+
+bool pidGetOutputModifiers(float& deadbandPercent, float& minActivePercent) {
+  portENTER_CRITICAL(&g_pidMux);
+  PidTaskConfig* config = g_pidConfig;
+  if (config == nullptr) {
+    portEXIT_CRITICAL(&g_pidMux);
+    return false;
+  }
+  deadbandPercent = config->deadbandPercent;
+  minActivePercent = config->minActivePercent;
+  portEXIT_CRITICAL(&g_pidMux);
+  return true;
+}
+
+bool pidSetDeadband(float deadbandPercent) {
+  portENTER_CRITICAL(&g_pidMux);
+  PidTaskConfig* config = g_pidConfig;
+  if (config == nullptr) {
+    portEXIT_CRITICAL(&g_pidMux);
+    return false;
+  }
+  config->deadbandPercent = deadbandPercent;
+  portEXIT_CRITICAL(&g_pidMux);
+  return true;
+}
+
+bool pidSetMinActive(float minActivePercent) {
+  portENTER_CRITICAL(&g_pidMux);
+  PidTaskConfig* config = g_pidConfig;
+  if (config == nullptr) {
+    portEXIT_CRITICAL(&g_pidMux);
+    return false;
+  }
+  config->minActivePercent = minActivePercent;
+  portEXIT_CRITICAL(&g_pidMux);
+  return true;
 }
 
 void taskPidControl(void* parameter) {
