@@ -1,12 +1,11 @@
 #ifndef OTA_TELNET_H
 #define OTA_TELNET_H
 
-#include <TelnetStream.h>
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-void InicializaWiFi(const char* ssid, const char* contrasena); //Funcion que inicia la conexion con la ESP por WiFi
+void InicializaWiFi(); // Funcion que inicializa WiFi en modo STA con fallback AP
 void InicializaOTA(); //Funcion que inicializa OTA
 void InicializaTelnet();
 void EnviarMensajeTelnet(const String& txt); // Envia mensaje por Telnet

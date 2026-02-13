@@ -2,17 +2,76 @@
 
 #include <WiFi.h>
 #include <ArduinoOTA.h>
-#include <TelnetStream.h>
 
 #include <ctype.h>
+#include <string.h>
 #include <stdlib.h>
 
 #include "steering_calibration.h"
 #include "pi_comms.h"
 #include "pid.h"
 
+#ifndef WIFI_STA_SSID
+#define WIFI_STA_SSID "TU_SSID"
+#endif
+
+#ifndef WIFI_STA_PASS
+#define WIFI_STA_PASS "TU_PASSWORD"
+#endif
+
+#ifndef WIFI_AP_SSID
+#define WIFI_AP_SSID "esp32-salus"
+#endif
+
+#ifndef WIFI_AP_PASS
+#define WIFI_AP_PASS "teamcit2024"
+#endif
+
+#ifndef OTA_HOSTNAME
+#define OTA_HOSTNAME "esp32-salus"
+#endif
+
+#ifndef OTA_PASSWORD
+#define OTA_PASSWORD "ota1234"
+#endif
+
+#ifndef WIFI_STA_CONNECT_TIMEOUT_MS
+#define WIFI_STA_CONNECT_TIMEOUT_MS 10000
+#endif
+
 namespace {
+constexpr uint16_t kTelnetPort = 23;
+
+enum class NetworkMode {
+  kUnknown,
+  kSta,
+  kAp,
+};
+
+WiFiServer g_telnetServer(kTelnetPort);
+WiFiClient g_telnetClient;
 String g_telnetCommandBuffer;
+NetworkMode g_networkMode = NetworkMode::kUnknown;
+String g_networkSsid;
+IPAddress g_networkIp;
+
+const char* networkModeText(NetworkMode mode) {
+  switch (mode) {
+    case NetworkMode::kSta:
+      return "STA";
+    case NetworkMode::kAp:
+      return "AP";
+    case NetworkMode::kUnknown:
+    default:
+      return "UNKNOWN";
+  }
+}
+
+void updateNetworkState(NetworkMode mode, const String& ssid, const IPAddress& ip) {
+  g_networkMode = mode;
+  g_networkSsid = ssid;
+  g_networkIp = ip;
+}
 
 void sendTelnet(const String& message) {
   EnviarMensajeTelnet(message);
@@ -125,6 +184,20 @@ void reportPidStatus() {
     msg += String(minActive, 3);
     msg += "%";
   }
+  sendTelnet(msg);
+}
+
+void reportNetworkStatus() {
+  String msg = "[NET] mode=";
+  msg += networkModeText(g_networkMode);
+  msg += " ssid=";
+  msg += g_networkSsid.length() > 0 ? g_networkSsid : "-";
+  msg += " ip=";
+  msg += g_networkIp.toString();
+  msg += " hostname=";
+  msg += OTA_HOSTNAME;
+  msg += " telnetPort=";
+  msg += String(kTelnetPort);
   sendTelnet(msg);
 }
 
@@ -377,12 +450,39 @@ void handleTelnetCommand(String line) {
     return;
   }
 
+  if (command.equalsIgnoreCase("net.status")) {
+    reportNetworkStatus();
+    return;
+  }
+
   sendTelnet("[STEER] Comando desconocido: " + line);
 }
 
+void handleTelnetClient() {
+  if (g_telnetServer.hasClient()) {
+    WiFiClient incoming = g_telnetServer.available();
+    if (g_telnetClient && g_telnetClient.connected()) {
+      incoming.println("Logger ocupado");
+      incoming.stop();
+    } else {
+      g_telnetClient = incoming;
+      g_telnetCommandBuffer = "";
+      g_telnetClient.println("=== Servidor Telnet ESP32 ===");
+      g_telnetClient.println("Conexion establecida correctamente");
+      g_telnetClient.println("Comandos: steer.help | pid.help | comms.status | net.status");
+      reportNetworkStatus();
+    }
+  }
+
+  if (g_telnetClient && !g_telnetClient.connected()) {
+    g_telnetClient.stop();
+    g_telnetCommandBuffer = "";
+  }
+}
+
 void processTelnetInput() {
-  while (TelnetStream.available() > 0) {
-    const char c = static_cast<char>(TelnetStream.read());
+  while (g_telnetClient && g_telnetClient.connected() && g_telnetClient.available() > 0) {
+    const char c = static_cast<char>(g_telnetClient.read());
     if (c == '\r') {
       continue;
     }
@@ -411,28 +511,73 @@ void processTelnetInput() {
 
 
 /* ========= Wi-Fi ========= */
-void InicializaWiFi(const char* ssid, const char* pass) {
+void InicializaWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.setHostname(OTA_HOSTNAME);
+  WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASS);
+
+  const uint32_t timeoutMs = static_cast<uint32_t>(WIFI_STA_CONNECT_TIMEOUT_MS);
+  const uint32_t startMs = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - startMs) < timeoutMs) {
+    delay(250);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    updateNetworkState(NetworkMode::kSta, WIFI_STA_SSID, WiFi.localIP());
+    return;
+  }
+
+  WiFi.disconnect(true, true);
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(ssid, pass);
+  if (strlen(WIFI_AP_PASS) == 0) {
+    WiFi.softAP(WIFI_AP_SSID);
+  } else {
+    WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS);
+  }
+  updateNetworkState(NetworkMode::kAp, WIFI_AP_SSID, WiFi.softAPIP());
 }
 
 /* ========= OTA ========= */
 void InicializaOTA() {
-  ArduinoOTA.onStart([]() { EnviarMensajeTelnet("*** OTA INICIO ***"); });
-  ArduinoOTA.onEnd([]() { EnviarMensajeTelnet("*** OTA FIN ***"); });
-  ArduinoOTA.onError([](ota_error_t e) { EnviarMensajeTelnet("Error OTA: " + String(e)); });
+  ArduinoOTA.setHostname(OTA_HOSTNAME);
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+
+  ArduinoOTA.onStart([]() { EnviarMensajeTelnet("OTA iniciado"); });
+  ArduinoOTA.onEnd([]() { EnviarMensajeTelnet("OTA finalizado"); });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    const unsigned int percent = (total > 0U) ? ((progress * 100U) / total) : 0U;
+    EnviarMensajeTelnet("Progreso OTA: " + String(percent) + "%");
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    String msg = "Error OTA [" + String(error) + "]: ";
+    if (error == OTA_AUTH_ERROR) {
+      msg += "Auth Failed";
+    } else if (error == OTA_BEGIN_ERROR) {
+      msg += "Begin Failed";
+    } else if (error == OTA_CONNECT_ERROR) {
+      msg += "Connect Failed";
+    } else if (error == OTA_RECEIVE_ERROR) {
+      msg += "Receive Failed";
+    } else if (error == OTA_END_ERROR) {
+      msg += "End Failed";
+    } else {
+      msg += "Unknown";
+    }
+    EnviarMensajeTelnet(msg);
+  });
   ArduinoOTA.begin();
 }
 
 void InicializaTelnet() {  // Inicia Telnet en puerto 23
-  TelnetStream.begin(23);
+  g_telnetServer.begin();
+  g_telnetServer.setNoDelay(true);
   delay(1000);  // Esperar a que se inicie el servidor
-  TelnetStream.println("=== Servidor Telnet ESP32 ===");
-  TelnetStream.println("Conexion establecida correctamente");
 }
 
 void EnviarMensajeTelnet(const String& txt) {  // Envia mensaje por Telnet
-  TelnetStream.println(txt);
+  if (g_telnetClient && g_telnetClient.connected()) {
+    g_telnetClient.println(txt);
+  }
 }
 
 void serialIf(bool enabled, const String& message) {
@@ -461,6 +606,7 @@ void taskOtaTelnet(void* parameter) {
   TickType_t lastHeartbeat = lastWake;
   for (;;) {
     ArduinoOTA.handle();
+    handleTelnetClient();
     processTelnetInput();
     if (logHeartbeat && (xTaskGetTickCount() - lastHeartbeat >= heartbeat)) {
       EnviarMensajeTelnet("ESP32 activo - " + String(millis() / 1000) + "s");
