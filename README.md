@@ -4,12 +4,12 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 
 ## Flujo de arranque (src/main.cpp)
 
-1. `setup()` inicializa el enlace UART con la Raspberry Pi (`piCommsInit`), intenta WiFi en modo STA y, si no conecta dentro del timeout, cae a AP (`InicializaWiFi`), luego inicializa Telnet (`InicializaTelnet`) y OTA (`InicializaOTA`).
+1. `setup()` inicializa WiFi/Telnet/OTA, configura PID/sensores y luego levanta las tareas, incluyendo UART con Raspberry Pi (`piCommsInit` + `taskPiCommsRx/Tx`).
 2. Se configuran los limites del controlador PID (`PidController::setTunings`, `setOutputLimits`, `setIntegralLimits`, `reset`).
 3. Se configuran pines de entrada para los canales RC (GPIO0, GPIO2, GPIO4, GPIO16) y se habilita el lector RMT que captura los pulsos del receptor FS-iA6.
 4. Se crean las tareas FreeRTOS usando `startTaskPinned` (`src/freertos_utils.cpp`), pasando los `*_TaskConfig` con parametros de periodo, logging y auto-inicializacion de hardware.
 5. Se ejecuta un autotest del AS5600 (`runAs5600SelfTest`) y se lanza `taskAs5600Monitor`.
-6. La tarea Arduino `loop()` queda como supervisor ligero: recibe mensajes por UART y duerme 50 ms entre iteraciones.
+6. La tarea Arduino `loop()` queda como supervisor ligero y solo cede CPU con `vTaskDelay(50 ms)`.
 
 ## Configuracion WiFi/OTA (platformio.ini)
 
@@ -55,7 +55,7 @@ Troubleshooting OTA rapido:
 | `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~12 KB)        | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA`, mantiene `PiCommsRxSnapshot` y levanta `REVERSE_REQ`. |
 | `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~8 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status telemetry crc]`, reflejando `READY/FAULT/REV_REQ`. |
 | `taskSpeedMeterRx`       | `src/speed_meter.cpp`    | 3072 (~12 KB)        | 2    | 0      | Eventos UART + parser por gap                | Siempre                  | Sniffer UART2 (GPIO26 @ 2000 bps) y decodificador de velocidad (telemetria). |
-| `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Maneja mensajes UART y reenvia a Telnet cuando `debug::kLogLoop` esta activo. |
+| `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Supervisor liviano sin lógica de comunicaciones (solo `vTaskDelay`). |
 
 > Nota: FreeRTOS en ESP32 interpreta el parametro `stackSize` en palabras de 32 bits. 4096 palabras equivalen a ~16 KB.
 
@@ -111,11 +111,12 @@ Troubleshooting OTA rapido:
 
 - El enlace binario se implementa en `taskPiCommsRx`/`taskPiCommsTx` (`src/pi_comms.cpp`) y usa `GPIO3/GPIO1` a **460 800 bps**.  
 - `taskPiCommsRx` publica un `PiCommsRxSnapshot` con `steer`, `accelRaw`, `accelEffective`, `brake`, `estop`, `driveEnabled` y el estado del pedido de reversa.  
-- `taskPICommsTx` levanta el flag `REVERSE_REQ` cuando la Pi pide aceleraciones negativas y lo mantiene hasta que llega `ALLOW_REVERSE`.  
+- `taskPiCommsTx` refleja `REVERSE_REQ` desde el estado RX (`accelRaw<0` y `ALLOW_REVERSE=0` en frame válido).  
 - `taskQuadDriveControl` consume el snapshot:  
   - `ESTOP` → freno completo y duty mínimo.  
-  - `DRIVE_EN` + `accelEffective` (0..100) → aceleración proporcional.  
-  - `brake_u8` → manda los servos a la posición equivalente (0 % liberado, 100 % freno).  
+  - `DRIVE_EN` + `accelEffective` (-100..100, con negativo solo si `ALLOW_REVERSE`) → tracción proporcional.  
+  - con frame fresco de Pi, `brake_u8` gobierna servos (0 % liberado, 100 % freno).  
+- `taskPidControl` usa `steer` de Pi cuando el frame está fresco (<=120 ms); si no, vuelve a steering RC.  
 - Para inspeccionar el estado usa Telnet (`comms.status`, `comms.reset`) o activa `debug::kLogPiComms`.  
 - Documentación detallada, pasos de prueba y troubleshooting: **[PI_COMMS_README.md](PI_COMMS_README.md)**.
 
@@ -132,8 +133,8 @@ Troubleshooting OTA rapido:
   - `speed.uart <baud> [on|off]` -> ajusta baudrate e inversion RX en caliente (`on` invertido, `off` normal).
 
 ### `loop()` (src/main.cpp)
-- Corre en el contexto de Arduino (core 1). Si `debug::kLogLoop` es true, reenvia cualquier mensaje recibido por UART al Telnet (`EnviarMensajeTelnet`).
-- Para liberar CPU cede 50 ms con `vTaskDelay(pdMS_TO_TICKS(50))`.
+- Corre en el contexto de Arduino (core 1).
+- No procesa UART de la Pi; solo libera CPU con `vTaskDelay(pdMS_TO_TICKS(50))`.
 
 ## Calibracion de direccion via Telnet
 
