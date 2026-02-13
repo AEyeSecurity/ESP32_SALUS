@@ -11,9 +11,6 @@
 #include "quad_functions.h"
 #include "pi_comms.h"
 
-const char* ssid = "ESPcuatri";
-const char* contrasena = "teamcit2024";
-
 constexpr uint16_t STACK_OTA = 4096;
 constexpr uint16_t STACK_BRIDGE = 4096;
 constexpr uint16_t STACK_RC = 2048;
@@ -156,10 +153,9 @@ static PiCommsConfig g_piCommsConfig = {
     debug::kLogPiComms};
 
 void setup() {
-  InicializaWiFi(ssid, contrasena);
-  InicializaOTA();
-  delay(1000);
+  InicializaWiFi();
   InicializaTelnet();
+  InicializaOTA();
 
   g_pidController.setTunings(PID_KP, PID_KI, PID_KD);
   g_pidController.setOutputLimits(-100.0f, 100.0f);
@@ -221,4 +217,3 @@ void setup() {
 void loop() {
   vTaskDelay(pdMS_TO_TICKS(50));
 }
-

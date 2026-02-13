@@ -4,12 +4,42 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 
 ## Flujo de arranque (src/main.cpp)
 
-1. `setup()` inicializa el enlace UART con la Raspberry Pi (`piCommsInit`), WiFi en modo AP (`InicializaWiFi`), OTA (`InicializaOTA`) y el servidor Telnet (`InicializaTelnet`).
+1. `setup()` inicializa el enlace UART con la Raspberry Pi (`piCommsInit`), intenta WiFi en modo STA y, si no conecta dentro del timeout, cae a AP (`InicializaWiFi`), luego inicializa Telnet (`InicializaTelnet`) y OTA (`InicializaOTA`).
 2. Se configuran los limites del controlador PID (`PidController::setTunings`, `setOutputLimits`, `setIntegralLimits`, `reset`).
 3. Se configuran pines de entrada para los canales RC (GPIO0, GPIO2, GPIO4, GPIO16) y se habilita el lector RMT que captura los pulsos del receptor FS-iA6.
 4. Se crean las tareas FreeRTOS usando `startTaskPinned` (`src/freertos_utils.cpp`), pasando los `*_TaskConfig` con parametros de periodo, logging y auto-inicializacion de hardware.
 5. Se ejecuta un autotest del AS5600 (`runAs5600SelfTest`) y se lanza `taskAs5600Monitor`.
 6. La tarea Arduino `loop()` queda como supervisor ligero: recibe mensajes por UART y duerme 50 ms entre iteraciones.
+
+## Configuracion WiFi/OTA (platformio.ini)
+
+- El firmware usa build flags para credenciales y parametros de red:
+  - `WIFI_STA_SSID`, `WIFI_STA_PASS`
+  - `WIFI_AP_SSID`, `WIFI_AP_PASS`
+  - `OTA_HOSTNAME`, `OTA_PASSWORD`
+  - `WIFI_STA_CONNECT_TIMEOUT_MS`
+- Flujo de arranque:
+  1. Intenta conectar como cliente WiFi (STA).
+  2. Si no conecta dentro del timeout, activa AP fallback.
+  3. OTA queda disponible en cualquiera de los dos modos.
+- Entornos PlatformIO:
+  - `esp32dev`: compilacion base.
+  - `esp32dev-ota-sta`: subida OTA por hostname (`<OTA_HOSTNAME>.local`).
+  - `esp32dev-ota-ap`: subida OTA por IP del AP fallback (`192.168.4.1`).
+
+Comandos recomendados:
+
+```bash
+pio run -e esp32dev
+pio run -e esp32dev-ota-sta -t upload
+pio run -e esp32dev-ota-ap -t upload
+```
+
+Troubleshooting OTA rapido:
+
+- Si `esp32dev-ota-sta` no resuelve hostname, probar con IP STA real del dispositivo.
+- Si la red STA no esta disponible, usar `esp32dev-ota-ap` y conectar al AP del ESP32.
+- Si falla autenticacion OTA, verificar que `OTA_PASSWORD` y `upload_flags --auth` coincidan.
 
 ## Resumen de tareas FreeRTOS
 
@@ -35,6 +65,7 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 - Bucle: ejecuta `ArduinoOTA.handle()` en cada tick y amortigua la latencia llamando `vTaskDelayUntil` con el ultimo `TickType_t` registrado.
 - Disparadores: 100% temporizados; no usa interrupciones. El heartbeat solo envia mensajes cuando ha pasado el intervalo configurado.
 - Interfaz: utiliza `EnviarMensajeTelnet` para los avisos, compartiendo la UART/Telnet con el resto del sistema via `broadcastIf`.
+- OTA: toma `OTA_HOSTNAME` y `OTA_PASSWORD` desde build flags y expone callbacks de inicio, fin, progreso y error.
 
 ### `taskRcSampler` (src/fs_ia6.cpp)
 - Configuracion: `FsIa6SamplerConfig` define periodo de vigilancia (10 ms), umbral de datos frescos y timeout de recepcion RMT.
@@ -93,7 +124,9 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 
 ## Calibracion de direccion via Telnet
 
-1. Conectate al AP `ESPcuatri` (password `teamcit2024` por defecto) y abre una sesion Telnet contra el puerto 23 (ej: `telnet 192.168.4.1 23`).
+1. Conectate por red:
+   - Si STA conecto correctamente: usa la IP STA o el hostname OTA.
+   - Si STA fallo: conectate al AP fallback (`WIFI_AP_SSID`) y usa `telnet 192.168.4.1 23`.
 2. Ejecuta `steer.help` para ver los comandos disponibles y `steer.status` para revisar los limites actuales. Si nunca calibraste se mostraran los valores por defecto definidos en firmware.
 3. Si una calibracion previa quedo corrupta (por ejemplo corte de energia en medio del proceso), usa `steer.reset` para borrar NVS y volver a los valores por defecto antes de recalibrar.
 4. Lanza `steer.calibrate`. El PID entra en modo de calibracion, mueve la direccion hacia la izquierda hasta activar el final de carrera, luego hacia la derecha. Durante el proceso veras logs `[PID] Calibracion ...`.
