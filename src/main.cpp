@@ -10,6 +10,7 @@
 #include "steering_calibration.h"
 #include "quad_functions.h"
 #include "pi_comms.h"
+#include "speed_meter.h"
 
 constexpr uint16_t STACK_OTA = 4096;
 constexpr uint16_t STACK_BRIDGE = 4096;
@@ -19,6 +20,7 @@ constexpr uint16_t STACK_PID = 4096;
 constexpr uint16_t STACK_DRIVE = 4096;
 constexpr uint16_t STACK_PI_RX = 3072;
 constexpr uint16_t STACK_PI_TX = 2048;
+constexpr uint16_t STACK_SPEED_RX = 3072;
 
 constexpr int AS5600_SDA_PIN = 25;
 constexpr int AS5600_SCL_PIN = 33;
@@ -80,13 +82,15 @@ constexpr bool kLogBridge = false;
 constexpr bool kLogLoop = false;
 constexpr bool kLogRc = false;
 constexpr bool kLogAs5600 = false;
-constexpr bool kLogPid = true;
+constexpr bool kLogPid = false;
 constexpr bool kLogDrive = false;
 constexpr bool kLogPiComms = false;
+constexpr bool kLogSpeedMeter = false;
 constexpr bool kEnableBridgeTask = false;
 constexpr bool kEnableRcTask = false;
 constexpr bool kEnablePidTask = true;
 constexpr bool kEnableDriveTask = true;
+constexpr bool kEnableSpeedMeterTask = true;
 }  // namespace debug
 
 static AS5600 g_as5600;
@@ -151,6 +155,17 @@ static PiCommsConfig g_piCommsConfig = {
     pdMS_TO_TICKS(2),
     debug::kLogPiComms,
     debug::kLogPiComms};
+static SpeedMeterConfig g_speedMeterConfig = {
+    UART_NUM_2,
+    26,
+    2000,
+    1024,
+    16,
+    12000,
+    19,
+    30,
+    debug::kLogSpeedMeter,
+    false};
 
 void setup() {
   InicializaWiFi();
@@ -211,6 +226,15 @@ void setup() {
     startTaskPinned(taskPiCommsTx, "PiUartTx", STACK_PI_TX, &g_piCommsConfig, 3, nullptr, 0);
   } else {
     broadcastIf(true, "[PI][UART] Error inicializando UART0 para Raspberry Pi");
+  }
+
+  if (debug::kEnableSpeedMeterTask) {
+    if (speedMeterInit(g_speedMeterConfig)) {
+      startTaskPinned(taskSpeedMeterRx, "SpeedUartRx", STACK_SPEED_RX, &g_speedMeterConfig, 2, nullptr, 0);
+      broadcastIf(debug::kLogSpeedMeter, "[SPD][UART] Tarea SpeedUartRx iniciada");
+    } else {
+      broadcastIf(true, "[SPD][UART] Error inicializando UART2 RX para medidor de velocidad");
+    }
   }
 }
 
