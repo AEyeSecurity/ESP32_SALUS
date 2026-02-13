@@ -83,4 +83,45 @@ net.status
 pid.status
 steer.status
 comms.status
+speed.status
+speed.reset
+speed.stream
+speed.uart
 ```
+
+Notas de sesion:
+- Solo se mantiene un cliente Telnet a la vez.
+- Si entra un cliente nuevo, reemplaza al anterior automaticamente.
+- Una sesion inactiva se cierra sola (timeout) para evitar bloqueos por clientes colgados.
+
+## Medidor de velocidad UART2
+
+- UART usada: `UART_NUM_2`
+- RX: `GPIO26`
+- Baudrate: `2000`
+- Modo: solo sniff/telemetria (sin reenvio de trama)
+
+### Stream continuo por Telnet
+
+```text
+speed.stream on
+speed.stream on 100
+speed.stream 250
+speed.stream off
+```
+
+- `speed.stream on [ms]`: activa envio continuo de `[SPD][STATUS] ...`
+- Rango de periodo: `20..5000 ms` (clamp automatico)
+
+### Ajuste UART en vivo (diagnostico)
+
+```text
+speed.uart
+speed.uart 2000 off
+speed.uart 2000 on
+speed.uart 2083 on
+```
+
+- `speed.uart`: muestra `baud`, inversion RX y pin.
+- `speed.uart <baud> [on|off]`: reconfigura UART2 RX en caliente.
+- `on` = RX invertido, `off` = RX normal.

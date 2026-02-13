@@ -54,6 +54,7 @@ Troubleshooting OTA rapido:
 | `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~16 KB)        | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
 | `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~12 KB)        | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA`, mantiene `PiCommsRxSnapshot` y levanta `REVERSE_REQ`. |
 | `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~8 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status telemetry crc]`, reflejando `READY/FAULT/REV_REQ`. |
+| `taskSpeedMeterRx`       | `src/speed_meter.cpp`    | 3072 (~12 KB)        | 2    | 0      | Eventos UART + parser por gap                | Siempre                  | Sniffer UART2 (GPIO26 @ 2000 bps) y decodificador de velocidad (telemetria). |
 | `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Maneja mensajes UART y reenvia a Telnet cuando `debug::kLogLoop` esta activo. |
 
 > Nota: FreeRTOS en ESP32 interpreta el parametro `stackSize` en palabras de 32 bits. 4096 palabras equivalen a ~16 KB.
@@ -118,6 +119,18 @@ Troubleshooting OTA rapido:
 - Para inspeccionar el estado usa Telnet (`comms.status`, `comms.reset`) o activa `debug::kLogPiComms`.  
 - Documentación detallada, pasos de prueba y troubleshooting: **[PI_COMMS_README.md](PI_COMMS_README.md)**.
 
+## Medidor de velocidad UART2 (sniff)
+
+- El sniffer de velocidad se implementa en `taskSpeedMeterRx` (`src/speed_meter.cpp`) y usa `UART_NUM_2` en **GPIO26 RX** a **2000 bps**.
+- La salida es solo telemetria: no modifica los lazos de control (`PID`/`Drive`) en esta iteracion.
+- El parser segmenta tramas por gap temporal y aplica una LUT minima (`b16/b17`) con filtro por votos para estabilizar `km/h`.
+- Comandos Telnet:
+  - `speed.status` -> snapshot en vivo (edad de frame, velocidad, confianza y contadores).
+  - `speed.reset` -> reinicia contadores del medidor.
+  - `speed.stream on [ms]` / `speed.stream off` -> publica estado continuo por Telnet.
+  - `speed.uart` -> muestra configuracion UART2 activa.
+  - `speed.uart <baud> [on|off]` -> ajusta baudrate e inversion RX en caliente (`on` invertido, `off` normal).
+
 ### `loop()` (src/main.cpp)
 - Corre en el contexto de Arduino (core 1). Si `debug::kLogLoop` es true, reenvia cualquier mensaje recibido por UART al Telnet (`EnviarMensajeTelnet`).
 - Para liberar CPU cede 50 ms con `vTaskDelay(pdMS_TO_TICKS(50))`.
@@ -164,14 +177,15 @@ Estos valores se inyectan en los `*_TaskConfig` y definen la cadencia con la que
 
 | Senal / Modulo           | GPIO ESP32 | Descripcion breve                                                      |
 |--------------------------|------------|------------------------------------------------------------------------|
-| AS5600 SDA / SCL         | 25 / 26    | Bus I2C del sensor magnetico.                                          |
+| AS5600 SDA / SCL         | 25 / 33    | Bus I2C del sensor magnetico.                                          |
 | AS5600 VCC / GND         | 3V3 / GND  | Alimentacion del AS5600.                                               |
-| FS-iA6 direccion         | 16         | PWM -100..100 para el setpoint PID.                                    |
-| FS-iA6 acelerador        | 4          | PWM -100..100; >15 acelera, <-15 activa freno.                         |
-| Salida PWM acelerador    | 17         | LEDC 20 kHz, 8 bits hacia ESC o controlador de motor.                  |
-| Servo freno izquierdo    | 23         | LEDC 50 Hz, 16 bits.                                                   |
-| Servo freno derecho      | 22         | LEDC 50 Hz, 16 bits.                                                   |
-| H-bridge enable / PWM    | 21 / 19 / 18 | Control de motor para direccion, con finales de carrera en GPIO27 y 14. |
+| FS-iA6 AUX1 / AUX2       | 4 / 0      | Canales auxiliares del receptor RC.                                    |
+| FS-iA6 acelerador        | 16         | PWM -100..100; >15 acelera, <-15 activa freno.                         |
+| FS-iA6 direccion         | 17         | PWM -100..100 para el setpoint PID.                                    |
+| Speed sniffer UART2 RX   | 26         | Lectura de velocidad de pantalla (2000 bps, solo recepcion).           |
+| Salida PWM acelerador    | 13         | LEDC 20 kHz, 8 bits hacia ESC o controlador de motor.                  |
+| Servo freno A / B        | 18 / 5     | LEDC 50 Hz, 16 bits para actuacion de freno.                           |
+| H-bridge enable / PWM    | 21 / 22 / 23 | Control de direccion; finales de carrera en GPIO15 y GPIO2.            |
 
 ## Diagnostico y mejores practicas
 

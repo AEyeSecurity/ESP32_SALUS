@@ -10,6 +10,7 @@
 #include "steering_calibration.h"
 #include "pi_comms.h"
 #include "pid.h"
+#include "speed_meter.h"
 
 #ifndef WIFI_STA_SSID
 #define WIFI_STA_SSID "TU_SSID"
@@ -41,6 +42,10 @@
 
 namespace {
 constexpr uint16_t kTelnetPort = 23;
+constexpr TickType_t kSpeedStreamDefaultPeriod = pdMS_TO_TICKS(200);
+constexpr int kSpeedStreamMinPeriodMs = 20;
+constexpr int kSpeedStreamMaxPeriodMs = 5000;
+constexpr TickType_t kTelnetIdleTimeout = pdMS_TO_TICKS(300000);
 
 enum class NetworkMode {
   kUnknown,
@@ -54,6 +59,12 @@ String g_telnetCommandBuffer;
 NetworkMode g_networkMode = NetworkMode::kUnknown;
 String g_networkSsid;
 IPAddress g_networkIp;
+bool g_speedStreamEnabled = false;
+TickType_t g_speedStreamPeriod = kSpeedStreamDefaultPeriod;
+TickType_t g_lastSpeedStreamTick = 0;
+TickType_t g_telnetLastActivityTick = 0;
+
+void reportNetworkStatus();
 
 const char* networkModeText(NetworkMode mode) {
   switch (mode) {
@@ -77,6 +88,32 @@ void sendTelnet(const String& message) {
   EnviarMensajeTelnet(message);
 }
 
+void markTelnetActivity() {
+  g_telnetLastActivityTick = xTaskGetTickCount();
+}
+
+void resetTelnetSession() {
+  if (g_telnetClient) {
+    g_telnetClient.stop();
+  }
+  g_telnetCommandBuffer = "";
+  g_speedStreamEnabled = false;
+  g_lastSpeedStreamTick = 0;
+  g_telnetLastActivityTick = 0;
+}
+
+void openTelnetSession(WiFiClient& incoming) {
+  g_telnetClient = incoming;
+  g_telnetClient.setNoDelay(true);
+  g_telnetCommandBuffer = "";
+  markTelnetActivity();
+  g_telnetClient.println("=== Servidor Telnet ESP32 ===");
+  g_telnetClient.println("Conexion establecida correctamente");
+  g_telnetClient.println(
+      "Comandos: steer.help | pid.help | comms.status | speed.status | speed.reset | speed.stream | speed.uart | net.status");
+  reportNetworkStatus();
+}
+
 bool parseFloatArg(const String& text, float& valueOut) {
   if (text.length() == 0) {
     return false;
@@ -94,6 +131,49 @@ bool parseFloatArg(const String& text, float& valueOut) {
     ++endPtr;
   }
   return true;
+}
+
+bool parseIntArg(const String& text, int& valueOut) {
+  if (text.length() == 0) {
+    return false;
+  }
+  const char* raw = text.c_str();
+  char* endPtr = nullptr;
+  long parsed = strtol(raw, &endPtr, 10);
+  if (endPtr == raw) {
+    return false;
+  }
+  while (endPtr != nullptr && *endPtr != '\0') {
+    if (!isspace(static_cast<unsigned char>(*endPtr))) {
+      return false;
+    }
+    ++endPtr;
+  }
+  valueOut = static_cast<int>(parsed);
+  return true;
+}
+
+bool parseBoolArg(const String& text, bool& valueOut) {
+  String normalized = text;
+  normalized.trim();
+  normalized.toLowerCase();
+  if (normalized == "1" || normalized == "on" || normalized == "true" || normalized == "yes") {
+    valueOut = true;
+    return true;
+  }
+  if (normalized == "0" || normalized == "off" || normalized == "false" || normalized == "no") {
+    valueOut = false;
+    return true;
+  }
+  return false;
+}
+
+void appendHexByte(String& msg, uint8_t value) {
+  msg += "0x";
+  if (value < 0x10) {
+    msg += "0";
+  }
+  msg += String(value, HEX);
 }
 
 bool parseNextFloat(const char*& cursor, float& valueOut) {
@@ -199,6 +279,70 @@ void reportNetworkStatus() {
   msg += " telnetPort=";
   msg += String(kTelnetPort);
   sendTelnet(msg);
+}
+
+String buildSpeedStatusMessage() {
+  SpeedMeterSnapshot snapshot{};
+  speedMeterGetSnapshot(snapshot);
+  SpeedMeterConfig cfg{};
+  speedMeterGetConfig(cfg);
+  String msg = "[SPD][STATUS] driver=";
+  msg += snapshot.driverReady ? "READY" : "NOT_READY";
+  msg += " lastFrame=";
+  if (snapshot.hasFrame) {
+    const TickType_t ageTicks = xTaskGetTickCount() - snapshot.lastFrameTick;
+    const uint32_t ageMs = ageTicks * portTICK_PERIOD_MS;
+    msg += String(ageMs);
+    msg += "ms";
+  } else {
+    msg += "NONE";
+  }
+  msg += " speed=";
+  msg += snapshot.speedKmh;
+  msg += "km/h";
+  msg += " conf=";
+  msg += snapshot.confidence;
+  msg += " throttle=";
+  msg += snapshot.throttleOn ? "ON" : "OFF";
+  msg += " ok=";
+  msg += snapshot.framesOk;
+  msg += " short=";
+  msg += snapshot.framesShort;
+  msg += " long=";
+  msg += snapshot.framesLong;
+  msg += " overflow=";
+  msg += snapshot.frameOverflows;
+  msg += " unknown=";
+  msg += snapshot.framesUnknown;
+  msg += " uart{baud=";
+  msg += cfg.baudRate;
+  msg += " inv=";
+  msg += cfg.invertRx ? "ON" : "OFF";
+  msg += " bytes=";
+  msg += snapshot.uartBytesRx;
+  msg += " dataEvt=";
+  msg += snapshot.uartEventsData;
+  msg += " fe=";
+  msg += snapshot.uartEventsFrameErr;
+  msg += " pe=";
+  msg += snapshot.uartEventsParityErr;
+  msg += " brk=";
+  msg += snapshot.uartEventsBreak;
+  msg += " fifo=";
+  msg += snapshot.uartEventsFifoOvf;
+  msg += " full=";
+  msg += snapshot.uartEventsBufferFull;
+  msg += "}";
+  msg += " raw{len=";
+  msg += snapshot.lastFrameLen;
+  msg += " b8=";
+  appendHexByte(msg, snapshot.lastB8);
+  msg += " b16=";
+  appendHexByte(msg, snapshot.lastB16);
+  msg += " b17=";
+  appendHexByte(msg, snapshot.lastB17);
+  msg += "}";
+  return msg;
 }
 
 void handleTelnetCommand(String line) {
@@ -450,6 +594,167 @@ void handleTelnetCommand(String line) {
     return;
   }
 
+  if (command.equalsIgnoreCase("speed.status")) {
+    sendTelnet(buildSpeedStatusMessage());
+    return;
+  }
+
+  if (command.equalsIgnoreCase("speed.reset")) {
+    speedMeterResetStats();
+    sendTelnet("[SPD][STATUS] Contadores reseteados");
+    return;
+  }
+
+  if (command.equalsIgnoreCase("speed.stream")) {
+    if (args.isEmpty()) {
+      const uint32_t periodMs = static_cast<uint32_t>(g_speedStreamPeriod * portTICK_PERIOD_MS);
+      String msg = "[SPD][STREAM] ";
+      msg += g_speedStreamEnabled ? "ON" : "OFF";
+      msg += " periodo=";
+      msg += String(periodMs);
+      msg += "ms";
+      sendTelnet(msg);
+      return;
+    }
+
+    String normalized = args;
+    normalized.toLowerCase();
+
+    if (normalized == "off" || normalized == "0" || normalized == "stop") {
+      g_speedStreamEnabled = false;
+      sendTelnet("[SPD][STREAM] OFF");
+      return;
+    }
+
+    int periodMs = static_cast<int>(g_speedStreamPeriod * portTICK_PERIOD_MS);
+    bool hasPeriodArg = false;
+    String periodText;
+
+    if (normalized.startsWith("on")) {
+      periodText = args.substring(2);
+      periodText.trim();
+      hasPeriodArg = !periodText.isEmpty();
+    } else {
+      periodText = args;
+      hasPeriodArg = true;
+    }
+
+    if (hasPeriodArg) {
+      int parsedPeriod = 0;
+      if (!parseIntArg(periodText, parsedPeriod)) {
+        sendTelnet("[SPD][STREAM] Uso: speed.stream on [ms] | speed.stream off");
+        return;
+      }
+      if (parsedPeriod < kSpeedStreamMinPeriodMs) {
+        parsedPeriod = kSpeedStreamMinPeriodMs;
+      } else if (parsedPeriod > kSpeedStreamMaxPeriodMs) {
+        parsedPeriod = kSpeedStreamMaxPeriodMs;
+      }
+      periodMs = parsedPeriod;
+    }
+
+    TickType_t periodTicks = pdMS_TO_TICKS(periodMs);
+    if (periodTicks == 0) {
+      periodTicks = 1;
+    }
+
+    g_speedStreamPeriod = periodTicks;
+    g_speedStreamEnabled = true;
+    g_lastSpeedStreamTick = 0;
+
+    String msg = "[SPD][STREAM] ON periodo=";
+    msg += String(periodMs);
+    msg += "ms";
+    sendTelnet(msg);
+    sendTelnet(buildSpeedStatusMessage());
+    return;
+  }
+
+  if (command.equalsIgnoreCase("speed.uart")) {
+    SpeedMeterConfig cfg{};
+    speedMeterGetConfig(cfg);
+
+    if (args.isEmpty()) {
+      String msg = "[SPD][UART] baud=";
+      msg += cfg.baudRate;
+      msg += " invert=";
+      msg += cfg.invertRx ? "ON" : "OFF";
+      msg += " rxPin=";
+      msg += cfg.rxPin;
+      sendTelnet(msg);
+      return;
+    }
+
+    String arg1 = args;
+    String arg2;
+    const int spaceIndexArgs = args.indexOf(' ');
+    if (spaceIndexArgs >= 0) {
+      arg1 = args.substring(0, spaceIndexArgs);
+      arg2 = args.substring(spaceIndexArgs + 1);
+      arg1.trim();
+      arg2.trim();
+    }
+
+    int newBaud = cfg.baudRate;
+    bool newInvert = cfg.invertRx;
+    bool parsedAny = false;
+
+    int parsedBaud = 0;
+    bool parsedInvert = false;
+
+    if (parseIntArg(arg1, parsedBaud)) {
+      if (parsedBaud <= 0) {
+        sendTelnet("[SPD][UART] Baud invalido");
+        return;
+      }
+      newBaud = parsedBaud;
+      parsedAny = true;
+    } else if (parseBoolArg(arg1, parsedInvert)) {
+      newInvert = parsedInvert;
+      parsedAny = true;
+    } else {
+      sendTelnet("[SPD][UART] Uso: speed.uart | speed.uart <baud> [on|off] | speed.uart [on|off] [baud]");
+      return;
+    }
+
+    if (!arg2.isEmpty()) {
+      if (parseIntArg(arg2, parsedBaud)) {
+        if (parsedBaud <= 0) {
+          sendTelnet("[SPD][UART] Baud invalido");
+          return;
+        }
+        newBaud = parsedBaud;
+      } else if (parseBoolArg(arg2, parsedInvert)) {
+        newInvert = parsedInvert;
+      } else {
+        sendTelnet("[SPD][UART] Uso: speed.uart | speed.uart <baud> [on|off] | speed.uart [on|off] [baud]");
+        return;
+      }
+      parsedAny = true;
+    }
+
+    if (!parsedAny) {
+      sendTelnet("[SPD][UART] Uso: speed.uart | speed.uart <baud> [on|off] | speed.uart [on|off] [baud]");
+      return;
+    }
+
+    if (!speedMeterSetUartConfig(newBaud, newInvert)) {
+      sendTelnet("[SPD][UART] Error aplicando configuracion");
+      return;
+    }
+
+    speedMeterGetConfig(cfg);
+    String msg = "[SPD][UART] aplicado baud=";
+    msg += cfg.baudRate;
+    msg += " invert=";
+    msg += cfg.invertRx ? "ON" : "OFF";
+    msg += " rxPin=";
+    msg += cfg.rxPin;
+    sendTelnet(msg);
+    sendTelnet(buildSpeedStatusMessage());
+    return;
+  }
+
   if (command.equalsIgnoreCase("net.status")) {
     reportNetworkStatus();
     return;
@@ -459,30 +764,35 @@ void handleTelnetCommand(String line) {
 }
 
 void handleTelnetClient() {
+  if (g_telnetClient && g_telnetClient.connected() && g_telnetLastActivityTick != 0) {
+    const TickType_t now = xTaskGetTickCount();
+    if ((now - g_telnetLastActivityTick) >= kTelnetIdleTimeout) {
+      g_telnetClient.println("Sesion cerrada por inactividad");
+      resetTelnetSession();
+    }
+  }
+
   if (g_telnetServer.hasClient()) {
     WiFiClient incoming = g_telnetServer.available();
-    if (g_telnetClient && g_telnetClient.connected()) {
-      incoming.println("Logger ocupado");
-      incoming.stop();
-    } else {
-      g_telnetClient = incoming;
-      g_telnetCommandBuffer = "";
-      g_telnetClient.println("=== Servidor Telnet ESP32 ===");
-      g_telnetClient.println("Conexion establecida correctamente");
-      g_telnetClient.println("Comandos: steer.help | pid.help | comms.status | net.status");
-      reportNetworkStatus();
+    if (incoming) {
+      incoming.setNoDelay(true);
+      if (g_telnetClient && g_telnetClient.connected()) {
+        g_telnetClient.println("Sesion cerrada: nuevo cliente conectado");
+      }
+      resetTelnetSession();
+      openTelnetSession(incoming);
     }
   }
 
   if (g_telnetClient && !g_telnetClient.connected()) {
-    g_telnetClient.stop();
-    g_telnetCommandBuffer = "";
+    resetTelnetSession();
   }
 }
 
 void processTelnetInput() {
   while (g_telnetClient && g_telnetClient.connected() && g_telnetClient.available() > 0) {
     const char c = static_cast<char>(g_telnetClient.read());
+    markTelnetActivity();
     if (c == '\r') {
       continue;
     }
@@ -495,6 +805,7 @@ void processTelnetInput() {
     if (c == '\n') {
       handleTelnetCommand(g_telnetCommandBuffer);
       g_telnetCommandBuffer = "";
+      markTelnetActivity();
       continue;
     }
     const unsigned char uc = static_cast<unsigned char>(c);
@@ -608,6 +919,13 @@ void taskOtaTelnet(void* parameter) {
     ArduinoOTA.handle();
     handleTelnetClient();
     processTelnetInput();
+    if (g_speedStreamEnabled && g_telnetClient && g_telnetClient.connected()) {
+      const TickType_t now = xTaskGetTickCount();
+      if (g_lastSpeedStreamTick == 0 || (now - g_lastSpeedStreamTick) >= g_speedStreamPeriod) {
+        sendTelnet(buildSpeedStatusMessage());
+        g_lastSpeedStreamTick = now;
+      }
+    }
     if (logHeartbeat && (xTaskGetTickCount() - lastHeartbeat >= heartbeat)) {
       EnviarMensajeTelnet("ESP32 activo - " + String(millis() / 1000) + "s");
       lastHeartbeat = xTaskGetTickCount();
