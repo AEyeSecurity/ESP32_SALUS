@@ -53,7 +53,7 @@ Troubleshooting OTA rapido:
 | `taskRcMonitor`          | `src/fs_ia6.cpp`         | 2048 (~8 KB)         | 1    | 1      | 100 ms periodica (`vTaskDelay`)              | `debug::kEnableRcTask` (false) | Solo loguea el snapshot compartido; ideal para calibracion. |
 | `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~16 KB)        | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
 | `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~12 KB)        | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA`, mantiene `PiCommsRxSnapshot` y levanta `REVERSE_REQ`. |
-| `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~8 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status telemetry crc]`, reflejando `READY/FAULT/REV_REQ`. |
+| `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~8 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status telemetry crc]`; `telemetry` codifica velocidad (`km/h`) o `255` (`N/A`). |
 | `taskSpeedMeterRx`       | `src/speed_meter.cpp`    | 3072 (~12 KB)        | 2    | 0      | Eventos UART + parser por gap                | Siempre                  | Sniffer UART2 (GPIO26 @ 2000 bps) y decodificador de velocidad (telemetria). |
 | `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Supervisor liviano sin lógica de comunicaciones (solo `vTaskDelay`). |
 
@@ -112,6 +112,10 @@ Troubleshooting OTA rapido:
 - El enlace binario se implementa en `taskPiCommsRx`/`taskPiCommsTx` (`src/pi_comms.cpp`) y usa `GPIO3/GPIO1` a **460 800 bps**.  
 - `taskPiCommsRx` publica un `PiCommsRxSnapshot` con `steer`, `accelRaw`, `accelEffective`, `brake`, `estop`, `driveEnabled` y el estado del pedido de reversa.  
 - `taskPiCommsTx` refleja `REVERSE_REQ` desde el estado RX (`accelRaw<0` y `ALLOW_REVERSE=0` en frame válido).  
+- `taskPiCommsTx` codifica `telemetry_u8` como velocidad:
+  - `0..254` = `km/h`
+  - `255` = `N/A` (sin dato válido o stale `>500 ms`)
+  - override manual si `piCommsSetTelemetry(x)` se usa con `x!=255`.
 - `taskQuadDriveControl` consume el snapshot:  
   - `ESTOP` → freno completo y duty mínimo.  
   - `DRIVE_EN` + `accelEffective` (-100..100, con negativo solo si `ALLOW_REVERSE`) → tracción proporcional.  
@@ -123,7 +127,9 @@ Troubleshooting OTA rapido:
 ## Medidor de velocidad UART2 (sniff)
 
 - El sniffer de velocidad se implementa en `taskSpeedMeterRx` (`src/speed_meter.cpp`) y usa `UART_NUM_2` en **GPIO26 RX** a **2000 bps**.
-- La salida es solo telemetria: no modifica los lazos de control (`PID`/`Drive`) en esta iteracion.
+- Configuracion por defecto al arranque para `speed_meter`: `baud=2000`, `invertRx=ON`.
+- No modifica los lazos de control (`PID`/`Drive`), pero su `speedKmh` alimenta
+  `telemetry_u8` del enlace ESP32 -> Pi.
 - El parser segmenta tramas por gap temporal y aplica una LUT minima (`b16/b17`) con filtro por votos para estabilizar `km/h`.
 - Comandos Telnet:
   - `speed.status` -> snapshot en vivo (edad de frame, velocidad, confianza y contadores).

@@ -99,6 +99,7 @@ Notas de sesion:
 - UART usada: `UART_NUM_2`
 - RX: `GPIO26`
 - Baudrate: `2000`
+- Inversion RX por defecto al arranque: `ON`
 - Modo: solo sniff/telemetria (sin reenvio de trama)
 
 ### Stream continuo por Telnet

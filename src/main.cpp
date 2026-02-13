@@ -165,7 +165,7 @@ static SpeedMeterConfig g_speedMeterConfig = {
     19,
     30,
     debug::kLogSpeedMeter,
-    false};
+    true};
 
 void setup() {
   InicializaWiFi();

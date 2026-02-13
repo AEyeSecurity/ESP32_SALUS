@@ -6,6 +6,7 @@
 #include "esp_err.h"
 
 #include "ota_telnet.h"
+#include "speed_meter.h"
 
 namespace {
 
@@ -57,6 +58,8 @@ constexpr uint8_t kStatusReady = 1 << 0;
 constexpr uint8_t kStatusFault = 1 << 1;
 constexpr uint8_t kStatusOvercurrent = 1 << 2;
 constexpr uint8_t kStatusReverseReq = 1 << 3;
+constexpr uint8_t kTelemetryAuto = 255;
+constexpr TickType_t kSpeedTelemetryMaxAge = pdMS_TO_TICKS(500);
 
 uint8_t crc8_maxim(const uint8_t* data, size_t len) {
   uint8_t c = 0x00;
@@ -150,26 +153,37 @@ String describeStatusFlags(uint8_t status) {
 }
 
 String describeTelemetry(uint8_t telemetry) {
-  if (telemetry <= 100) {
-    String pct = String(telemetry);
-    pct += "%";
-    return pct;
+  if (telemetry == kTelemetryAuto) {
+    return "N/A";
   }
-  switch (telemetry) {
-    case 101:
-      return "TEMP_HIGH";
-    case 102:
-      return "SENSOR_ERR";
-    case 103:
-      return "ENC_ERR";
-    case 255:
-      return "N/A";
-    default: {
-      String hex = "0x";
-      hex += String(telemetry, HEX);
-      return hex;
-    }
+  if (telemetry <= 254) {
+    String kmh = String(telemetry);
+    kmh += "km/h";
+    return kmh;
   }
+  String hex = "0x";
+  hex += String(telemetry, HEX);
+  return hex;
+}
+
+uint8_t encodeTelemetryFromSpeed() {
+  SpeedMeterSnapshot speed{};
+  speedMeterGetSnapshot(speed);
+  if (!speed.driverReady || !speed.hasFrame || speed.speedKmh < 0 || speed.lastFrameTick == 0) {
+    return kTelemetryAuto;
+  }
+
+  const TickType_t nowTick = xTaskGetTickCount();
+  const TickType_t ageTicks = nowTick - speed.lastFrameTick;
+  if (ageTicks > kSpeedTelemetryMaxAge) {
+    return kTelemetryAuto;
+  }
+
+  if (speed.speedKmh >= 254) {
+    return 254;
+  }
+
+  return static_cast<uint8_t>(speed.speedKmh);
 }
 
 void logRxFrame(const PiCommsConfig& cfg, const PiRxState& state, TickType_t nowTick) {
@@ -305,7 +319,7 @@ bool piCommsInit(const PiCommsConfig& config) {
   g_rxState = PiRxState{};
   g_txState = PiTxState{};
   g_txState.statusFlags = kStatusReady;
-  g_txState.telemetry = 255;
+  g_txState.telemetry = kTelemetryAuto;
   g_manualStatusFlags = 0;
   g_reverseRequestActive = false;
   portEXIT_CRITICAL(&g_stateMux);
@@ -470,11 +484,11 @@ void taskPiCommsTx(void* parameter) {
   while (true) {
     if (g_initialized) {
       uint8_t status = 0;
-      uint8_t telemetry = 255;
+      uint8_t telemetryOverride = kTelemetryAuto;
       bool reverseRequest = false;
       portENTER_CRITICAL(&g_stateMux);
       status = g_txState.statusFlags;
-      telemetry = g_txState.telemetry;
+      telemetryOverride = g_txState.telemetry;
       reverseRequest = g_reverseRequestActive;
       portEXIT_CRITICAL(&g_stateMux);
       if (reverseRequest) {
@@ -482,6 +496,8 @@ void taskPiCommsTx(void* parameter) {
       } else {
         status &= ~kStatusReverseReq;
       }
+      const uint8_t telemetry =
+          (telemetryOverride == kTelemetryAuto) ? encodeTelemetryFromSpeed() : telemetryOverride;
 
       uint8_t frame[kTxFrameSize];
       frame[0] = kHeaderTx;
