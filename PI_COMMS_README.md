@@ -2,6 +2,9 @@
 
 Guía paso a paso para usar la UART (GPIO3/GPIO1) del ESP32 como enlace de control con una Raspberry Pi siguiendo el protocolo descrito en `COMMS.md`.
 
+> Referencia de protocolo (espejo): `ESP32_UART_PROTOCOL.md`  
+> Fuente de verdad documental: `aeye-ros-workspace/src/sensores/ESP32_UART_PROTOCOL.md`.
+
 ---
 
 ## 1. Hardware
@@ -120,18 +123,44 @@ Recomendado: activar `debug::kLogDrive` temporalmente para ver qué comandos ter
    - Mover `accel_i8` positivo con `DRIVE_EN=1`; comprobar logs `[PI][RX]` y `[DRIVE]`.  
    - Solicitar reversa (`accel<0`). Confirmar que aparece `reverse{req=Y wait=Y}` y que al activar el relé (`ALLOW_REVERSE`) cambia a `granted=Y`.  
 5. **Probar ESTOP**: setear `ESTOP=1` y validar que `cmd=0`, `brake=100` y duty en mínimo.  
-6. **Integrar en el vehículo** una vez que no existan CRC errors y los tiempos (`ageMs`) se mantengan <50 ms.
+6. **Integrar en el vehículo** una vez que no existan CRC errors y los tiempos (`ageMs`) se mantengan <50 ms.
 
 ---
 
-## 7. Troubleshooting rápido
+## 7. Pruebas sin perder control manual RC
+
+Durante validaciones de telemetria, si la Raspberry transmite frames de control
+de forma continua, la ESP32 puede priorizar Pi sobre RC y parecer que se
+"bloquea" el acelerador manual.
+
+Puntos clave:
+
+- Si el frame Pi esta fresco (`<=120 ms`), direccion usa `steer` de Pi.
+- Si ademas `DRIVE_EN=1`, traccion usa `accelEffective` de Pi.
+- Con frame fresco, freno usa `brake_u8` de Pi.
+
+Procedimiento recomendado para pruebas con manejo manual:
+
+1. Detener servicio: `sudo systemctl stop salus-ws.service`
+2. Verificar: `systemctl is-active salus-ws.service` -> `inactive`
+3. (Opcional) bloquear arranque durante prueba:
+   - `sudo systemctl mask --runtime salus-ws.service`
+4. Usar script de captura **solo RX** en Raspberry (no enviar `0xAA`).
+5. Restaurar al terminar:
+   - `sudo systemctl unmask salus-ws.service`
+   - `sudo systemctl start salus-ws.service` (si corresponde)
+
+---
+
+## 8. Troubleshooting rápido
 
 | Síntoma                                   | Causa probable / acción                                        |
 |-------------------------------------------|----------------------------------------------------------------|
 | `driver=NOT_READY` en `comms.status`      | La UART no inicializó; revisar `piCommsInit` y cableado.       |
 | `ok=0 crcErr>0`                           | Ruido o baud incorrecto; revisar velocidad y masa compartida.  |
 | `reverse wait=Y` no pasa a `granted=Y`    | La Pi no activó `ALLOW_REVERSE`; chequear relé y lógica.       |
-| `cmd=0 (RC)` aun con Pi en marcha         | `DRIVE_EN` en 0 o frames viejos (>120 ms); revisar envío/tiempos. |
+| `cmd=0 (RC)` aun con Pi en marcha         | `DRIVE_EN` en 0 o frames viejos (>120 ms); revisar envío/tiempos. |
 | `ESTOP` no frena                          | Verificar que bit 0 del `ver_flags` realmente se escribe y llega (logs `[PI][RX]`). |
+| Se pierde control manual al testear desde Pi | Algún proceso Pi está transmitiendo control; detener `salus-ws.service` y usar modo solo RX. |
 
 Con esta guía deberías poder cablear, probar y depurar la comunicación sin tocar el resto del firmware.

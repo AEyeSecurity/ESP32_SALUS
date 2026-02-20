@@ -46,6 +46,7 @@ constexpr TickType_t kSpeedStreamDefaultPeriod = pdMS_TO_TICKS(200);
 constexpr int kSpeedStreamMinPeriodMs = 20;
 constexpr int kSpeedStreamMaxPeriodMs = 5000;
 constexpr TickType_t kTelnetIdleTimeout = pdMS_TO_TICKS(300000);
+constexpr bool kPiCommsOnlyLogs = true;
 
 enum class NetworkMode {
   kUnknown,
@@ -86,6 +87,13 @@ void updateNetworkState(NetworkMode mode, const String& ssid, const IPAddress& i
 
 void sendTelnet(const String& message) {
   EnviarMensajeTelnet(message);
+}
+
+bool shouldForwardLog(const String& message) {
+  if (!kPiCommsOnlyLogs) {
+    return true;
+  }
+  return message.startsWith("[PI]");
 }
 
 void markTelnetActivity() {
@@ -898,6 +906,9 @@ void serialIf(bool enabled, const String& message) {
 
 void telnetIf(bool enabled, const String& message) {
   if (!enabled) {
+    return;
+  }
+  if (!shouldForwardLog(message)) {
     return;
   }
   EnviarMensajeTelnet(message);

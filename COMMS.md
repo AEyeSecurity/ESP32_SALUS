@@ -3,6 +3,9 @@
 Este documento describe lo que **hace hoy** el codigo en `src/pi_comms.cpp`,
 `src/quad_functions.cpp` y `src/pid.cpp`.
 
+> Referencia de protocolo (espejo): `ESP32_UART_PROTOCOL.md`  
+> Fuente de verdad documental: `aeye-ros-workspace/src/sensores/ESP32_UART_PROTOCOL.md`.
+
 ## 1. Configuracion UART usada por el proyecto
 
 Definida en `src/main.cpp` (`g_piCommsConfig`):
@@ -107,7 +110,35 @@ Se considera frame de Pi "fresco" si su edad es <= `120 ms`.
 - Si no, vuelve a steering de RC.
 - Hoy `steer` de Pi no depende de `DRIVE_EN` ni de `ESTOP`.
 
-## 6. Failsafe real vs supuesto comun
+### 5.3 Prioridad PI vs RC durante pruebas
+
+Si llegan frames de Pi frescos (`<=120 ms`), el firmware prioriza entrada Pi:
+
+- Traccion: con `DRIVE_EN=1`, usa `accelEffective` de Pi.
+- Direccion: usa `steer` de Pi aunque `DRIVE_EN=0`.
+- Freno: con frame fresco, usa `brake_u8` de Pi.
+
+Consecuencia practica:
+
+- Si una prueba en Raspberry transmite continuamente con `accel=0`, el vehiculo
+  puede quedar "sin acelerador manual" (RC) porque entra en control Pi.
+- Para pruebas con manejo manual, usar captura **solo RX** en Raspberry (no TX
+  hacia ESP32).
+
+## 6. Modo de prueba seguro (sin bloquear control manual)
+
+1. En Raspberry, detener el servicio de bridge:
+   - `sudo systemctl stop salus-ws.service`
+   - verificar: `systemctl is-active salus-ws.service` -> `inactive`
+2. Para evitar auto-reinicio durante pruebas:
+   - `sudo systemctl mask --runtime salus-ws.service`
+3. Correr prueba pasiva (solo lectura de `/dev/serial0`), sin enviar frames
+   `0xAA` a la ESP32.
+4. Al finalizar, restaurar servicio:
+   - `sudo systemctl unmask salus-ws.service`
+   - `sudo systemctl start salus-ws.service` (si corresponde)
+
+## 7. Failsafe real vs supuesto comun
 
 Lo que **si** ocurre al perder tramas frescas de Pi:
 
@@ -119,7 +150,7 @@ Lo que **no** ocurre automaticamente en `pi_comms`:
 - No existe una rutina que fuerce globalmente `brake=100`, `drive_en=0` o
   `steer=0` por timeout dentro del modulo UART.
 
-## 7. CRC usado
+## 8. CRC usado
 
 `crc8_maxim` en `src/pi_comms.cpp`:
 
@@ -127,7 +158,7 @@ Lo que **no** ocurre automaticamente en `pi_comms`:
 - Polinomio: `0x31`
 - Procesamiento MSB-first (Dallas/Maxim)
 
-## 8. Observabilidad
+## 9. Observabilidad
 
 Comandos Telnet utiles (`src/ota_telnet.cpp`):
 
