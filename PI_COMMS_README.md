@@ -56,12 +56,11 @@ El proyecto crea dos tareas FreeRTOS dedicadas al enlace:
 3: CRC-8 Dallas/Maxim (bytes 0-2)
 ```
 
-`telemetry_u8` se genera automaticamente desde `speed_meter` cuando
+`telemetry_u8` se genera desde backend Hall cuando
 `g_txState.telemetry == 255`:
 
-- usa `speedKmh` si el snapshot es valido y su edad es `<=500 ms`;
-- envia `255` si no hay dato valido (`driverReady=false`, `hasFrame=false`,
-  `speedKmh<0` o frame stale).
+- `0..254` desde `speedKmh` Hall (redondeado y clamped);
+- `255` (`N/A`) si el backend Hall no está listo.
 
 Si `piCommsSetTelemetry(x)` recibe `x != 255`, ese valor manual tiene prioridad
 sobre la codificacion de velocidad.

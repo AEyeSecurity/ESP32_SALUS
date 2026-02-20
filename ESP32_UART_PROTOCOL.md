@@ -89,17 +89,13 @@ Semántica de `telemetry_u8`:
 - TX ESP32 (`0x55`): `100 Hz` (cada `10 ms`)
 - Freshness de control de Pi usada en firmware: `<=120 ms`
 - Regla de velocidad N/A en ESP32->Pi:
-  - `telemetry_u8=255` cuando no hay dato válido de `speed_meter` o dato stale `>500 ms`
+  - `telemetry_u8=255` si el backend Hall no está listo
 
 ## 5. Fuente de `telemetry_u8` en firmware ESP32
 
 - Modo automático cuando `g_txState.telemetry == 255`:
-  - usa `speedMeterSnapshot.speedKmh` clamped a `0..254`
-- Condiciones para enviar `255`:
-  - `driverReady=false`
-  - `hasFrame=false`
-  - `speedKmh<0`
-  - `age(lastFrameTick) > 500 ms`
+  - usa `speedKmh` Hall redondeado y clamped a `0..254`
+  - usa `255` (`N/A`) si el backend Hall no está listo
 - Override manual opcional:
   - si `piCommsSetTelemetry(x)` con `x != 255`, se envía ese valor fijo
 

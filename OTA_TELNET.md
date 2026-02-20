@@ -94,35 +94,11 @@ Notas de sesion:
 - Si entra un cliente nuevo, reemplaza al anterior automaticamente.
 - Una sesion inactiva se cierra sola (timeout) para evitar bloqueos por clientes colgados.
 
-## Medidor de velocidad UART2
+## Velocidad Hall (`speed.*`)
 
-- UART usada: `UART_NUM_2`
-- RX: `GPIO26`
-- Baudrate: `2000`
-- Inversion RX por defecto al arranque: `ON`
-- Modo: solo sniff/telemetria (sin reenvio de trama)
+Backend activo por ISR Hall en `GPIO26/27/14` (active-low).
 
-### Stream continuo por Telnet
-
-```text
-speed.stream on
-speed.stream on 100
-speed.stream 250
-speed.stream off
-```
-
-- `speed.stream on [ms]`: activa envio continuo de `[SPD][STATUS] ...`
-- Rango de periodo: `20..5000 ms` (clamp automatico)
-
-### Ajuste UART en vivo (diagnostico)
-
-```text
-speed.uart
-speed.uart 2000 off
-speed.uart 2000 on
-speed.uart 2083 on
-```
-
-- `speed.uart`: muestra `baud`, inversion RX y pin.
-- `speed.uart <baud> [on|off]`: reconfigura UART2 RX en caliente.
-- `on` = RX invertido, `off` = RX normal.
+- `speed.status`: muestra snapshot Hall (`km/h`, `rpm`, máscara Hall, edad/período y contadores).
+- `speed.reset`: reinicia contadores Hall y devuelve estado actualizado.
+- `speed.stream on [ms] | speed.stream off`: stream periódico de `speed.status` (rango `20..5000 ms`).
+- `speed.uart`: responde `N/A source=hall` (sin backend UART de velocidad).

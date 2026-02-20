@@ -80,10 +80,9 @@ Campos derivados que calcula RX:
   - `REVERSE_REQ` no se setea manualmente: se calcula desde RX
     (`g_reverseRequestActive`) en cada envio.
 - `telemetry` por defecto inicia en `255` (`N/A`) y en ese modo se calcula
-  automaticamente desde `speed_meter`:
-  - `0..254` cuando hay `SpeedMeterSnapshot` valido.
-  - `255` si `driverReady=false`, `hasFrame=false`, `speedKmh<0` o el ultimo
-    frame tiene edad `>500 ms`.
+  automaticamente desde el backend Hall (`GPIO26/27/14`):
+  - `0..254` cuando `speedKmh` Hall está disponible.
+  - `255` si el backend Hall no está listo.
 - Override manual opcional: si se llama `piCommsSetTelemetry(x)` con `x!=255`,
   TX usa ese valor fijo y no la velocidad.
 

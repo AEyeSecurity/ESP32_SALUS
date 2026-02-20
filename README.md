@@ -53,8 +53,7 @@ Troubleshooting OTA rapido:
 | `taskRcMonitor`          | `src/fs_ia6.cpp`         | 2048 (~8 KB)         | 1    | 1      | 100 ms periodica (`vTaskDelay`)              | `debug::kEnableRcTask` (false) | Solo loguea el snapshot compartido; ideal para calibracion. |
 | `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~16 KB)        | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
 | `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~12 KB)        | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA`, mantiene `PiCommsRxSnapshot` y levanta `REVERSE_REQ`. |
-| `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~8 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status telemetry crc]`; `telemetry` codifica velocidad (`km/h`) o `255` (`N/A`). |
-| `taskSpeedMeterRx`       | `src/speed_meter.cpp`    | 3072 (~12 KB)        | 2    | 0      | Eventos UART + parser por gap                | Siempre                  | Sniffer UART2 (GPIO26 @ 2000 bps) y decodificador de velocidad (telemetria). |
+| `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~8 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status telemetry crc]`; en automático la telemetría queda en `255` (`N/A`). |
 | `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Supervisor liviano sin lógica de comunicaciones (solo `vTaskDelay`). |
 
 > Nota: FreeRTOS en ESP32 interpreta el parametro `stackSize` en palabras de 32 bits. 4096 palabras equivalen a ~16 KB.
@@ -113,8 +112,8 @@ Troubleshooting OTA rapido:
 - `taskPiCommsRx` publica un `PiCommsRxSnapshot` con `steer`, `accelRaw`, `accelEffective`, `brake`, `estop`, `driveEnabled` y el estado del pedido de reversa.  
 - `taskPiCommsTx` refleja `REVERSE_REQ` desde el estado RX (`accelRaw<0` y `ALLOW_REVERSE=0` en frame válido).  
 - `taskPiCommsTx` codifica `telemetry_u8` como velocidad:
-  - `0..254` = `km/h`
-  - `255` = `N/A` (sin dato válido o stale `>500 ms`)
+  - `0..254` = `km/h` estimados por backend Hall
+  - `255` = `N/A` si el backend Hall no está listo
   - override manual si `piCommsSetTelemetry(x)` se usa con `x!=255`.
 - `taskQuadDriveControl` consume el snapshot:  
   - `ESTOP` → freno completo y duty mínimo.  
@@ -124,19 +123,16 @@ Troubleshooting OTA rapido:
 - Para inspeccionar el estado usa Telnet (`comms.status`, `comms.reset`) o activa `debug::kLogPiComms`.  
 - Documentación detallada, pasos de prueba y troubleshooting: **[PI_COMMS_README.md](PI_COMMS_README.md)**.
 
-## Medidor de velocidad UART2 (sniff)
+## Velocidad Hall (GPIO ISR IRAM)
 
-- El sniffer de velocidad se implementa en `taskSpeedMeterRx` (`src/speed_meter.cpp`) y usa `UART_NUM_2` en **GPIO26 RX** a **2000 bps**.
-- Configuracion por defecto al arranque para `speed_meter`: `baud=2000`, `invertRx=ON`.
-- No modifica los lazos de control (`PID`/`Drive`), pero su `speedKmh` alimenta
-  `telemetry_u8` del enlace ESP32 -> Pi.
-- El parser segmenta tramas por gap temporal y aplica una LUT minima (`b16/b17`) con filtro por votos para estabilizar `km/h`.
+- Backend activo: lectura Hall por ISR en IRAM sobre `GPIO26`, `GPIO27`, `GPIO14` (active-low).
+- Parámetros actuales: `motorPoles=8`, `gearReduction=10.0`, `wheelDiameterM=0.45`, `rpmTimeoutUs=500000`.
+- `telemetry_u8` en modo automático se calcula desde `speedKmh` Hall (redondeado y clamped a `0..254`).
 - Comandos Telnet:
-  - `speed.status` -> snapshot en vivo (edad de frame, velocidad, confianza y contadores).
-  - `speed.reset` -> reinicia contadores del medidor.
-  - `speed.stream on [ms]` / `speed.stream off` -> publica estado continuo por Telnet.
-  - `speed.uart` -> muestra configuracion UART2 activa.
-  - `speed.uart <baud> [on|off]` -> ajusta baudrate e inversion RX en caliente (`on` invertido, `off` normal).
+  - `speed.status` muestra snapshot Hall y contadores ISR/validación.
+  - `speed.reset` reinicia contadores Hall.
+  - `speed.stream on [ms]` / `speed.stream off` habilita stream periódico por Telnet.
+  - `speed.uart` responde `N/A source=hall` (ya no existe backend UART de velocidad).
 
 ### `loop()` (src/main.cpp)
 - Corre en el contexto de Arduino (core 1).
@@ -189,7 +185,7 @@ Estos valores se inyectan en los `*_TaskConfig` y definen la cadencia con la que
 | FS-iA6 AUX1 / AUX2       | 4 / 0      | Canales auxiliares del receptor RC.                                    |
 | FS-iA6 acelerador        | 16         | PWM -100..100; >15 acelera, <-15 activa freno.                         |
 | FS-iA6 direccion         | 17         | PWM -100..100 para el setpoint PID.                                    |
-| Speed sniffer UART2 RX   | 26         | Lectura de velocidad de pantalla (2000 bps, solo recepcion).           |
+| Hall BLDC (activo)       | 26 / 27 / 14 | Medición de velocidad por ISR en IRAM (sensores active-low).            |
 | Salida PWM acelerador    | 13         | LEDC 20 kHz, 8 bits hacia ESC o controlador de motor.                  |
 | Servo freno A / B        | 18 / 5     | LEDC 50 Hz, 16 bits para actuacion de freno.                           |
 | H-bridge enable / PWM    | 21 / 22 / 23 | Control de direccion; finales de carrera en GPIO15 y GPIO2.            |

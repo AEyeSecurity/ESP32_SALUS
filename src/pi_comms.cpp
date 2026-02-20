@@ -5,8 +5,8 @@
 
 #include "esp_err.h"
 
+#include "hall_speed.h"
 #include "ota_telnet.h"
-#include "speed_meter.h"
 
 namespace {
 
@@ -59,7 +59,6 @@ constexpr uint8_t kStatusFault = 1 << 1;
 constexpr uint8_t kStatusOvercurrent = 1 << 2;
 constexpr uint8_t kStatusReverseReq = 1 << 3;
 constexpr uint8_t kTelemetryAuto = 255;
-constexpr TickType_t kSpeedTelemetryMaxAge = pdMS_TO_TICKS(500);
 
 uint8_t crc8_maxim(const uint8_t* data, size_t len) {
   uint8_t c = 0x00;
@@ -167,23 +166,18 @@ String describeTelemetry(uint8_t telemetry) {
 }
 
 uint8_t encodeTelemetryFromSpeed() {
-  SpeedMeterSnapshot speed{};
-  speedMeterGetSnapshot(speed);
-  if (!speed.driverReady || !speed.hasFrame || speed.speedKmh < 0 || speed.lastFrameTick == 0) {
+  HallSpeedSnapshot speed{};
+  if (!hallSpeedGetSnapshot(speed) || !speed.driverReady) {
     return kTelemetryAuto;
   }
 
-  const TickType_t nowTick = xTaskGetTickCount();
-  const TickType_t ageTicks = nowTick - speed.lastFrameTick;
-  if (ageTicks > kSpeedTelemetryMaxAge) {
-    return kTelemetryAuto;
+  int telemetry = static_cast<int>(speed.speedKmh + 0.5f);
+  if (telemetry < 0) {
+    telemetry = 0;
+  } else if (telemetry > 254) {
+    telemetry = 254;
   }
-
-  if (speed.speedKmh >= 254) {
-    return 254;
-  }
-
-  return static_cast<uint8_t>(speed.speedKmh);
+  return static_cast<uint8_t>(telemetry);
 }
 
 void logRxFrame(const PiCommsConfig& cfg, const PiRxState& state, TickType_t nowTick) {

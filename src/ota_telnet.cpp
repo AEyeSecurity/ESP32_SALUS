@@ -10,7 +10,7 @@
 #include "steering_calibration.h"
 #include "pi_comms.h"
 #include "pid.h"
-#include "speed_meter.h"
+#include "hall_speed.h"
 
 #ifndef WIFI_STA_SSID
 #define WIFI_STA_SSID "TU_SSID"
@@ -147,7 +147,7 @@ bool parseIntArg(const String& text, int& valueOut) {
   }
   const char* raw = text.c_str();
   char* endPtr = nullptr;
-  long parsed = strtol(raw, &endPtr, 10);
+  const long parsed = strtol(raw, &endPtr, 10);
   if (endPtr == raw) {
     return false;
   }
@@ -159,29 +159,6 @@ bool parseIntArg(const String& text, int& valueOut) {
   }
   valueOut = static_cast<int>(parsed);
   return true;
-}
-
-bool parseBoolArg(const String& text, bool& valueOut) {
-  String normalized = text;
-  normalized.trim();
-  normalized.toLowerCase();
-  if (normalized == "1" || normalized == "on" || normalized == "true" || normalized == "yes") {
-    valueOut = true;
-    return true;
-  }
-  if (normalized == "0" || normalized == "off" || normalized == "false" || normalized == "no") {
-    valueOut = false;
-    return true;
-  }
-  return false;
-}
-
-void appendHexByte(String& msg, uint8_t value) {
-  msg += "0x";
-  if (value < 0x10) {
-    msg += "0";
-  }
-  msg += String(value, HEX);
 }
 
 bool parseNextFloat(const char*& cursor, float& valueOut) {
@@ -290,65 +267,47 @@ void reportNetworkStatus() {
 }
 
 String buildSpeedStatusMessage() {
-  SpeedMeterSnapshot snapshot{};
-  speedMeterGetSnapshot(snapshot);
-  SpeedMeterConfig cfg{};
-  speedMeterGetConfig(cfg);
-  String msg = "[SPD][STATUS] driver=";
-  msg += snapshot.driverReady ? "READY" : "NOT_READY";
-  msg += " lastFrame=";
-  if (snapshot.hasFrame) {
-    const TickType_t ageTicks = xTaskGetTickCount() - snapshot.lastFrameTick;
-    const uint32_t ageMs = ageTicks * portTICK_PERIOD_MS;
-    msg += String(ageMs);
-    msg += "ms";
-  } else {
-    msg += "NONE";
-  }
+  HallSpeedSnapshot snapshot{};
+  const bool ok = hallSpeedGetSnapshot(snapshot);
+  HallSpeedConfig cfg{};
+  hallSpeedGetConfig(cfg);
+
+  String msg = "[SPD][STATUS] source=hall driver=";
+  msg += (ok && snapshot.driverReady) ? "READY" : "NOT_READY";
   msg += " speed=";
-  msg += snapshot.speedKmh;
-  msg += "km/h";
-  msg += " conf=";
-  msg += snapshot.confidence;
-  msg += " throttle=";
-  msg += snapshot.throttleOn ? "ON" : "OFF";
+  msg += String(snapshot.speedKmh, 2);
+  msg += "km/h rpm=";
+  msg += String(snapshot.motorRpm, 1);
+  msg += " hall=0b";
+  msg += (snapshot.hallMask & (1U << 2)) ? '1' : '0';
+  msg += (snapshot.hallMask & (1U << 1)) ? '1' : '0';
+  msg += (snapshot.hallMask & (1U << 0)) ? '1' : '0';
+  msg += " ageUs=";
+  msg += snapshot.transitionAgeUs;
+  msg += " periodUs=";
+  msg += snapshot.transitionPeriodUs;
   msg += " ok=";
-  msg += snapshot.framesOk;
-  msg += " short=";
-  msg += snapshot.framesShort;
-  msg += " long=";
-  msg += snapshot.framesLong;
-  msg += " overflow=";
-  msg += snapshot.frameOverflows;
-  msg += " unknown=";
-  msg += snapshot.framesUnknown;
-  msg += " uart{baud=";
-  msg += cfg.baudRate;
-  msg += " inv=";
-  msg += cfg.invertRx ? "ON" : "OFF";
-  msg += " bytes=";
-  msg += snapshot.uartBytesRx;
-  msg += " dataEvt=";
-  msg += snapshot.uartEventsData;
-  msg += " fe=";
-  msg += snapshot.uartEventsFrameErr;
-  msg += " pe=";
-  msg += snapshot.uartEventsParityErr;
-  msg += " brk=";
-  msg += snapshot.uartEventsBreak;
-  msg += " fifo=";
-  msg += snapshot.uartEventsFifoOvf;
-  msg += " full=";
-  msg += snapshot.uartEventsBufferFull;
-  msg += "}";
-  msg += " raw{len=";
-  msg += snapshot.lastFrameLen;
-  msg += " b8=";
-  appendHexByte(msg, snapshot.lastB8);
-  msg += " b16=";
-  appendHexByte(msg, snapshot.lastB16);
-  msg += " b17=";
-  appendHexByte(msg, snapshot.lastB17);
+  msg += snapshot.transitionsOk;
+  msg += " invState=";
+  msg += snapshot.transitionsInvalidState;
+  msg += " invJump=";
+  msg += snapshot.transitionsInvalidJump;
+  msg += " isr=";
+  msg += snapshot.isrCount;
+  msg += " cfg{pins=";
+  msg += cfg.pinA;
+  msg += "/";
+  msg += cfg.pinB;
+  msg += "/";
+  msg += cfg.pinC;
+  msg += " low=";
+  msg += cfg.activeLow ? "Y" : "N";
+  msg += " poles=";
+  msg += cfg.motorPoles;
+  msg += " red=";
+  msg += String(cfg.gearReduction, 2);
+  msg += " wheelM=";
+  msg += String(cfg.wheelDiameterM, 3);
   msg += "}";
   return msg;
 }
@@ -608,8 +567,9 @@ void handleTelnetCommand(String line) {
   }
 
   if (command.equalsIgnoreCase("speed.reset")) {
-    speedMeterResetStats();
-    sendTelnet("[SPD][STATUS] Contadores reseteados");
+    hallSpeedResetStats();
+    sendTelnet("[SPD][STATUS] Contadores Hall reseteados");
+    sendTelnet(buildSpeedStatusMessage());
     return;
   }
 
@@ -619,7 +579,7 @@ void handleTelnetCommand(String line) {
       String msg = "[SPD][STREAM] ";
       msg += g_speedStreamEnabled ? "ON" : "OFF";
       msg += " periodo=";
-      msg += String(periodMs);
+      msg += periodMs;
       msg += "ms";
       sendTelnet(msg);
       return;
@@ -627,7 +587,6 @@ void handleTelnetCommand(String line) {
 
     String normalized = args;
     normalized.toLowerCase();
-
     if (normalized == "off" || normalized == "0" || normalized == "stop") {
       g_speedStreamEnabled = false;
       sendTelnet("[SPD][STREAM] OFF");
@@ -671,7 +630,7 @@ void handleTelnetCommand(String line) {
     g_lastSpeedStreamTick = 0;
 
     String msg = "[SPD][STREAM] ON periodo=";
-    msg += String(periodMs);
+    msg += periodMs;
     msg += "ms";
     sendTelnet(msg);
     sendTelnet(buildSpeedStatusMessage());
@@ -679,87 +638,8 @@ void handleTelnetCommand(String line) {
   }
 
   if (command.equalsIgnoreCase("speed.uart")) {
-    SpeedMeterConfig cfg{};
-    speedMeterGetConfig(cfg);
-
-    if (args.isEmpty()) {
-      String msg = "[SPD][UART] baud=";
-      msg += cfg.baudRate;
-      msg += " invert=";
-      msg += cfg.invertRx ? "ON" : "OFF";
-      msg += " rxPin=";
-      msg += cfg.rxPin;
-      sendTelnet(msg);
-      return;
-    }
-
-    String arg1 = args;
-    String arg2;
-    const int spaceIndexArgs = args.indexOf(' ');
-    if (spaceIndexArgs >= 0) {
-      arg1 = args.substring(0, spaceIndexArgs);
-      arg2 = args.substring(spaceIndexArgs + 1);
-      arg1.trim();
-      arg2.trim();
-    }
-
-    int newBaud = cfg.baudRate;
-    bool newInvert = cfg.invertRx;
-    bool parsedAny = false;
-
-    int parsedBaud = 0;
-    bool parsedInvert = false;
-
-    if (parseIntArg(arg1, parsedBaud)) {
-      if (parsedBaud <= 0) {
-        sendTelnet("[SPD][UART] Baud invalido");
-        return;
-      }
-      newBaud = parsedBaud;
-      parsedAny = true;
-    } else if (parseBoolArg(arg1, parsedInvert)) {
-      newInvert = parsedInvert;
-      parsedAny = true;
-    } else {
-      sendTelnet("[SPD][UART] Uso: speed.uart | speed.uart <baud> [on|off] | speed.uart [on|off] [baud]");
-      return;
-    }
-
-    if (!arg2.isEmpty()) {
-      if (parseIntArg(arg2, parsedBaud)) {
-        if (parsedBaud <= 0) {
-          sendTelnet("[SPD][UART] Baud invalido");
-          return;
-        }
-        newBaud = parsedBaud;
-      } else if (parseBoolArg(arg2, parsedInvert)) {
-        newInvert = parsedInvert;
-      } else {
-        sendTelnet("[SPD][UART] Uso: speed.uart | speed.uart <baud> [on|off] | speed.uart [on|off] [baud]");
-        return;
-      }
-      parsedAny = true;
-    }
-
-    if (!parsedAny) {
-      sendTelnet("[SPD][UART] Uso: speed.uart | speed.uart <baud> [on|off] | speed.uart [on|off] [baud]");
-      return;
-    }
-
-    if (!speedMeterSetUartConfig(newBaud, newInvert)) {
-      sendTelnet("[SPD][UART] Error aplicando configuracion");
-      return;
-    }
-
-    speedMeterGetConfig(cfg);
-    String msg = "[SPD][UART] aplicado baud=";
-    msg += cfg.baudRate;
-    msg += " invert=";
-    msg += cfg.invertRx ? "ON" : "OFF";
-    msg += " rxPin=";
-    msg += cfg.rxPin;
-    sendTelnet(msg);
-    sendTelnet(buildSpeedStatusMessage());
+    (void)args;
+    sendTelnet("[SPD][UART] N/A source=hall");
     return;
   }
 
