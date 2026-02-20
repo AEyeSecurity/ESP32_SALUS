@@ -129,7 +129,7 @@ Troubleshooting OTA rapido:
 - Parámetros actuales: `motorPoles=8`, `gearReduction=10.0`, `wheelDiameterM=0.45`, `rpmTimeoutUs=500000`.
 - `telemetry_u8` en modo automático se calcula desde `speedKmh` Hall (redondeado y clamped a `0..254`).
 - Comandos Telnet:
-  - `speed.status` muestra snapshot Hall y contadores ISR/validación.
+  - `speed.status` muestra snapshot Hall (`km/h`, `m/s`) y contadores ISR/validación.
   - `speed.reset` reinicia contadores Hall.
   - `speed.stream on [ms]` / `speed.stream off` habilita stream periódico por Telnet.
   - `speed.uart` responde `N/A source=hall` (ya no existe backend UART de velocidad).

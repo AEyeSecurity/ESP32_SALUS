@@ -98,7 +98,7 @@ Notas de sesion:
 
 Backend activo por ISR Hall en `GPIO26/27/14` (active-low).
 
-- `speed.status`: muestra snapshot Hall (`km/h`, `rpm`, máscara Hall, edad/período y contadores).
+- `speed.status`: muestra snapshot Hall (`km/h`, `m/s`, `rpm`, máscara Hall, edad/período y contadores).
 - `speed.reset`: reinicia contadores Hall y devuelve estado actualizado.
 - `speed.stream on [ms] | speed.stream off`: stream periódico de `speed.status` (rango `20..5000 ms`).
 - `speed.uart`: responde `N/A source=hall` (sin backend UART de velocidad).

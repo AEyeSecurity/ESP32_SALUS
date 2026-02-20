@@ -23,6 +23,7 @@ struct HallSpeedSnapshot {
   uint32_t transitionAgeUs;
   float motorRpm;
   float speedKmh;
+  float speedMps;
   uint32_t transitionsOk;
   uint32_t transitionsInvalidState;
   uint32_t transitionsInvalidJump;

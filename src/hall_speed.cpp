@@ -99,6 +99,10 @@ inline float kmhFromRpm(float motorRpm, float gearReduction, float wheelDiameter
   return wheelRpm * wheelCircumferenceM * 0.06f;
 }
 
+inline float mpsFromKmh(float speedKmh) {
+  return speedKmh > 0.0f ? (speedKmh / 3.6f) : 0.0f;
+}
+
 }  // namespace
 
 bool hallSpeedInit(const HallSpeedConfig& config) {
@@ -173,6 +177,7 @@ bool hallSpeedGetSnapshot(HallSpeedSnapshot& snapshot) {
     rpm = rpmFromTransitionUs(transitionPeriodUs, g_config.motorPoles);
   }
   const float speedKmh = kmhFromRpm(rpm, g_config.gearReduction, g_config.wheelDiameterM);
+  const float speedMps = mpsFromKmh(speedKmh);
 
   snapshot.driverReady = true;
   snapshot.hallMask = hallMask;
@@ -182,6 +187,7 @@ bool hallSpeedGetSnapshot(HallSpeedSnapshot& snapshot) {
   snapshot.transitionAgeUs = ageUs;
   snapshot.motorRpm = rpm;
   snapshot.speedKmh = speedKmh;
+  snapshot.speedMps = speedMps;
   snapshot.transitionsOk = transitionsOk;
   snapshot.transitionsInvalidState = transitionsInvalidState;
   snapshot.transitionsInvalidJump = transitionsInvalidJump;

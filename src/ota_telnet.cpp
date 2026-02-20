@@ -276,7 +276,9 @@ String buildSpeedStatusMessage() {
   msg += (ok && snapshot.driverReady) ? "READY" : "NOT_READY";
   msg += " speed=";
   msg += String(snapshot.speedKmh, 2);
-  msg += "km/h rpm=";
+  msg += "km/h ";
+  msg += String(snapshot.speedMps, 2);
+  msg += "m/s rpm=";
   msg += String(snapshot.motorRpm, 1);
   msg += " hall=0b";
   msg += (snapshot.hallMask & (1U << 2)) ? '1' : '0';
