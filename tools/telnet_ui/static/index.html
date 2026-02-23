@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ESP32 Salus Telnet UI</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="title-wrap">
+      <h1>ESP32 Salus Telnet UI</h1>
+      <span id="connectionBadge" class="badge offline">Desconectado</span>
+    </div>
+    <div class="connect-wrap">
+      <label>Host <input id="hostInput" type="text" value="esp32-salus.local" /></label>
+      <label>Puerto <input id="portInput" type="number" value="23" min="1" max="65535" /></label>
+      <button id="connectBtn" class="btn primary">Conectar</button>
+      <button id="disconnectBtn" class="btn">Desconectar</button>
+      <button id="refreshStatusBtn" class="btn">Refrescar estado</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="card" id="networkCard">
+      <h2>Red</h2>
+      <div class="state" id="state-net">Sin datos</div>
+      <div class="commands" data-group="net"></div>
+    </section>
+
+    <section class="card" id="steerCard">
+      <h2>Steering</h2>
+      <div class="state" id="state-steer">Sin datos</div>
+      <div class="commands" data-group="steer"></div>
+    </section>
+
+    <section class="card" id="pidCard">
+      <h2>PID dirección</h2>
+      <div class="state" id="state-pid">Sin datos</div>
+      <div class="commands" data-group="pid"></div>
+    </section>
+
+    <section class="card" id="spidCard">
+      <h2>PID velocidad</h2>
+      <div class="state" id="state-spid">Sin datos</div>
+      <div class="stream-row">
+        <label>SPID stream ms
+          <select id="spidStreamPreset">
+            <option value="200">200</option>
+            <option value="500">500</option>
+            <option value="1000">1000</option>
+          </select>
+        </label>
+        <button id="spidStreamOn" class="btn">ON</button>
+        <button id="spidStreamOff" class="btn">OFF</button>
+      </div>
+      <div class="commands" data-group="spid"></div>
+    </section>
+
+    <section class="card" id="speedCard">
+      <h2>Speed Hall</h2>
+      <div class="state" id="state-speed">Sin datos</div>
+      <div class="stream-row">
+        <label>Speed stream ms
+          <select id="speedStreamPreset">
+            <option value="200">200</option>
+            <option value="500">500</option>
+            <option value="1000">1000</option>
+          </select>
+        </label>
+        <button id="speedStreamOn" class="btn">ON</button>
+        <button id="speedStreamOff" class="btn">OFF</button>
+      </div>
+      <div class="commands" data-group="speed"></div>
+    </section>
+
+    <section class="card" id="commsCard">
+      <h2>PI COMMS</h2>
+      <div class="state" id="state-comms">Sin datos</div>
+      <div class="commands" data-group="comms"></div>
+    </section>
+
+    <section class="card" id="driveCard">
+      <h2>Drive Log</h2>
+      <div class="state" id="state-drive">Sin datos</div>
+      <div class="drive-toggle-row">
+        <button id="driveLogOn" class="btn">drive.log ON</button>
+        <button id="driveLogOff" class="btn">drive.log OFF</button>
+      </div>
+      <div class="commands" data-group="drive"></div>
+    </section>
+
+    <section class="card console-card">
+      <h2>Consola Raw</h2>
+      <div id="consoleOutput" class="console"></div>
+      <div class="console-controls">
+        <input id="rawCommandInput" type="text" placeholder="Escribe comando telnet..." />
+        <button id="sendRawBtn" class="btn primary">Enviar</button>
+        <button id="clearConsoleBtn" class="btn">Limpiar</button>
+      </div>
+    </section>
+  </main>
+
+  <div id="confirmModal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content">
+      <h3>Confirmar comando</h3>
+      <p id="confirmText">¿Confirmas ejecutar este comando?</p>
+      <div class="modal-actions">
+        <button id="confirmNo" class="btn">Cancelar</button>
+        <button id="confirmYes" class="btn danger">Confirmar</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

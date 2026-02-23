@@ -1,3 +1,4 @@
 .pio
 .vscode/
-
+.venv-telnet-ui/
+__pycache__/
