@@ -11,6 +11,8 @@
 #include "pi_comms.h"
 #include "pid.h"
 #include "hall_speed.h"
+#include "speed_pid.h"
+#include "quad_functions.h"
 
 #ifndef WIFI_STA_SSID
 #define WIFI_STA_SSID "TU_SSID"
@@ -45,8 +47,11 @@ constexpr uint16_t kTelnetPort = 23;
 constexpr TickType_t kSpeedStreamDefaultPeriod = pdMS_TO_TICKS(200);
 constexpr int kSpeedStreamMinPeriodMs = 20;
 constexpr int kSpeedStreamMaxPeriodMs = 5000;
+constexpr TickType_t kSpeedPidStreamDefaultPeriod = pdMS_TO_TICKS(200);
+constexpr int kSpeedPidStreamMinPeriodMs = 50;
+constexpr int kSpeedPidStreamMaxPeriodMs = 5000;
 constexpr TickType_t kTelnetIdleTimeout = pdMS_TO_TICKS(300000);
-constexpr bool kPiCommsOnlyLogs = true;
+constexpr bool kFocusedControlLogsOnly = true;
 
 enum class NetworkMode {
   kUnknown,
@@ -63,6 +68,9 @@ IPAddress g_networkIp;
 bool g_speedStreamEnabled = false;
 TickType_t g_speedStreamPeriod = kSpeedStreamDefaultPeriod;
 TickType_t g_lastSpeedStreamTick = 0;
+bool g_speedPidStreamEnabled = false;
+TickType_t g_speedPidStreamPeriod = kSpeedPidStreamDefaultPeriod;
+TickType_t g_lastSpeedPidStreamTick = 0;
 TickType_t g_telnetLastActivityTick = 0;
 
 void reportNetworkStatus();
@@ -90,10 +98,11 @@ void sendTelnet(const String& message) {
 }
 
 bool shouldForwardLog(const String& message) {
-  if (!kPiCommsOnlyLogs) {
+  if (!kFocusedControlLogsOnly) {
     return true;
   }
-  return message.startsWith("[PI]");
+  return message.startsWith("[PI]") || message.startsWith("[DRIVE]") || message.startsWith("[SPID]") ||
+         message.startsWith("[SPD]") || message.startsWith("[RC]");
 }
 
 void markTelnetActivity() {
@@ -107,6 +116,8 @@ void resetTelnetSession() {
   g_telnetCommandBuffer = "";
   g_speedStreamEnabled = false;
   g_lastSpeedStreamTick = 0;
+  g_speedPidStreamEnabled = false;
+  g_lastSpeedPidStreamTick = 0;
   g_telnetLastActivityTick = 0;
 }
 
@@ -118,7 +129,7 @@ void openTelnetSession(WiFiClient& incoming) {
   g_telnetClient.println("=== Servidor Telnet ESP32 ===");
   g_telnetClient.println("Conexion establecida correctamente");
   g_telnetClient.println(
-      "Comandos: steer.help | pid.help | comms.status | speed.status | speed.reset | speed.stream | speed.uart | net.status");
+      "Comandos: steer.help | pid.help | spid.help | comms.status | speed.status | speed.reset | speed.stream | speed.uart | spid.stream | drive.log | net.status");
   reportNetworkStatus();
 }
 
@@ -249,6 +260,61 @@ void reportPidStatus() {
     msg += String(minActive, 3);
     msg += "%";
   }
+  sendTelnet(msg);
+}
+
+void reportSpeedPidStatus() {
+  SpeedPidRuntimeSnapshot snapshot{};
+  if (!speedPidGetSnapshot(snapshot)) {
+    sendTelnet("[SPID] Controlador no inicializado");
+    return;
+  }
+
+  String msg = "[SPID] state{init=";
+  msg += snapshot.initialized ? "Y" : "N";
+  msg += " en=";
+  msg += snapshot.enabled ? "Y" : "N";
+  msg += " fb=";
+  msg += snapshot.feedbackOk ? "Y" : "N";
+  msg += " failsafe=";
+  msg += snapshot.failsafeActive ? "Y" : "N";
+  msg += " overspeed=";
+  msg += snapshot.overspeedActive ? "Y" : "N";
+  msg += " mode=";
+  msg += speedPidModeText(snapshot.mode);
+  msg += "} targetRaw=";
+  msg += String(snapshot.targetRawMps, 2);
+  msg += "m/s target=";
+  msg += String(snapshot.targetRampedMps, 2);
+  msg += "m/s speed=";
+  msg += String(snapshot.measuredMps, 2);
+  msg += "m/s err=";
+  msg += String(snapshot.errorMps, 2);
+  msg += "m/s overErr=";
+  msg += String(snapshot.overspeedErrorMps, 2);
+  msg += " throttle=";
+  msg += String(snapshot.throttleCmdPercent, 1);
+  msg += "% brake=";
+  msg += String(snapshot.brakeCmdPercent, 1);
+  msg += "% tune{kp=";
+  msg += String(snapshot.tunings.kp, 3);
+  msg += " ki=";
+  msg += String(snapshot.tunings.ki, 3);
+  msg += " kd=";
+  msg += String(snapshot.tunings.kd, 3);
+  msg += "} cfg{max=";
+  msg += String(snapshot.config.maxSpeedMps, 2);
+  msg += "m/s ramp=";
+  msg += String(snapshot.config.maxSetpointRateMps2, 2);
+  msg += "m/s2 ilim=";
+  msg += String(snapshot.config.integralLimit, 2);
+  msg += " db=";
+  msg += String(snapshot.config.deadbandMps, 3);
+  msg += "m/s cap=";
+  msg += String(snapshot.config.overspeedBrakeMaxPercent, 1);
+  msg += "% hys=";
+  msg += String(snapshot.config.overspeedReleaseHysteresisMps, 2);
+  msg += "m/s}";
   sendTelnet(msg);
 }
 
@@ -505,6 +571,287 @@ void handleTelnetCommand(String line) {
       return;
     }
     reportPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("spid.set")) {
+    float kp = 0.0f;
+    float ki = 0.0f;
+    float kd = 0.0f;
+    if (!parseFloatTriplet(args, kp, ki, kd)) {
+      sendTelnet("[SPID] Uso: spid.set <kp> <ki> <kd>");
+      return;
+    }
+    SpeedPidTunings tunings{kp, ki, kd};
+    if (!speedPidSetTunings(tunings)) {
+      sendTelnet("[SPID] Tunings invalidos o controlador no inicializado");
+      return;
+    }
+    reportSpeedPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("spid.kp")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] Kp invalido (ej: spid.kp 10.0)");
+      return;
+    }
+    SpeedPidTunings tunings{};
+    if (!speedPidGetTunings(tunings)) {
+      sendTelnet("[SPID] Controlador no inicializado");
+      return;
+    }
+    tunings.kp = value;
+    if (!speedPidSetTunings(tunings)) {
+      sendTelnet("[SPID] Kp fuera de rango");
+      return;
+    }
+    reportSpeedPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("spid.ki")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] Ki invalido (ej: spid.ki 2.0)");
+      return;
+    }
+    SpeedPidTunings tunings{};
+    if (!speedPidGetTunings(tunings)) {
+      sendTelnet("[SPID] Controlador no inicializado");
+      return;
+    }
+    tunings.ki = value;
+    if (!speedPidSetTunings(tunings)) {
+      sendTelnet("[SPID] Ki fuera de rango");
+      return;
+    }
+    reportSpeedPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("spid.kd")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] Kd invalido (ej: spid.kd 0.1)");
+      return;
+    }
+    SpeedPidTunings tunings{};
+    if (!speedPidGetTunings(tunings)) {
+      sendTelnet("[SPID] Controlador no inicializado");
+      return;
+    }
+    tunings.kd = value;
+    if (!speedPidSetTunings(tunings)) {
+      sendTelnet("[SPID] Kd fuera de rango");
+      return;
+    }
+    reportSpeedPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("spid.ramp")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] Ramp invalido (ej: spid.ramp 2.0)");
+      return;
+    }
+    if (!speedPidSetRampRateMps2(value)) {
+      sendTelnet("[SPID] Ramp fuera de rango");
+      return;
+    }
+    reportSpeedPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("spid.max")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] Max invalido (ej: spid.max 4.17)");
+      return;
+    }
+    if (!speedPidSetMaxSpeedMps(value)) {
+      sendTelnet("[SPID] Max fuera de rango");
+      return;
+    }
+    reportSpeedPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("spid.brakecap")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] BrakeCap invalido (ej: spid.brakecap 30)");
+      return;
+    }
+    if (!speedPidSetOverspeedBrakeMaxPercent(value)) {
+      sendTelnet("[SPID] BrakeCap fuera de rango (0..100)");
+      return;
+    }
+    reportSpeedPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("spid.hys")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] Hysteresis invalido (ej: spid.hys 0.3)");
+      return;
+    }
+    if (!speedPidSetOverspeedReleaseHysteresisMps(value)) {
+      sendTelnet("[SPID] Hysteresis fuera de rango");
+      return;
+    }
+    reportSpeedPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("spid.save")) {
+    if (!speedPidSaveToNvs()) {
+      sendTelnet("[SPID] Error guardando en NVS");
+      return;
+    }
+    sendTelnet("[SPID] Configuracion guardada en NVS");
+    reportSpeedPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("spid.reset")) {
+    if (!speedPidResetToDefaults(true)) {
+      sendTelnet("[SPID] Error restaurando defaults");
+      return;
+    }
+    sendTelnet("[SPID] Defaults restaurados y persistidos");
+    reportSpeedPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("spid.status")) {
+    reportSpeedPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("spid.stream")) {
+    if (args.isEmpty()) {
+      const uint32_t periodMs = static_cast<uint32_t>(g_speedPidStreamPeriod * portTICK_PERIOD_MS);
+      String msg = "[SPID][STREAM] ";
+      msg += g_speedPidStreamEnabled ? "ON" : "OFF";
+      msg += " periodo=";
+      msg += periodMs;
+      msg += "ms";
+      sendTelnet(msg);
+      return;
+    }
+
+    String normalized = args;
+    normalized.toLowerCase();
+    if (normalized == "off" || normalized == "0" || normalized == "stop") {
+      g_speedPidStreamEnabled = false;
+      sendTelnet("[SPID][STREAM] OFF");
+      return;
+    }
+
+    int periodMs = static_cast<int>(g_speedPidStreamPeriod * portTICK_PERIOD_MS);
+    bool hasPeriodArg = false;
+    String periodText;
+
+    if (normalized.startsWith("on")) {
+      periodText = args.substring(2);
+      periodText.trim();
+      hasPeriodArg = !periodText.isEmpty();
+    } else {
+      periodText = args;
+      hasPeriodArg = true;
+    }
+
+    if (hasPeriodArg) {
+      int parsedPeriod = 0;
+      if (!parseIntArg(periodText, parsedPeriod)) {
+        sendTelnet("[SPID][STREAM] Uso: spid.stream on [ms] | spid.stream off");
+        return;
+      }
+      if (parsedPeriod < kSpeedPidStreamMinPeriodMs) {
+        parsedPeriod = kSpeedPidStreamMinPeriodMs;
+      } else if (parsedPeriod > kSpeedPidStreamMaxPeriodMs) {
+        parsedPeriod = kSpeedPidStreamMaxPeriodMs;
+      }
+      periodMs = parsedPeriod;
+    }
+
+    TickType_t periodTicks = pdMS_TO_TICKS(periodMs);
+    if (periodTicks == 0) {
+      periodTicks = 1;
+    }
+
+    g_speedPidStreamPeriod = periodTicks;
+    g_speedPidStreamEnabled = true;
+    g_lastSpeedPidStreamTick = 0;
+
+    String msg = "[SPID][STREAM] ON periodo=";
+    msg += periodMs;
+    msg += "ms";
+    sendTelnet(msg);
+    reportSpeedPidStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("spid.help")) {
+    sendTelnet(
+        "Comandos: spid.set <kp> <ki> <kd> | spid.kp <v> | spid.ki <v> | spid.kd <v> | spid.ramp <mps2> | spid.max <mps> | spid.brakecap <pct> | spid.hys <mps> | spid.save | spid.reset | spid.status | spid.stream on [ms] | spid.stream off");
+    return;
+  }
+
+  if (command.equalsIgnoreCase("drive.log")) {
+    if (args.isEmpty()) {
+      bool enabled = false;
+      quadDriveGetLogEnabled(enabled);
+      sendTelnet(String("[DRIVE][LOG] ") + (enabled ? "ON" : "OFF"));
+      return;
+    }
+
+    String normalized = args;
+    normalized.toLowerCase();
+    if (normalized == "on" || normalized == "1") {
+      quadDriveSetLogEnabled(true);
+      sendTelnet("[DRIVE][LOG] ON");
+      return;
+    }
+    if (normalized == "off" || normalized == "0") {
+      quadDriveSetLogEnabled(false);
+      sendTelnet("[DRIVE][LOG] OFF");
+      return;
+    }
+
+    sendTelnet("[DRIVE][LOG] Uso: drive.log on | drive.log off | drive.log");
     return;
   }
 
@@ -817,6 +1164,13 @@ void taskOtaTelnet(void* parameter) {
       if (g_lastSpeedStreamTick == 0 || (now - g_lastSpeedStreamTick) >= g_speedStreamPeriod) {
         sendTelnet(buildSpeedStatusMessage());
         g_lastSpeedStreamTick = now;
+      }
+    }
+    if (g_speedPidStreamEnabled && g_telnetClient && g_telnetClient.connected()) {
+      const TickType_t now = xTaskGetTickCount();
+      if (g_lastSpeedPidStreamTick == 0 || (now - g_lastSpeedPidStreamTick) >= g_speedPidStreamPeriod) {
+        reportSpeedPidStatus();
+        g_lastSpeedPidStreamTick = now;
       }
     }
     if (logHeartbeat && (xTaskGetTickCount() - lastHeartbeat >= heartbeat)) {

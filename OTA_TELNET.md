@@ -81,12 +81,15 @@ nc 192.168.4.1 23
 ```text
 net.status
 pid.status
+spid.status
 steer.status
 comms.status
 speed.status
 speed.reset
 speed.stream
 speed.uart
+spid.stream
+drive.log
 ```
 
 Notas de sesion:
@@ -102,3 +105,22 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low).
 - `speed.reset`: reinicia contadores Hall y devuelve estado actualizado.
 - `speed.stream on [ms] | speed.stream off`: stream periódico de `speed.status` (rango `20..5000 ms`).
 - `speed.uart`: responde `N/A source=hall` (sin backend UART de velocidad).
+
+## PID de velocidad (`spid.*`)
+
+- `spid.status`: muestra snapshot runtime del PID de velocidad (`target raw/ramped`, `speed`, `error`, `mode`, `overspeed`, `throttle`, `brake`, `failsafe`) y configuración (`kp/ki/kd`, `ramp`, `max`, `ilim`, `deadband`, `brakecap`, `hys`).
+- `spid.set <kp> <ki> <kd>`: actualiza ganancias.
+- `spid.kp <v> | spid.ki <v> | spid.kd <v>`: ajusta cada ganancia en vivo.
+- `spid.ramp <mps2>`: ajusta rampa máxima de setpoint en `m/s^2`.
+- `spid.max <mps>`: ajusta velocidad máxima mapeada desde `accel_i8` (default `4.17`, equivalente a `15 km/h`).
+- `spid.brakecap <pct>`: tope de freno automático por overspeed (`0..100`, default `30`).
+- `spid.hys <mps>`: histéresis de salida de overspeed (default `0.3`).
+- `spid.save`: persiste configuración en NVS (`speed_pid`, incluyendo `brkcap` y `hys`).
+- `spid.reset`: restaura defaults y persiste en NVS.
+- `spid.stream on [ms] | spid.stream off`: stream periódico de `spid.status` para tuning en vivo (`50..5000 ms`).
+
+## Logs de drive (`drive.log`)
+
+- `drive.log`: muestra estado actual (`ON/OFF`) de logs `[DRIVE]`.
+- `drive.log on`: habilita logs de `taskQuadDriveControl` en runtime.
+- `drive.log off`: deshabilita logs de `taskQuadDriveControl` en runtime.

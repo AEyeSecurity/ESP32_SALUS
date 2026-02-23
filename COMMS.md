@@ -25,7 +25,7 @@ Definida en `src/main.cpp` (`g_piCommsConfig`):
 - Byte 0: `0xAA`
 - Byte 1: `ver_flags` (nibble alto version, nibble bajo flags)
 - Byte 2: `steer_i8` (`-100..100` esperado)
-- Byte 3: `accel_i8` (`-100..100` esperado)
+- Byte 3: `accel_i8` (setpoint de velocidad normalizado)
 - Byte 4: `brake_u8` (`0..100` esperado)
 - Byte 5: `crc8` (CRC-8 Dallas/Maxim sobre bytes 0..4)
 
@@ -33,7 +33,7 @@ Flags en `ver_flags` (nibble bajo):
 
 - Bit 0: `ESTOP`
 - Bit 1: `DRIVE_EN`
-- Bit 2: `ALLOW_REVERSE`
+- Bit 2: reservado
 - Bit 3: reservado
 
 ### 2.2 ESP32 -> Pi (4 bytes)
@@ -48,7 +48,7 @@ Status bits:
 - Bit 0: `READY`
 - Bit 1: `FAULT`
 - Bit 2: `OVERCURRENT`
-- Bit 3: `REVERSE_REQ`
+- Bit 3: `REVERSE_REQ` (no usado en modo PID de velocidad actual)
 
 Semantica de `telemetry_u8`:
 
@@ -64,21 +64,18 @@ Semantica de `telemetry_u8`:
 
 Campos derivados que calcula RX:
 
-- `wantsReverse = (accelRaw < 0)`
-- `reverseRequestActive = wantsReverse && !allowReverse`
-- `reverseGranted = wantsReverse && allowReverse`
 - `accelEffective`:
-  - negativo solo si `reverseGranted`
-  - positivo pasa directo
-  - negativo sin `ALLOW_REVERSE` se fuerza a `0`
+  - `accelRaw <= 0` -> `0`
+  - `1..100` -> pasa directo
+  - `>100` -> clamp a `100`
+- `wantsReverse/reverseRequestActive/reverseGranted` quedan en `false`
 
 ## 4. Comportamiento TX real (`taskPiCommsTx`)
 
 - Envia cada 10 ms: `[0x55, status, telemetry, crc]`.
 - `status` sale de `g_txState.statusFlags`, pero:
   - `READY` queda forzado en `piCommsSetStatusFlags`.
-  - `REVERSE_REQ` no se setea manualmente: se calcula desde RX
-    (`g_reverseRequestActive`) en cada envio.
+  - `REVERSE_REQ` se fuerza a `0` en cada envio.
 - `telemetry` por defecto inicia en `255` (`N/A`) y en ese modo se calcula
   automaticamente desde el backend Hall (`GPIO26/27/14`):
   - `0..254` cuando `speedKmh` Hall está disponible.
@@ -97,11 +94,21 @@ Se considera frame de Pi "fresco" si su edad es <= `120 ms`.
   - `commandValue=0`
   - freno aplicado al `100%`
 - Si Pi esta fresca y `DRIVE_EN=1`:
-  - throttle usa `accelEffective`
+  - throttle usa PID de velocidad Hall con setpoint derivado de `accel_i8`:
+    - `accel<=0` -> `target=0 m/s`
+    - `1..100` -> `target=(accel/100)*max_speed_mps` (default `4.17`, equivalente a `15 km/h`)
+  - si falla feedback Hall, el controlador entra en fail-safe: `throttle=0` y sin freno automatico adicional
 - Si Pi esta fresca:
-  - el freno SIEMPRE sale de `brake_u8` (0..100)
+  - el freno aplicado se arbitra como:
+    - `brake = max(brake_u8_pi, brake_overspeed_auto)`
+    - `brake_overspeed_auto` solo aplica en modo `OVERSPEED` del speed PID
+    - en `ESTOP`, freno forzado a `100%`
 - Si Pi NO esta fresca:
   - el sistema cae a control RC para traccion y freno
+  - en RC fresco, la traccion tambien usa speed PID:
+    - `rc_throttle<=0` -> `target=0 m/s`
+    - `1..100` -> `target=(rc/100)*max_speed_mps` (lineal, default `4.17`)
+  - el freno RC manual (throttle negativo bajo umbral) se mezcla con overspeed: `max(brake_rc, brake_overspeed_auto)`
 
 ### 5.2 Direccion (`taskPidControl`)
 
@@ -113,9 +120,9 @@ Se considera frame de Pi "fresco" si su edad es <= `120 ms`.
 
 Si llegan frames de Pi frescos (`<=120 ms`), el firmware prioriza entrada Pi:
 
-- Traccion: con `DRIVE_EN=1`, usa `accelEffective` de Pi.
+- Traccion: con `DRIVE_EN=1`, usa setpoint de velocidad de Pi (`accel_i8`).
 - Direccion: usa `steer` de Pi aunque `DRIVE_EN=0`.
-- Freno: con frame fresco, usa `brake_u8` de Pi.
+- Freno: con frame fresco, usa `max(brake_u8_pi, brake_overspeed_auto)`.
 
 Consecuencia practica:
 

@@ -4,6 +4,8 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 
+#include "speed_pid.h"
+
 struct QuadThrottleConfig {
   uint8_t pwmPin;
   uint8_t ledcChannel;
@@ -39,11 +41,15 @@ void quadBrakeRelease();
 struct QuadDriveTaskConfig {
   QuadThrottleConfig throttle;
   QuadBrakeConfig brake;
+  SpeedPidTunings speedPidTuningsDefaults;
+  SpeedPidConfig speedPidConfigDefaults;
   bool autoInitHardware;
   TickType_t period;
   bool log;
 };
 
 void taskQuadDriveControl(void* parameter);
+bool quadDriveSetLogEnabled(bool enabled);
+bool quadDriveGetLogEnabled(bool& enabledOut);
 
 #endif  // QUAD_FUNCTIONS_H

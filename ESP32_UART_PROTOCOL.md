@@ -6,7 +6,7 @@ Este documento es la base del futuro sensor ROS2 de velocidad.
 ## Estado de versión
 
 - Protocolo: `SALUS-UART-ESP32-RPI-V1`
-- Fecha de actualización: `2026-02-18`
+- Fecha de actualización: `2026-02-20`
 - Fuente de verdad: `/home/leo/codigo/aeye-ros-workspace/src/sensores/ESP32_UART_PROTOCOL.md`
 - Espejos obligatorios:
   - `/home/leo/codigo/ESP32_SALUS/ESP32_UART_PROTOCOL.md`
@@ -44,13 +44,17 @@ Estructura:
 - nibble bajo:
   - bit0: `ESTOP`
   - bit1: `DRIVE_EN`
-  - bit2: `ALLOW_REVERSE`
+  - bit2: reservado
   - bit3: reservado
 
 Rangos esperados:
 
 - `steer_i8`: `-100..100`
-- `accel_i8`: `-100..100`
+- `accel_i8`: objetivo de velocidad normalizado
+  - `<=0` -> `0.0 m/s`
+  - `1..100` -> `target_mps = accel_i8 * (max_speed_mps / 100)`
+  - `>100` -> clamp a `100`
+  - operación actual en este vehículo: `max_speed_mps = 4.17` (`15 km/h`)
 - `brake_u8`: `0..100`
 
 ### 2.2 ESP32 -> Pi (4 bytes)
@@ -67,7 +71,7 @@ Estructura:
 - bit0: `READY`
 - bit1: `FAULT`
 - bit2: `OVERCURRENT`
-- bit3: `REVERSE_REQ`
+- bit3: `REVERSE_REQ` (no usado en modo PID de velocidad actual; se mantiene en `0`)
 
 Semántica de `telemetry_u8`:
 
@@ -167,6 +171,7 @@ Parámetros mínimos esperados del nuevo sensor:
 
 ## 8. Limitaciones explícitas
 
+- `accel_i8` ya no representa throttle directo; representa objetivo de velocidad
 - `telemetry_u8` no transporta throttle
 - `telemetry_u8` no transporta dirección/ángulo de giro
 - `/wheel/throttle` queda fuera del contrato canónico nuevo

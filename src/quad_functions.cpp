@@ -5,7 +5,10 @@
 
 #include <esp_timer.h>
 
+#include <math.h>
+
 #include "fs_ia6.h"
+#include "hall_speed.h"
 #include "ota_telnet.h"
 #include "pi_comms.h"
 
@@ -35,6 +38,8 @@ bool g_filterInitialized = false;
 int g_filterOffset = 0;
 bool g_filterOffsetReady = false;
 volatile TickType_t g_lastThrottleUpdateTick = 0;
+bool g_driveLogEnabled = false;
+portMUX_TYPE g_driveLogMux = portMUX_INITIALIZER_UNLOCKED;
 
 uint32_t computeMaxDuty(uint8_t resolutionBits) {
   if (resolutionBits == 0) {
@@ -152,6 +157,59 @@ bool throttleDataFresh(TickType_t maxAgeTicks) {
 }
 
 constexpr TickType_t kPiSnapshotFreshTicks = pdMS_TO_TICKS(120);
+constexpr TickType_t kSpeedPidFeedbackGraceTicks = pdMS_TO_TICKS(1000);
+constexpr TickType_t kDriveDtWarningCooldown = pdMS_TO_TICKS(1000);
+constexpr TickType_t kDriveRuntimeWarningCooldown = pdMS_TO_TICKS(1000);
+
+enum class SpeedControlSource : uint8_t {
+  kNone = 0,
+  kPiSpeedPid,
+  kRcSpeedPid,
+};
+
+float mapAccelToSpeedTargetMps(int accelRaw) {
+  if (accelRaw <= 0) {
+    return 0.0f;
+  }
+  if (accelRaw > 100) {
+    accelRaw = 100;
+  }
+  const float maxSpeed = speedPidGetMaxSpeedMps();
+  return (static_cast<float>(accelRaw) * maxSpeed) / 100.0f;
+}
+
+float mapRcToSpeedTargetMps(int rcValue) {
+  if (rcValue <= 0) {
+    return 0.0f;
+  }
+  if (rcValue > 100) {
+    rcValue = 100;
+  }
+  const float maxSpeed = speedPidGetMaxSpeedMps();
+  return (static_cast<float>(rcValue) * maxSpeed) / 100.0f;
+}
+
+const char* speedControlSourceText(SpeedControlSource source) {
+  switch (source) {
+    case SpeedControlSource::kPiSpeedPid:
+      return "PI";
+    case SpeedControlSource::kRcSpeedPid:
+      return "RC";
+    case SpeedControlSource::kNone:
+    default:
+      return "NONE";
+  }
+}
+
+uint8_t clampPercentFromFloat(float percent) {
+  if (!isfinite(percent) || percent <= 0.0f) {
+    return 0;
+  }
+  if (percent >= 100.0f) {
+    return 100;
+  }
+  return static_cast<uint8_t>(percent + 0.5f);
+}
 
 }  // namespace
 
@@ -290,6 +348,20 @@ void quadBrakeApplyPercent(uint8_t percent) {
   applyBrakeAngles(targetAngleA, targetAngleB);
 }
 
+bool quadDriveSetLogEnabled(bool enabled) {
+  portENTER_CRITICAL(&g_driveLogMux);
+  g_driveLogEnabled = enabled;
+  portEXIT_CRITICAL(&g_driveLogMux);
+  return true;
+}
+
+bool quadDriveGetLogEnabled(bool& enabledOut) {
+  portENTER_CRITICAL(&g_driveLogMux);
+  enabledOut = g_driveLogEnabled;
+  portEXIT_CRITICAL(&g_driveLogMux);
+  return true;
+}
+
 void taskQuadDriveControl(void* parameter) {
   const QuadDriveTaskConfig* cfg = static_cast<const QuadDriveTaskConfig*>(parameter);
   if (cfg == nullptr) {
@@ -302,14 +374,24 @@ void taskQuadDriveControl(void* parameter) {
     initQuadThrottle(cfg->throttle);
     initQuadBrake(cfg->brake);
   }
+  quadDriveSetLogEnabled(cfg->log);
 
   const TickType_t period = (cfg->period > 0) ? cfg->period : pdMS_TO_TICKS(30);
   TickType_t lastStaleLog = 0;
   TickType_t lastPerfLog = 0;
+  TickType_t lastDtWarningTick = 0;
   int lastThrottleCmdValue = 9999;
   int lastDutyReported = -1;
   int lastBrakeReportedA = -1;
   int lastBrakeReportedB = -1;
+  TickType_t speedFeedbackMissingTick = 0;
+  int64_t lastLoopUs = esp_timer_get_time();
+  bool speedPidWasActive = false;
+  float expectedPeriodSeconds = static_cast<float>(period * portTICK_PERIOD_MS) / 1000.0f;
+  if (expectedPeriodSeconds <= 0.0f) {
+    expectedPeriodSeconds = 0.001f;
+  }
+  const float dtOverrunThreshold = expectedPeriodSeconds + 0.010f;
 
   TaskHandle_t self = xTaskGetCurrentTaskHandle();
   if (!rcRegisterConsumer(self)) {
@@ -320,13 +402,35 @@ void taskQuadDriveControl(void* parameter) {
     const int64_t iterationStartUs = esp_timer_get_time();
     const uint32_t notificationCount = ulTaskNotifyTake(pdTRUE, period);
     (void)notificationCount;
+    const TickType_t sampleTick = xTaskGetTickCount();
+
+    float dtSeconds = static_cast<float>(iterationStartUs - lastLoopUs) * 1e-6f;
+    lastLoopUs = iterationStartUs;
+    if (!isfinite(dtSeconds) || dtSeconds <= 0.0f || dtSeconds > 1.0f) {
+      dtSeconds = expectedPeriodSeconds;
+    }
+    bool driveLogEnabled = false;
+    quadDriveGetLogEnabled(driveLogEnabled);
+
+    if (driveLogEnabled && dtSeconds > dtOverrunThreshold &&
+        (sampleTick - lastDtWarningTick) >= kDriveDtWarningCooldown) {
+      String warn;
+      warn.reserve(80);
+      warn += "[DRIVE] dt=";
+      warn += dtSeconds * 1000.0f;
+      warn += "ms (objetivo ";
+      warn += expectedPeriodSeconds * 1000.0f;
+      warn += "ms)";
+      broadcastIf(true, warn);
+      lastDtWarningTick = sampleTick;
+    }
 
     RcSharedState rcSnapshot{};
     const bool rcValid = rcGetStateCopy(rcSnapshot);
-    const TickType_t sampleTick = xTaskGetTickCount();
     const TickType_t snapshotTick = rcSnapshot.lastUpdateTick;
     const bool snapshotFresh =
         rcValid && rcSnapshot.valid && snapshotTick != 0 && (sampleTick - snapshotTick) <= pdMS_TO_TICKS(50);
+    const bool rcFresh = snapshotFresh;
     const int rawThrottle = snapshotFresh ? rcSnapshot.throttle : 0;
 
     const int rcValue = updateThrottleFilter(rawThrottle);
@@ -339,43 +443,147 @@ void taskQuadDriveControl(void* parameter) {
     TickType_t piAgeTicks = 0;
     bool piAgeValid = false;
     if (piSnapshot.lastFrameTick != 0) {
-      piAgeTicks = xTaskGetTickCount() - piSnapshot.lastFrameTick;
+      piAgeTicks = sampleTick - piSnapshot.lastFrameTick;
       piAgeValid = true;
     }
     const bool piFresh =
         piDriverReady && piSnapshot.hasFrame && piAgeValid && piAgeTicks <= kPiSnapshotFreshTicks;
-    bool commandFromPi = false;
-    bool piEstopActive = false;
-    bool throttleInhibit = false;
+
     int commandValue = rcValue;
-    uint8_t piBrakePercent = 0;
-    if (piFresh) {
-      piBrakePercent = piSnapshot.brake;
-      if (piSnapshot.estop) {
+    bool commandFromPi = false;
+    bool throttleInhibit = false;
+    const bool piEstopActive = piFresh && piSnapshot.estop;
+    const uint8_t piBrakePercent = piFresh ? (piEstopActive ? 100u : piSnapshot.brake) : 0u;
+    const bool piBrakeActive = piFresh && !piEstopActive && (piBrakePercent > 0u);
+    const bool piSpeedPidRequested =
+        piFresh && piSnapshot.driveEnabled && !piEstopActive && !piBrakeActive;
+    const bool rcSpeedPidRequested = !piFresh && rcFresh;
+    SpeedControlSource speedControlSource = SpeedControlSource::kNone;
+    if (piSpeedPidRequested) {
+      speedControlSource = SpeedControlSource::kPiSpeedPid;
+      commandFromPi = true;
+    } else if (rcSpeedPidRequested) {
+      speedControlSource = SpeedControlSource::kRcSpeedPid;
+    }
+
+    bool speedPidFeedbackOk = false;
+    bool speedPidFailsafe = false;
+    bool speedPidOverspeed = false;
+    SpeedPidMode speedPidMode = SpeedPidMode::kNormal;
+    float speedTargetRawMps = 0.0f;
+    float speedTargetRampedMps = 0.0f;
+    float speedMeasuredMps = 0.0f;
+    float speedPidErrorMps = 0.0f;
+    float speedPidOverspeedErrorMps = 0.0f;
+    float speedPidThrottlePercent = 0.0f;
+    float speedPidBrakePercent = 0.0f;
+
+    if (speedControlSource != SpeedControlSource::kNone) {
+      speedTargetRawMps = (speedControlSource == SpeedControlSource::kPiSpeedPid)
+                              ? mapAccelToSpeedTargetMps(piSnapshot.accelRaw)
+                              : mapRcToSpeedTargetMps(rcValue);
+
+      HallSpeedSnapshot speedSnapshot{};
+      const bool speedOk = hallSpeedGetSnapshot(speedSnapshot) && speedSnapshot.driverReady;
+      HallSpeedConfig speedCfg{};
+      hallSpeedGetConfig(speedCfg);
+      const uint32_t rpmTimeoutUs = (speedCfg.rpmTimeoutUs > 0U) ? speedCfg.rpmTimeoutUs : 500000U;
+      const bool transitionFresh =
+          speedOk && speedSnapshot.hasTransition && speedSnapshot.transitionAgeUs <= rpmTimeoutUs;
+      speedMeasuredMps = speedOk ? speedSnapshot.speedMps : 0.0f;
+
+      if (!speedOk) {
+        speedFeedbackMissingTick = sampleTick;
+        speedPidFeedbackOk = false;
+      } else if (speedTargetRawMps <= 0.05f) {
+        speedFeedbackMissingTick = 0;
+        speedPidFeedbackOk = true;
+      } else if (transitionFresh) {
+        speedFeedbackMissingTick = 0;
+        speedPidFeedbackOk = true;
+      } else {
+        if (speedFeedbackMissingTick == 0) {
+          speedFeedbackMissingTick = sampleTick;
+        }
+        speedPidFeedbackOk = (sampleTick - speedFeedbackMissingTick) <= kSpeedPidFeedbackGraceTicks;
+      }
+
+      SpeedPidControlOutput speedOutput{};
+      const bool speedComputed =
+          speedPidCompute(speedTargetRawMps, speedMeasuredMps, speedPidFeedbackOk, dtSeconds, speedOutput);
+
+      if (!speedComputed) {
+        speedPidFeedbackOk = false;
+        speedPidFailsafe = true;
+        speedPidThrottlePercent = 0.0f;
+        speedPidBrakePercent = 0.0f;
+      } else {
+        speedTargetRampedMps = speedOutput.targetRampedMps;
+        speedPidErrorMps = speedOutput.errorMps;
+        speedPidOverspeedErrorMps = speedOutput.overspeedErrorMps;
+        speedPidThrottlePercent = speedOutput.throttlePercent;
+        speedPidBrakePercent = speedOutput.brakePercent;
+        speedPidFeedbackOk = speedOutput.feedbackOk;
+        speedPidFailsafe = speedOutput.failsafeActive;
+        speedPidOverspeed = speedOutput.overspeedActive;
+        speedPidMode = speedOutput.mode;
+      }
+
+      if (!speedPidFeedbackOk || speedPidFailsafe) {
         commandValue = 0;
-        commandFromPi = true;
-        piEstopActive = true;
         throttleInhibit = true;
-      } else if (piSnapshot.driveEnabled) {
-        commandValue = piSnapshot.accelEffective;
+      } else {
+        commandValue = static_cast<int>(speedPidThrottlePercent + 0.5f);
+      }
+      speedPidWasActive = true;
+    } else {
+      if (speedPidWasActive) {
+        speedPidReset();
+        speedPidWasActive = false;
+      }
+      speedFeedbackMissingTick = 0;
+      if (piEstopActive) {
         commandFromPi = true;
+        commandValue = 0;
+        throttleInhibit = true;
+      } else if (piBrakeActive && piSnapshot.driveEnabled) {
+        commandFromPi = true;
+        commandValue = 0;
+        throttleInhibit = true;
       }
     }
 
-    const bool piBrakeActive = piFresh;
-    const uint8_t appliedPiBrakePercent = piEstopActive ? 100 : piBrakePercent;
-    if (piBrakeActive) {
-      if (appliedPiBrakePercent > 0) {
-        throttleInhibit = true;
-      }
-      quadBrakeApplyPercent(appliedPiBrakePercent);
-    } else {
-      const int brakeInput = throttleDataFresh(pdMS_TO_TICKS(60)) ? getFilteredThrottleValue() : 0;
-      if (brakeInput < g_brakeConfig.activationThreshold) {
-        throttleInhibit = true;
-      }
-      quadBrakeUpdate(brakeInput);
+    uint8_t overspeedBrakePercent = 0;
+    if (speedControlSource != SpeedControlSource::kNone && speedPidFeedbackOk && !speedPidFailsafe &&
+        speedPidBrakePercent > 0.0f) {
+      overspeedBrakePercent = clampPercentFromFloat(speedPidBrakePercent);
     }
+
+    uint8_t appliedBrakePercent = 0;
+    if (piFresh) {
+      appliedBrakePercent = (piBrakePercent >= overspeedBrakePercent) ? piBrakePercent : overspeedBrakePercent;
+      if (piEstopActive) {
+        appliedBrakePercent = 100;
+      }
+    } else {
+      uint8_t rcBrakePercent = 0;
+      if (rcFresh) {
+        if (rcValue < g_brakeConfig.activationThreshold) {
+          rcBrakePercent = 100;
+        }
+      } else {
+        const int brakeInput = throttleDataFresh(pdMS_TO_TICKS(60)) ? getFilteredThrottleValue() : 0;
+        if (brakeInput < g_brakeConfig.activationThreshold) {
+          rcBrakePercent = 100;
+        }
+      }
+      appliedBrakePercent = (rcBrakePercent >= overspeedBrakePercent) ? rcBrakePercent : overspeedBrakePercent;
+    }
+
+    if (appliedBrakePercent > 0) {
+      throttleInhibit = true;
+    }
+    quadBrakeApplyPercent(appliedBrakePercent);
 
     int duty = 0;
     if (throttleInhibit) {
@@ -385,11 +593,11 @@ void taskQuadDriveControl(void* parameter) {
       duty = quadThrottleUpdate(commandValue);
     }
 
-    if (cfg->log && (commandValue != lastThrottleCmdValue || duty != lastDutyReported ||
+    if (driveLogEnabled && (commandValue != lastThrottleCmdValue || duty != lastDutyReported ||
                      g_brakeCurrentAngles.servoA != lastBrakeReportedA ||
                      g_brakeCurrentAngles.servoB != lastBrakeReportedB)) {
       String msg;
-      msg.reserve(96);
+      msg.reserve(196);
       msg += "[DRIVE] cmd=";
       msg += commandValue;
       msg += commandFromPi ? " (PI)" : " (RC)";
@@ -406,12 +614,40 @@ void taskQuadDriveControl(void* parameter) {
         msg += " piAgeMs=";
         msg += static_cast<int>(piAgeTicks * portTICK_PERIOD_MS);
         msg += " piBrake=";
-        msg += appliedPiBrakePercent;
+        msg += piBrakePercent;
       } else if (snapshotFresh) {
         msg += " raw=";
         msg += rawThrottle;
       } else {
         msg += " raw=STALE";
+      }
+      msg += " brake=";
+      msg += appliedBrakePercent;
+      if (speedControlSource != SpeedControlSource::kNone) {
+        msg += " src=";
+        msg += speedControlSourceText(speedControlSource);
+        msg += " targetRaw=";
+        msg += String(speedTargetRawMps, 2);
+        msg += "m/s target=";
+        msg += String(speedTargetRampedMps, 2);
+        msg += "m/s speed=";
+        msg += String(speedMeasuredMps, 2);
+        msg += "m/s mode=";
+        msg += speedPidModeText(speedPidMode);
+        msg += " pidOut=";
+        msg += String(speedPidThrottlePercent, 1);
+        msg += "% autoBrake=";
+        msg += String(speedPidBrakePercent, 1);
+        msg += "% err=";
+        msg += String(speedPidErrorMps, 2);
+        msg += " over=";
+        msg += String(speedPidOverspeedErrorMps, 2);
+        msg += " fb=";
+        msg += speedPidFeedbackOk ? "Y" : "N";
+        msg += " fs=";
+        msg += speedPidFailsafe ? "Y" : "N";
+        msg += " ovs=";
+        msg += speedPidOverspeed ? "Y" : "N";
       }
       msg += " ageMs=";
       msg += static_cast<int>((sampleTick - snapshotTick) * portTICK_PERIOD_MS);
@@ -422,7 +658,7 @@ void taskQuadDriveControl(void* parameter) {
       lastBrakeReportedB = g_brakeCurrentAngles.servoB;
     }
 
-    if (cfg->log && !snapshotFresh && !commandFromPi) {
+    if (driveLogEnabled && !snapshotFresh && !commandFromPi) {
       if ((sampleTick - lastStaleLog) >= pdMS_TO_TICKS(500)) {
         broadcastIf(true, "[DRIVE] sin datos frescos del RC (>50ms); usando 0");
         lastStaleLog = sampleTick;
@@ -432,8 +668,8 @@ void taskQuadDriveControl(void* parameter) {
     }
 
     const int64_t iterationDurationUs = esp_timer_get_time() - iterationStartUs;
-    if (cfg->log && iterationDurationUs > 2000) {
-      if ((sampleTick - lastPerfLog) >= pdMS_TO_TICKS(1000)) {
+    if (driveLogEnabled && iterationDurationUs > 4000) {
+      if ((sampleTick - lastPerfLog) >= kDriveRuntimeWarningCooldown) {
         String perfMsg = "[DRIVE] ciclo tardo ";
         perfMsg += iterationDurationUs / 1000.0f;
         perfMsg += "ms";

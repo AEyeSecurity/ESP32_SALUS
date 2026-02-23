@@ -11,6 +11,7 @@
 #include "quad_functions.h"
 #include "pi_comms.h"
 #include "hall_speed.h"
+#include "speed_pid.h"
 
 constexpr uint16_t STACK_OTA = 4096;
 constexpr uint16_t STACK_BRIDGE = 4096;
@@ -32,6 +33,16 @@ constexpr float PID_KP = 6.0f;
 constexpr float PID_KI = 6.0f;
 constexpr float PID_KD = 0.0f;
 constexpr float PID_INTEGRAL_LIMIT = 50.0f;
+
+constexpr float SPEED_PID_KP = 10.0f;
+constexpr float SPEED_PID_KI = 2.0f;
+constexpr float SPEED_PID_KD = 0.0f;
+constexpr float SPEED_PID_MAX_MPS = 4.17f;
+constexpr float SPEED_PID_RAMP_MPS2 = 2.0f;
+constexpr float SPEED_PID_INTEGRAL_LIMIT = 100.0f;
+constexpr float SPEED_PID_DEADBAND_MPS = 0.05f;
+constexpr float SPEED_PID_OVERSPEED_BRAKE_CAP_PERCENT = 30.0f;
+constexpr float SPEED_PID_OVERSPEED_HYSTERESIS_MPS = 0.3f;
 
 constexpr uint8_t THROTTLE_PWM_PIN = 13;
 constexpr uint8_t THROTTLE_LEDC_CHANNEL = 4;
@@ -137,6 +148,19 @@ static QuadDriveTaskConfig g_driveTaskConfig = {
         BRAKE_APPLY_ANGLE_SERVO_B,
         BRAKE_THRESHOLD,
     },
+    {
+        SPEED_PID_KP,
+        SPEED_PID_KI,
+        SPEED_PID_KD,
+    },
+    {
+        SPEED_PID_MAX_MPS,
+        SPEED_PID_RAMP_MPS2,
+        SPEED_PID_INTEGRAL_LIMIT,
+        SPEED_PID_DEADBAND_MPS,
+        SPEED_PID_OVERSPEED_BRAKE_CAP_PERCENT,
+        SPEED_PID_OVERSPEED_HYSTERESIS_MPS,
+    },
     true,
     THROTTLE_PERIOD,
     debug::kLogDrive};
@@ -176,6 +200,9 @@ void setup() {
   pidRegisterConfig(&g_pidTaskConfig);
 
   steeringCalibrationInit(PID_CENTER_DEG, PID_SPAN_DEG);
+  if (!speedPidInit(g_driveTaskConfig.speedPidTuningsDefaults, g_driveTaskConfig.speedPidConfigDefaults)) {
+    broadcastIf(true, "[SPD][PID] Configuracion por defecto invalida");
+  }
 
   String rcInitMsg = "Iniciando pruebas FS-iA6 (AUX1 GPIO" + String(kRcAux1Pin) + ", AUX2 GPIO" +
                      String(kRcAux2Pin) + ", acelerador GPIO" + String(kRcThrottlePin) +
@@ -201,7 +228,7 @@ void setup() {
     startTaskPinned(taskRcMonitor, "RCMonitor", STACK_RC, &g_rcConfig, 1, nullptr, 1);
   }
   if (debug::kEnableDriveTask) {
-    startTaskPinned(taskQuadDriveControl, "Drive", STACK_DRIVE, &g_driveTaskConfig, 3, nullptr, 1);
+    startTaskPinned(taskQuadDriveControl, "Drive", STACK_DRIVE, &g_driveTaskConfig, 4, nullptr, 1);
   }
 
   g_as5600.begin(AS5600_SDA_PIN, AS5600_SCL_PIN);
