@@ -4,7 +4,6 @@ from typing import Dict, List, Tuple
 
 
 _TAG_RE = re.compile(r"^\[([A-Z]+)\]")
-_BRACE_GROUP_RE = re.compile(r"([A-Za-z0-9_]+)\{([^}]*)\}")
 _KEY_VALUE_RE = re.compile(r"([A-Za-z][A-Za-z0-9_]*)=([^\s]+)")
 
 
@@ -46,28 +45,101 @@ class TelnetLineParser:
 
     def _extract_fields(self, body: str) -> Dict[str, str]:
         fields: Dict[str, str] = {}
-
-        for match in _BRACE_GROUP_RE.finditer(body):
-            group_name = match.group(1)
-            group_content = match.group(2)
-            for key, value in _KEY_VALUE_RE.findall(group_content):
-                fields["%s.%s" % (group_name, key)] = value
-
-        body_without_groups = _BRACE_GROUP_RE.sub("", body)
-        for key, value in _KEY_VALUE_RE.findall(body_without_groups):
-            fields[key] = value
+        body_without_groups = self._extract_group_fields(body, fields)
+        self._extract_key_values(body_without_groups, fields)
 
         state_match = re.match(r"^(ON|OFF)\b", body.strip(), flags=re.IGNORECASE)
         if state_match:
-            fields.setdefault("state", state_match.group(1).upper())
+            self._store_field(fields, "state", state_match.group(1).upper())
 
         return fields
 
     def _extract_message(self, body: str) -> str:
-        clean = _BRACE_GROUP_RE.sub("", body)
+        clean = self._strip_group_blocks(body)
         clean = _KEY_VALUE_RE.sub("", clean)
         clean = re.sub(r"\s+", " ", clean).strip()
         return clean
+
+    def _store_field(self, fields: Dict[str, str], key: str, value: str) -> None:
+        if key not in fields:
+            fields[key] = value
+            return
+
+        dup_idx = 2
+        while True:
+            dup_key = f"{key}__dup{dup_idx}"
+            if dup_key not in fields:
+                fields[dup_key] = value
+                return
+            dup_idx += 1
+
+    def _extract_key_values(self, text: str, fields: Dict[str, str], prefix: str = "") -> None:
+        for key, value in _KEY_VALUE_RE.findall(text):
+            full_key = f"{prefix}.{key}" if prefix else key
+            self._store_field(fields, full_key, value)
+
+    def _extract_group_fields(self, text: str, fields: Dict[str, str], prefix: str = "") -> str:
+        result_chars: List[str] = []
+        i = 0
+        length = len(text)
+        while i < length:
+            if text[i].isalnum() or text[i] == "_":
+                token_start = i
+                while i < length and (text[i].isalnum() or text[i] == "_"):
+                    i += 1
+                token = text[token_start:i]
+                if i < length and text[i] == "{":
+                    brace_end = self._find_matching_brace(text, i)
+                    if brace_end != -1:
+                        group_prefix = f"{prefix}.{token}" if prefix else token
+                        inner = text[i + 1:brace_end]
+                        inner_without_groups = self._extract_group_fields(inner, fields, group_prefix)
+                        self._extract_key_values(inner_without_groups, fields, group_prefix)
+                        i = brace_end + 1
+                        continue
+                result_chars.append(text[token_start:i])
+                continue
+
+            result_chars.append(text[i])
+            i += 1
+
+        return "".join(result_chars)
+
+    def _strip_group_blocks(self, text: str) -> str:
+        result_chars: List[str] = []
+        i = 0
+        length = len(text)
+        while i < length:
+            if text[i].isalnum() or text[i] == "_":
+                token_start = i
+                while i < length and (text[i].isalnum() or text[i] == "_"):
+                    i += 1
+                if i < length and text[i] == "{":
+                    brace_end = self._find_matching_brace(text, i)
+                    if brace_end != -1:
+                        i = brace_end + 1
+                        continue
+                result_chars.append(text[token_start:i])
+                continue
+
+            result_chars.append(text[i])
+            i += 1
+
+        return "".join(result_chars)
+
+    def _find_matching_brace(self, text: str, open_idx: int) -> int:
+        if open_idx >= len(text) or text[open_idx] != "{":
+            return -1
+        depth = 0
+        for idx in range(open_idx, len(text)):
+            ch = text[idx]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return idx
+        return -1
 
     def _resolve_section(self, tags: List[str]) -> str:
         if not tags:

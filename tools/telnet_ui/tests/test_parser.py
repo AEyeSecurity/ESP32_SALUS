@@ -26,3 +26,26 @@ def test_parse_unknown_line():
 
     assert event.section == "unknown"
     assert event.tags == []
+
+
+def test_parse_spid_status_nested_groups_and_duplicate_keys():
+    parser = TelnetLineParser()
+    line = (
+        "[SPID] state{init=Y en=Y fb=Y failsafe=N overspeed=N mode=NORMAL} "
+        "targetRaw=1.00m/s tune{kp=1.0 ki=2.0 kd=0.0} "
+        "cfg{max=4.17m/s ramp=2.0m/s2 ff{en=Y b0=0.0 bmax=55.0 du=35.0 dd=45.0 min=0.10m/s} "
+        "flgr=1200ms iunw=0.35 dfhz=3.0 cap=30.0% hys=0.3m/s} "
+        "sat=12.3 sat=Y"
+    )
+
+    event = parser.parse_line(line)
+
+    assert event.section == "spid"
+    assert event.fields["state.mode"] == "NORMAL"
+    assert event.fields["tune.kp"] == "1.0"
+    assert event.fields["cfg.max"] == "4.17m/s"
+    assert event.fields["cfg.ff.en"] == "Y"
+    assert event.fields["cfg.ff.bmax"] == "55.0"
+    assert event.fields["cfg.hys"] == "0.3m/s"
+    assert event.fields["sat"] == "12.3"
+    assert event.fields["sat__dup2"] == "Y"
