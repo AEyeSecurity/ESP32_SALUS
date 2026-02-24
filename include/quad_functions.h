@@ -48,8 +48,30 @@ struct QuadDriveTaskConfig {
   bool log;
 };
 
+struct QuadDriveRcDebugSnapshot {
+  int rawThrottle;
+  int filteredThrottle;
+  int normalizedThrottle;
+  bool rcFresh;
+  uint32_t snapshotAgeMs;
+  bool rcManualBrakeActive;
+  bool rcSpeedPidEligible;
+  bool rcSourceLatched;
+  bool rcNeutralOffsetCalEnabled;
+  bool rcNeutralOffsetCalAllowed;
+  float rcTargetRawMps;
+  float rcTargetShapedMps;
+};
+
 void taskQuadDriveControl(void* parameter);
 bool quadDriveSetLogEnabled(bool enabled);
 bool quadDriveGetLogEnabled(bool& enabledOut);
+bool quadDriveSetPidTraceEnabled(bool enabled, TickType_t periodTicks);
+bool quadDriveGetPidTraceConfig(bool& enabledOut, TickType_t& periodTicksOut);
+bool quadDriveSetSpeedTargetOverride(bool enabled, float targetMps);
+bool quadDriveGetSpeedTargetOverride(bool& enabledOut, float& targetMpsOut);
+bool quadDriveGetRcDebugSnapshot(QuadDriveRcDebugSnapshot& out);
+bool quadDriveSetRcNeutralCalEnabled(bool enabled);
+bool quadDriveGetRcNeutralCalEnabled(bool& enabledOut);
 
 #endif  // QUAD_FUNCTIONS_H

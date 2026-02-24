@@ -39,7 +39,16 @@ int g_filterOffset = 0;
 bool g_filterOffsetReady = false;
 volatile TickType_t g_lastThrottleUpdateTick = 0;
 bool g_driveLogEnabled = false;
+bool g_drivePidTraceEnabled = false;
+TickType_t g_drivePidTracePeriodTicks = pdMS_TO_TICKS(100);
 portMUX_TYPE g_driveLogMux = portMUX_INITIALIZER_UNLOCKED;
+bool g_speedTargetOverrideEnabled = false;
+float g_speedTargetOverrideMps = 0.0f;
+portMUX_TYPE g_speedTargetOverrideMux = portMUX_INITIALIZER_UNLOCKED;
+volatile bool g_rcNeutralOffsetCalEnabled = true;
+volatile bool g_rcNeutralOffsetCalAllowUpdate = true;
+QuadDriveRcDebugSnapshot g_rcDebugSnapshot{};
+portMUX_TYPE g_driveRcDebugMux = portMUX_INITIALIZER_UNLOCKED;
 
 uint32_t computeMaxDuty(uint8_t resolutionBits) {
   if (resolutionBits == 0) {
@@ -125,7 +134,8 @@ int updateThrottleFilter(int rawValue) {
     g_filterInitialized = true;
   } else {
     g_filteredThrottleValue = (g_filteredThrottleValue * 2 + rawValue) / 3;
-    if (abs(rawValue) < 15) {
+    const bool allowOffsetUpdate = g_rcNeutralOffsetCalEnabled && g_rcNeutralOffsetCalAllowUpdate;
+    if (allowOffsetUpdate && abs(rawValue) < 15) {
       g_filterOffset = (g_filterOffset * 3 + g_filteredThrottleValue) / 4;
     }
   }
@@ -157,14 +167,41 @@ bool throttleDataFresh(TickType_t maxAgeTicks) {
 }
 
 constexpr TickType_t kPiSnapshotFreshTicks = pdMS_TO_TICKS(120);
-constexpr TickType_t kSpeedPidFeedbackGraceTicks = pdMS_TO_TICKS(1000);
+constexpr TickType_t kSpeedPidFeedbackStartupGraceTicks = pdMS_TO_TICKS(2500);
+constexpr TickType_t kSpeedPidFeedbackRunGraceTicks = pdMS_TO_TICKS(1000);
+constexpr TickType_t kRcSourceDropoutGraceTicks = pdMS_TO_TICKS(150);
+constexpr int kRcNeutralDeadbandPercent = 3;
+constexpr float kRcTargetSlewMps2Up = 2.0f;
+constexpr float kRcTargetSlewMps2Down = 3.0f;
+constexpr float kRcMinValidTargetMps = 0.08f;
+constexpr TickType_t kRcBrakeReleaseReentryHoldTicks = pdMS_TO_TICKS(200);
+constexpr TickType_t kRcOffsetAutoCalNeutralHoldTicks = pdMS_TO_TICKS(250);
 constexpr TickType_t kDriveDtWarningCooldown = pdMS_TO_TICKS(1000);
 constexpr TickType_t kDriveRuntimeWarningCooldown = pdMS_TO_TICKS(1000);
+constexpr TickType_t kDriveEventCooldown = pdMS_TO_TICKS(300);
+constexpr TickType_t kDrivePidTraceDefaultPeriod = pdMS_TO_TICKS(100);
+
+enum class DriveThrottleInhibitReason : uint8_t {
+  kNone = 0,
+  kEstop,
+  kPiBrake,
+  kRcBrake,
+  kOverspeed,
+  kFailsafe,
+};
 
 enum class SpeedControlSource : uint8_t {
   kNone = 0,
   kPiSpeedPid,
   kRcSpeedPid,
+  kTelnetSpeedPid,
+};
+
+enum class RcDriveInputState : uint8_t {
+  kStale = 0,
+  kNeutral,
+  kAccel,
+  kManualBrake,
 };
 
 float mapAccelToSpeedTargetMps(int accelRaw) {
@@ -179,14 +216,18 @@ float mapAccelToSpeedTargetMps(int accelRaw) {
 }
 
 float mapRcToSpeedTargetMps(int rcValue) {
-  if (rcValue <= 0) {
+  if (rcValue <= kRcNeutralDeadbandPercent) {
     return 0.0f;
   }
   if (rcValue > 100) {
     rcValue = 100;
   }
   const float maxSpeed = speedPidGetMaxSpeedMps();
-  return (static_cast<float>(rcValue) * maxSpeed) / 100.0f;
+  float targetMps = (static_cast<float>(rcValue) * maxSpeed) / 100.0f;
+  if (targetMps > 0.0f && targetMps < kRcMinValidTargetMps) {
+    targetMps = 0.0f;
+  }
+  return targetMps;
 }
 
 const char* speedControlSourceText(SpeedControlSource source) {
@@ -195,10 +236,55 @@ const char* speedControlSourceText(SpeedControlSource source) {
       return "PI";
     case SpeedControlSource::kRcSpeedPid:
       return "RC";
+    case SpeedControlSource::kTelnetSpeedPid:
+      return "TEL";
     case SpeedControlSource::kNone:
     default:
       return "NONE";
   }
+}
+
+const char* rcDriveInputStateText(RcDriveInputState state) {
+  switch (state) {
+    case RcDriveInputState::kNeutral:
+      return "NEUTRAL";
+    case RcDriveInputState::kAccel:
+      return "ACCEL";
+    case RcDriveInputState::kManualBrake:
+      return "BRAKE";
+    case RcDriveInputState::kStale:
+    default:
+      return "STALE";
+  }
+}
+
+float slewValue(float current, float target, float upRatePerSec, float downRatePerSec, float dtSeconds) {
+  if (!isfinite(current)) {
+    current = 0.0f;
+  }
+  if (!isfinite(target)) {
+    target = 0.0f;
+  }
+  if (!isfinite(dtSeconds) || dtSeconds <= 0.0f) {
+    return target;
+  }
+  const float upStep = fmaxf(0.0f, upRatePerSec) * dtSeconds;
+  const float downStep = fmaxf(0.0f, downRatePerSec) * dtSeconds;
+  if (target > current) {
+    const float delta = target - current;
+    return current + ((delta < upStep) ? delta : upStep);
+  }
+  if (target < current) {
+    const float delta = current - target;
+    return current - ((delta < downStep) ? delta : downStep);
+  }
+  return current;
+}
+
+void setRcDebugSnapshot(const QuadDriveRcDebugSnapshot& snapshot) {
+  portENTER_CRITICAL(&g_driveRcDebugMux);
+  g_rcDebugSnapshot = snapshot;
+  portEXIT_CRITICAL(&g_driveRcDebugMux);
 }
 
 uint8_t clampPercentFromFloat(float percent) {
@@ -209,6 +295,46 @@ uint8_t clampPercentFromFloat(float percent) {
     return 100;
   }
   return static_cast<uint8_t>(percent + 0.5f);
+}
+
+float clampFloat(float value, float minValue, float maxValue) {
+  if (value < minValue) {
+    return minValue;
+  }
+  if (value > maxValue) {
+    return maxValue;
+  }
+  return value;
+}
+
+const char* driveThrottleInhibitReasonText(DriveThrottleInhibitReason reason) {
+  switch (reason) {
+    case DriveThrottleInhibitReason::kEstop:
+      return "ESTOP";
+    case DriveThrottleInhibitReason::kPiBrake:
+      return "PI_BRAKE";
+    case DriveThrottleInhibitReason::kRcBrake:
+      return "RC_BRAKE";
+    case DriveThrottleInhibitReason::kOverspeed:
+      return "OVERSPEED";
+    case DriveThrottleInhibitReason::kFailsafe:
+      return "FAILSAFE";
+    case DriveThrottleInhibitReason::kNone:
+    default:
+      return "NONE";
+  }
+}
+
+float computeServoBrakePercent(int currentAngleDeg, int releaseAngleDeg, int brakeAngleDeg, bool& validOut) {
+  const int delta = brakeAngleDeg - releaseAngleDeg;
+  if (delta == 0) {
+    validOut = false;
+    return 0.0f;
+  }
+  validOut = true;
+  const float percent = (static_cast<float>(currentAngleDeg - releaseAngleDeg) * 100.0f) /
+                        static_cast<float>(delta);
+  return clampFloat(percent, 0.0f, 100.0f);
 }
 
 }  // namespace
@@ -362,6 +488,75 @@ bool quadDriveGetLogEnabled(bool& enabledOut) {
   return true;
 }
 
+bool quadDriveSetPidTraceEnabled(bool enabled, TickType_t periodTicks) {
+  portENTER_CRITICAL(&g_driveLogMux);
+  g_drivePidTraceEnabled = enabled;
+  if (enabled) {
+    g_drivePidTracePeriodTicks = (periodTicks > 0) ? periodTicks : kDrivePidTraceDefaultPeriod;
+  } else {
+    g_drivePidTracePeriodTicks = (periodTicks > 0) ? periodTicks : g_drivePidTracePeriodTicks;
+  }
+  portEXIT_CRITICAL(&g_driveLogMux);
+  return true;
+}
+
+bool quadDriveGetPidTraceConfig(bool& enabledOut, TickType_t& periodTicksOut) {
+  portENTER_CRITICAL(&g_driveLogMux);
+  enabledOut = g_drivePidTraceEnabled;
+  periodTicksOut = (g_drivePidTracePeriodTicks > 0) ? g_drivePidTracePeriodTicks : kDrivePidTraceDefaultPeriod;
+  portEXIT_CRITICAL(&g_driveLogMux);
+  return true;
+}
+
+bool quadDriveSetSpeedTargetOverride(bool enabled, float targetMps) {
+  if (!enabled) {
+    portENTER_CRITICAL(&g_speedTargetOverrideMux);
+    g_speedTargetOverrideEnabled = false;
+    g_speedTargetOverrideMps = 0.0f;
+    portEXIT_CRITICAL(&g_speedTargetOverrideMux);
+    return true;
+  }
+
+  const float maxSpeed = speedPidGetMaxSpeedMps();
+  if (!isfinite(targetMps) || targetMps < 0.0f || targetMps > maxSpeed) {
+    return false;
+  }
+
+  portENTER_CRITICAL(&g_speedTargetOverrideMux);
+  g_speedTargetOverrideEnabled = true;
+  g_speedTargetOverrideMps = targetMps;
+  portEXIT_CRITICAL(&g_speedTargetOverrideMux);
+  return true;
+}
+
+bool quadDriveGetSpeedTargetOverride(bool& enabledOut, float& targetMpsOut) {
+  portENTER_CRITICAL(&g_speedTargetOverrideMux);
+  enabledOut = g_speedTargetOverrideEnabled;
+  targetMpsOut = g_speedTargetOverrideMps;
+  portEXIT_CRITICAL(&g_speedTargetOverrideMux);
+  return true;
+}
+
+bool quadDriveGetRcDebugSnapshot(QuadDriveRcDebugSnapshot& out) {
+  portENTER_CRITICAL(&g_driveRcDebugMux);
+  out = g_rcDebugSnapshot;
+  portEXIT_CRITICAL(&g_driveRcDebugMux);
+  return true;
+}
+
+bool quadDriveSetRcNeutralCalEnabled(bool enabled) {
+  g_rcNeutralOffsetCalEnabled = enabled;
+  if (!enabled) {
+    g_rcNeutralOffsetCalAllowUpdate = false;
+  }
+  return true;
+}
+
+bool quadDriveGetRcNeutralCalEnabled(bool& enabledOut) {
+  enabledOut = g_rcNeutralOffsetCalEnabled;
+  return true;
+}
+
 void taskQuadDriveControl(void* parameter) {
   const QuadDriveTaskConfig* cfg = static_cast<const QuadDriveTaskConfig*>(parameter);
   if (cfg == nullptr) {
@@ -380,13 +575,36 @@ void taskQuadDriveControl(void* parameter) {
   TickType_t lastStaleLog = 0;
   TickType_t lastPerfLog = 0;
   TickType_t lastDtWarningTick = 0;
+  TickType_t lastPidTraceTick = 0;
+  TickType_t lastFailsafeEventTick = 0;
+  TickType_t lastOverspeedEventTick = 0;
+  TickType_t lastInhibitEventTick = 0;
+  TickType_t lastBrakeConfigEventTick = 0;
+  TickType_t lastRcSourceEventTick = 0;
+  TickType_t lastRcStateEventTick = 0;
   int lastThrottleCmdValue = 9999;
   int lastDutyReported = -1;
   int lastBrakeReportedA = -1;
   int lastBrakeReportedB = -1;
   TickType_t speedFeedbackMissingTick = 0;
+  bool speedPidSeenTransition = false;
+  bool speedTransitionCounterPrimed = false;
+  uint32_t speedLastTransitionsOk = 0;
+  SpeedControlSource lastSpeedControlSource = SpeedControlSource::kNone;
   int64_t lastLoopUs = esp_timer_get_time();
   bool speedPidWasActive = false;
+  bool lastFailsafeState = false;
+  bool lastOverspeedState = false;
+  DriveThrottleInhibitReason lastInhibitReason = DriveThrottleInhibitReason::kNone;
+  bool lastRcUsingLatchState = false;
+  TickType_t rcLastFreshTick = 0;
+  bool rcSourceLatched = false;
+  float rcTargetShapedMps = 0.0f;
+  float rcLastTargetRawMps = 0.0f;
+  TickType_t rcBrakeReleaseReentryHoldUntilTick = 0;
+  bool lastRcManualBrakeActive = false;
+  RcDriveInputState lastRcInputState = RcDriveInputState::kStale;
+  TickType_t rcNeutralStableSinceTick = 0;
   float expectedPeriodSeconds = static_cast<float>(period * portTICK_PERIOD_MS) / 1000.0f;
   if (expectedPeriodSeconds <= 0.0f) {
     expectedPeriodSeconds = 0.001f;
@@ -411,6 +629,10 @@ void taskQuadDriveControl(void* parameter) {
     }
     bool driveLogEnabled = false;
     quadDriveGetLogEnabled(driveLogEnabled);
+    bool drivePidTraceEnabled = false;
+    TickType_t drivePidTracePeriodTicks = kDrivePidTraceDefaultPeriod;
+    quadDriveGetPidTraceConfig(drivePidTraceEnabled, drivePidTracePeriodTicks);
+    const SpeedControlSource prevSpeedControlSource = lastSpeedControlSource;
 
     if (driveLogEnabled && dtSeconds > dtOverrunThreshold &&
         (sampleTick - lastDtWarningTick) >= kDriveDtWarningCooldown) {
@@ -436,7 +658,10 @@ void taskQuadDriveControl(void* parameter) {
     const int rcValue = updateThrottleFilter(rawThrottle);
     if (snapshotFresh) {
       g_lastThrottleUpdateTick = snapshotTick;
+      rcLastFreshTick = sampleTick;
     }
+
+    const int rcFilteredThrottle = g_filteredThrottleValue;
 
     PiCommsRxSnapshot piSnapshot{};
     const bool piDriverReady = piCommsGetRxSnapshot(piSnapshot);
@@ -455,16 +680,93 @@ void taskQuadDriveControl(void* parameter) {
     const bool piEstopActive = piFresh && piSnapshot.estop;
     const uint8_t piBrakePercent = piFresh ? (piEstopActive ? 100u : piSnapshot.brake) : 0u;
     const bool piBrakeActive = piFresh && !piEstopActive && (piBrakePercent > 0u);
+    uint8_t rcBrakePercent = 0;
+    if (!piFresh) {
+      if (rcFresh) {
+        if (rcValue < g_brakeConfig.activationThreshold) {
+          rcBrakePercent = 100;
+        }
+      } else {
+        const int brakeInput = throttleDataFresh(pdMS_TO_TICKS(60)) ? getFilteredThrottleValue() : 0;
+        if (brakeInput < g_brakeConfig.activationThreshold) {
+          rcBrakePercent = 100;
+        }
+      }
+    }
+    const bool rcManualBrakeActive = (!piFresh && rcBrakePercent > 0);
+    RcDriveInputState rcInputState = RcDriveInputState::kStale;
+    if (!piFresh) {
+      if (rcManualBrakeActive) {
+        rcInputState = RcDriveInputState::kManualBrake;
+      } else if (rcFresh && rcValue > kRcNeutralDeadbandPercent) {
+        rcInputState = RcDriveInputState::kAccel;
+      } else if (rcFresh) {
+        rcInputState = RcDriveInputState::kNeutral;
+      }
+    }
+
+    if (rcInputState == RcDriveInputState::kNeutral && rcFresh) {
+      if (rcNeutralStableSinceTick == 0) {
+        rcNeutralStableSinceTick = sampleTick;
+      }
+    } else {
+      rcNeutralStableSinceTick = 0;
+    }
+
+    bool speedTargetOverrideEnabled = false;
+    float speedTargetOverrideMps = 0.0f;
+    quadDriveGetSpeedTargetOverride(speedTargetOverrideEnabled, speedTargetOverrideMps);
+
     const bool piSpeedPidRequested =
         piFresh && piSnapshot.driveEnabled && !piEstopActive && !piBrakeActive;
-    const bool rcSpeedPidRequested = !piFresh && rcFresh;
+    const bool rcSpeedPidEligible =
+        !piFresh && rcFresh && !speedTargetOverrideEnabled && !rcManualBrakeActive;
+    const bool rcCanLatch =
+        !piFresh && !speedTargetOverrideEnabled && !rcManualBrakeActive && !piEstopActive;
+    const bool rcDropoutGraceActive =
+        rcSourceLatched && rcCanLatch && rcLastFreshTick != 0 &&
+        (sampleTick - rcLastFreshTick) <= kRcSourceDropoutGraceTicks;
+    const bool rcSpeedPidRequested = rcSpeedPidEligible || rcDropoutGraceActive;
+    const bool rcUsingLatchThisCycle = (!rcSpeedPidEligible && rcDropoutGraceActive);
     SpeedControlSource speedControlSource = SpeedControlSource::kNone;
-    if (piSpeedPidRequested) {
+    if (speedTargetOverrideEnabled && !piEstopActive) {
+      speedControlSource = SpeedControlSource::kTelnetSpeedPid;
+    } else if (piSpeedPidRequested) {
       speedControlSource = SpeedControlSource::kPiSpeedPid;
       commandFromPi = true;
     } else if (rcSpeedPidRequested) {
       speedControlSource = SpeedControlSource::kRcSpeedPid;
     }
+    if (speedControlSource != SpeedControlSource::kRcSpeedPid &&
+        lastSpeedControlSource == SpeedControlSource::kRcSpeedPid) {
+      rcTargetShapedMps = 0.0f;
+      rcLastTargetRawMps = 0.0f;
+    }
+
+    const bool rcManualBrakeReleased = lastRcManualBrakeActive && !rcManualBrakeActive;
+    if (rcManualBrakeReleased) {
+      rcBrakeReleaseReentryHoldUntilTick = sampleTick + kRcBrakeReleaseReentryHoldTicks;
+      if (!speedTargetOverrideEnabled && !piFresh) {
+        speedPidReset();
+        speedPidWasActive = false;
+      }
+    }
+    lastRcManualBrakeActive = rcManualBrakeActive;
+
+    const bool rcReentryHoldActive =
+        (rcBrakeReleaseReentryHoldUntilTick != 0) && (sampleTick < rcBrakeReleaseReentryHoldUntilTick);
+    if (!rcReentryHoldActive && rcBrakeReleaseReentryHoldUntilTick != 0) {
+      rcBrakeReleaseReentryHoldUntilTick = 0;
+    }
+
+    bool rcAllowOffsetCalThisCycle = g_rcNeutralOffsetCalEnabled;
+    if (!(rcFresh && rcInputState == RcDriveInputState::kNeutral &&
+          rcNeutralStableSinceTick != 0 &&
+          (sampleTick - rcNeutralStableSinceTick) >= kRcOffsetAutoCalNeutralHoldTicks &&
+          (speedControlSource == SpeedControlSource::kNone))) {
+      rcAllowOffsetCalThisCycle = false;
+    }
+    g_rcNeutralOffsetCalAllowUpdate = rcAllowOffsetCalThisCycle;
 
     bool speedPidFeedbackOk = false;
     bool speedPidFailsafe = false;
@@ -473,23 +775,101 @@ void taskQuadDriveControl(void* parameter) {
     float speedTargetRawMps = 0.0f;
     float speedTargetRampedMps = 0.0f;
     float speedMeasuredMps = 0.0f;
+    float speedMeasuredFilteredMps = 0.0f;
     float speedPidErrorMps = 0.0f;
+    float speedPidPTerm = 0.0f;
+    float speedPidITerm = 0.0f;
+    float speedPidDTerm = 0.0f;
+    float speedPidUnsatOutput = 0.0f;
+    float speedPidSatOutput = 0.0f;
+    float speedPidThrottleBasePercent = 0.0f;
+    float speedPidThrottleDeltaPercent = 0.0f;
+    float speedPidThrottlePreSlewPercent = 0.0f;
+    bool speedPidThrottleBaseActive = false;
     float speedPidOverspeedErrorMps = 0.0f;
     float speedPidThrottlePercent = 0.0f;
+    float speedPidThrottleRawPercent = 0.0f;
+    float speedPidThrottleFilteredPercent = 0.0f;
     float speedPidBrakePercent = 0.0f;
+    float speedPidBrakeRawPercent = 0.0f;
+    float speedPidBrakeFilteredPercent = 0.0f;
+    bool speedPidThrottleSaturated = false;
+    bool speedPidIntegratorClamped = false;
+    bool speedPidLaunchAssistActive = false;
+    uint16_t speedPidLaunchAssistRemainingMs = 0;
+    bool speedPidOverspeedHoldActive = false;
+    uint16_t speedPidOverspeedHoldRemainingMs = 0;
+    float rcTargetRawMpsDebug = 0.0f;
+    float rcTargetShapedMpsDebug = rcTargetShapedMps;
+    bool rcSourceLatchedDebug = rcSourceLatched && speedControlSource == SpeedControlSource::kRcSpeedPid;
+    bool rcReentryHoldBlocksThrottle = false;
+
+    if (speedControlSource == SpeedControlSource::kRcSpeedPid) {
+      rcSourceLatched = true;
+      rcSourceLatchedDebug = rcUsingLatchThisCycle;
+    } else if (speedControlSource != SpeedControlSource::kRcSpeedPid) {
+      rcSourceLatched = false;
+      rcSourceLatchedDebug = false;
+    }
 
     if (speedControlSource != SpeedControlSource::kNone) {
-      speedTargetRawMps = (speedControlSource == SpeedControlSource::kPiSpeedPid)
-                              ? mapAccelToSpeedTargetMps(piSnapshot.accelRaw)
-                              : mapRcToSpeedTargetMps(rcValue);
+      if (!speedPidWasActive || speedControlSource != lastSpeedControlSource) {
+        speedFeedbackMissingTick = 0;
+        speedPidSeenTransition = false;
+        speedTransitionCounterPrimed = false;
+        speedLastTransitionsOk = 0;
+      }
+      if (speedControlSource == SpeedControlSource::kPiSpeedPid) {
+        speedTargetRawMps = mapAccelToSpeedTargetMps(piSnapshot.accelRaw);
+      } else if (speedControlSource == SpeedControlSource::kRcSpeedPid) {
+        const float rcTargetInstantMps =
+            rcUsingLatchThisCycle ? rcLastTargetRawMps : mapRcToSpeedTargetMps(rcValue);
+        rcLastTargetRawMps = rcTargetInstantMps;
+        rcTargetRawMpsDebug = rcTargetInstantMps;
+        if (!rcUsingLatchThisCycle) {
+          rcTargetShapedMps = slewValue(rcTargetShapedMps,
+                                        rcTargetInstantMps,
+                                        kRcTargetSlewMps2Up,
+                                        kRcTargetSlewMps2Down,
+                                        dtSeconds);
+          // No recortar la subida inicial: con dt~30ms y slew=2.0 m/s² el primer
+          // paso (~0.06 m/s) quedaba por debajo del umbral y el target nunca despegaba.
+          // El snap a cero se aplica solo cuando el objetivo instantáneo ya es cero.
+          if (rcTargetInstantMps <= 0.0f && fabsf(rcTargetShapedMps) < kRcMinValidTargetMps) {
+            rcTargetShapedMps = 0.0f;
+          }
+        }
+        if (rcReentryHoldActive && rcInputState == RcDriveInputState::kNeutral) {
+          rcReentryHoldBlocksThrottle = true;
+          rcTargetShapedMps = 0.0f;
+        }
+        rcTargetShapedMpsDebug = rcTargetShapedMps;
+        speedTargetRawMps = rcTargetShapedMps;
+      } else {
+        speedTargetRawMps = speedTargetOverrideMps;
+      }
 
       HallSpeedSnapshot speedSnapshot{};
       const bool speedOk = hallSpeedGetSnapshot(speedSnapshot) && speedSnapshot.driverReady;
       HallSpeedConfig speedCfg{};
       hallSpeedGetConfig(speedCfg);
       const uint32_t rpmTimeoutUs = (speedCfg.rpmTimeoutUs > 0U) ? speedCfg.rpmTimeoutUs : 500000U;
-      const bool transitionFresh =
-          speedOk && speedSnapshot.hasTransition && speedSnapshot.transitionAgeUs <= rpmTimeoutUs;
+      if (speedOk && !speedTransitionCounterPrimed) {
+        speedLastTransitionsOk = speedSnapshot.transitionsOk;
+        speedTransitionCounterPrimed = true;
+      }
+      bool validTransitionEvent = false;
+      if (speedOk && speedTransitionCounterPrimed) {
+        if (speedSnapshot.transitionsOk < speedLastTransitionsOk) {
+          speedLastTransitionsOk = speedSnapshot.transitionsOk;
+        } else if (speedSnapshot.transitionsOk > speedLastTransitionsOk) {
+          validTransitionEvent = true;
+          speedLastTransitionsOk = speedSnapshot.transitionsOk;
+        }
+      }
+      const bool transitionFresh = speedOk && validTransitionEvent &&
+                                   speedSnapshot.hasTransition &&
+                                   speedSnapshot.transitionAgeUs <= rpmTimeoutUs;
       speedMeasuredMps = speedOk ? speedSnapshot.speedMps : 0.0f;
 
       if (!speedOk) {
@@ -500,12 +880,15 @@ void taskQuadDriveControl(void* parameter) {
         speedPidFeedbackOk = true;
       } else if (transitionFresh) {
         speedFeedbackMissingTick = 0;
+        speedPidSeenTransition = true;
         speedPidFeedbackOk = true;
       } else {
         if (speedFeedbackMissingTick == 0) {
           speedFeedbackMissingTick = sampleTick;
         }
-        speedPidFeedbackOk = (sampleTick - speedFeedbackMissingTick) <= kSpeedPidFeedbackGraceTicks;
+        const TickType_t graceTicks =
+            speedPidSeenTransition ? kSpeedPidFeedbackRunGraceTicks : kSpeedPidFeedbackStartupGraceTicks;
+        speedPidFeedbackOk = (sampleTick - speedFeedbackMissingTick) <= graceTicks;
       }
 
       SpeedPidControlOutput speedOutput{};
@@ -519,10 +902,30 @@ void taskQuadDriveControl(void* parameter) {
         speedPidBrakePercent = 0.0f;
       } else {
         speedTargetRampedMps = speedOutput.targetRampedMps;
+        speedMeasuredFilteredMps = speedOutput.measuredFilteredMps;
         speedPidErrorMps = speedOutput.errorMps;
+        speedPidPTerm = speedOutput.pTerm;
+        speedPidITerm = speedOutput.iTerm;
+        speedPidDTerm = speedOutput.dTerm;
+        speedPidUnsatOutput = speedOutput.pidUnsatOutput;
+        speedPidSatOutput = speedOutput.pidSatOutput;
+        speedPidThrottleBasePercent = speedOutput.throttleBasePercent;
+        speedPidThrottleDeltaPercent = speedOutput.throttlePidDeltaPercent;
+        speedPidThrottlePreSlewPercent = speedOutput.throttleCmdPreSlewPercent;
+        speedPidThrottleBaseActive = speedOutput.throttleBaseActive;
         speedPidOverspeedErrorMps = speedOutput.overspeedErrorMps;
         speedPidThrottlePercent = speedOutput.throttlePercent;
+        speedPidThrottleRawPercent = speedOutput.throttleCmdRawPercent;
+        speedPidThrottleFilteredPercent = speedOutput.throttleCmdFilteredPercent;
         speedPidBrakePercent = speedOutput.brakePercent;
+        speedPidBrakeRawPercent = speedOutput.overspeedBrakeRawPercent;
+        speedPidBrakeFilteredPercent = speedOutput.overspeedBrakeFilteredPercent;
+        speedPidThrottleSaturated = speedOutput.throttleSaturated;
+        speedPidIntegratorClamped = speedOutput.integratorClamped;
+        speedPidLaunchAssistActive = speedOutput.launchAssistActive;
+        speedPidLaunchAssistRemainingMs = speedOutput.launchAssistRemainingMs;
+        speedPidOverspeedHoldActive = speedOutput.overspeedHoldActive;
+        speedPidOverspeedHoldRemainingMs = speedOutput.overspeedHoldRemainingMs;
         speedPidFeedbackOk = speedOutput.feedbackOk;
         speedPidFailsafe = speedOutput.failsafeActive;
         speedPidOverspeed = speedOutput.overspeedActive;
@@ -535,13 +938,23 @@ void taskQuadDriveControl(void* parameter) {
       } else {
         commandValue = static_cast<int>(speedPidThrottlePercent + 0.5f);
       }
+      if (speedControlSource == SpeedControlSource::kRcSpeedPid && rcReentryHoldBlocksThrottle) {
+        commandValue = 0;
+      }
       speedPidWasActive = true;
+      lastSpeedControlSource = speedControlSource;
     } else {
       if (speedPidWasActive) {
         speedPidReset();
         speedPidWasActive = false;
       }
       speedFeedbackMissingTick = 0;
+      speedPidSeenTransition = false;
+      speedTransitionCounterPrimed = false;
+      speedLastTransitionsOk = 0;
+      lastSpeedControlSource = SpeedControlSource::kNone;
+      rcTargetShapedMps = 0.0f;
+      rcLastTargetRawMps = 0.0f;
       if (piEstopActive) {
         commandFromPi = true;
         commandValue = 0;
@@ -566,21 +979,23 @@ void taskQuadDriveControl(void* parameter) {
         appliedBrakePercent = 100;
       }
     } else {
-      uint8_t rcBrakePercent = 0;
-      if (rcFresh) {
-        if (rcValue < g_brakeConfig.activationThreshold) {
-          rcBrakePercent = 100;
-        }
-      } else {
-        const int brakeInput = throttleDataFresh(pdMS_TO_TICKS(60)) ? getFilteredThrottleValue() : 0;
-        if (brakeInput < g_brakeConfig.activationThreshold) {
-          rcBrakePercent = 100;
-        }
-      }
       appliedBrakePercent = (rcBrakePercent >= overspeedBrakePercent) ? rcBrakePercent : overspeedBrakePercent;
     }
 
-    if (appliedBrakePercent > 0) {
+    DriveThrottleInhibitReason inhibitReason = DriveThrottleInhibitReason::kNone;
+    if (piEstopActive) {
+      inhibitReason = DriveThrottleInhibitReason::kEstop;
+    } else if (speedControlSource != SpeedControlSource::kNone && (!speedPidFeedbackOk || speedPidFailsafe)) {
+      inhibitReason = DriveThrottleInhibitReason::kFailsafe;
+    } else if (piFresh && piBrakePercent > 0) {
+      inhibitReason = DriveThrottleInhibitReason::kPiBrake;
+    } else if (!piFresh && rcBrakePercent > 0) {
+      inhibitReason = DriveThrottleInhibitReason::kRcBrake;
+    } else if (overspeedBrakePercent > 0) {
+      inhibitReason = DriveThrottleInhibitReason::kOverspeed;
+    }
+
+    if (appliedBrakePercent > 0 || inhibitReason != DriveThrottleInhibitReason::kNone) {
       throttleInhibit = true;
     }
     quadBrakeApplyPercent(appliedBrakePercent);
@@ -592,6 +1007,35 @@ void taskQuadDriveControl(void* parameter) {
     } else {
       duty = quadThrottleUpdate(commandValue);
     }
+
+    bool brakeServoAValid = false;
+    bool brakeServoBValid = false;
+    const float brakeServoAPercent =
+        computeServoBrakePercent(g_brakeCurrentAngles.servoA,
+                                 g_brakeConfig.releaseAngleServoADeg,
+                                 g_brakeConfig.brakeAngleServoADeg,
+                                 brakeServoAValid);
+    const float brakeServoBPercent =
+        computeServoBrakePercent(g_brakeCurrentAngles.servoB,
+                                 g_brakeConfig.releaseAngleServoBDeg,
+                                 g_brakeConfig.brakeAngleServoBDeg,
+                                 brakeServoBValid);
+
+    QuadDriveRcDebugSnapshot rcDebug{};
+    rcDebug.rawThrottle = rawThrottle;
+    rcDebug.filteredThrottle = rcFilteredThrottle;
+    rcDebug.normalizedThrottle = rcValue;
+    rcDebug.rcFresh = rcFresh;
+    rcDebug.snapshotAgeMs = (snapshotTick != 0) ? static_cast<uint32_t>((sampleTick - snapshotTick) * portTICK_PERIOD_MS)
+                                                : 0u;
+    rcDebug.rcManualBrakeActive = rcManualBrakeActive;
+    rcDebug.rcSpeedPidEligible = rcSpeedPidEligible;
+    rcDebug.rcSourceLatched = rcUsingLatchThisCycle;
+    rcDebug.rcNeutralOffsetCalEnabled = g_rcNeutralOffsetCalEnabled;
+    rcDebug.rcNeutralOffsetCalAllowed = g_rcNeutralOffsetCalAllowUpdate;
+    rcDebug.rcTargetRawMps = rcTargetRawMpsDebug;
+    rcDebug.rcTargetShapedMps = rcTargetShapedMpsDebug;
+    setRcDebugSnapshot(rcDebug);
 
     if (driveLogEnabled && (commandValue != lastThrottleCmdValue || duty != lastDutyReported ||
                      g_brakeCurrentAngles.servoA != lastBrakeReportedA ||
@@ -636,18 +1080,36 @@ void taskQuadDriveControl(void* parameter) {
         msg += speedPidModeText(speedPidMode);
         msg += " pidOut=";
         msg += String(speedPidThrottlePercent, 1);
+        msg += "% autoBrakeRaw=";
+        msg += String(speedPidBrakeRawPercent, 1);
+        msg += "% autoBrakeFilt=";
+        msg += String(speedPidBrakeFilteredPercent, 1);
         msg += "% autoBrake=";
         msg += String(speedPidBrakePercent, 1);
         msg += "% err=";
         msg += String(speedPidErrorMps, 2);
         msg += " over=";
         msg += String(speedPidOverspeedErrorMps, 2);
+        msg += " hold=";
+        msg += speedPidOverspeedHoldActive ? "Y" : "N";
+        msg += "(";
+        msg += speedPidOverspeedHoldRemainingMs;
+        msg += "ms)";
         msg += " fb=";
         msg += speedPidFeedbackOk ? "Y" : "N";
         msg += " fs=";
         msg += speedPidFailsafe ? "Y" : "N";
         msg += " ovs=";
         msg += speedPidOverspeed ? "Y" : "N";
+        msg += " launch=";
+        msg += speedPidLaunchAssistActive ? "Y" : "N";
+        msg += "(";
+        msg += speedPidLaunchAssistRemainingMs;
+        msg += "ms)";
+        msg += " sat=";
+        msg += speedPidThrottleSaturated ? "Y" : "N";
+        msg += " iclamp=";
+        msg += speedPidIntegratorClamped ? "Y" : "N";
       }
       msg += " ageMs=";
       msg += static_cast<int>((sampleTick - snapshotTick) * portTICK_PERIOD_MS);
@@ -657,6 +1119,239 @@ void taskQuadDriveControl(void* parameter) {
       lastBrakeReportedA = g_brakeCurrentAngles.servoA;
       lastBrakeReportedB = g_brakeCurrentAngles.servoB;
     }
+
+    if (drivePidTraceEnabled) {
+      if ((!brakeServoAValid || !brakeServoBValid) &&
+          (sampleTick - lastBrakeConfigEventTick) >= kDriveEventCooldown) {
+        String msg;
+        msg.reserve(96);
+        msg += "[DRIVE][EVENT] BRAKE_CFG_INVALID A=";
+        msg += brakeServoAValid ? "Y" : "N";
+        msg += " B=";
+        msg += brakeServoBValid ? "Y" : "N";
+        broadcastIf(true, msg);
+        lastBrakeConfigEventTick = sampleTick;
+      }
+
+      if (speedPidFailsafe != lastFailsafeState &&
+          (sampleTick - lastFailsafeEventTick) >= kDriveEventCooldown) {
+        String msg;
+        msg.reserve(72);
+        msg += "[DRIVE][EVENT] ";
+        msg += speedPidFailsafe ? "FAILSAFE_ENTER" : "FAILSAFE_EXIT";
+        msg += " src=";
+        msg += speedControlSourceText(speedControlSource);
+        broadcastIf(true, msg);
+        lastFailsafeEventTick = sampleTick;
+      }
+      lastFailsafeState = speedPidFailsafe;
+
+      if (speedPidOverspeed != lastOverspeedState &&
+          (sampleTick - lastOverspeedEventTick) >= kDriveEventCooldown) {
+        String msg;
+        msg.reserve(76);
+        msg += "[DRIVE][EVENT] ";
+        msg += speedPidOverspeed ? "OVERSPEED_ENTER" : "OVERSPEED_EXIT";
+        msg += " src=";
+        msg += speedControlSourceText(speedControlSource);
+        broadcastIf(true, msg);
+        lastOverspeedEventTick = sampleTick;
+      }
+      lastOverspeedState = speedPidOverspeed;
+
+      if (inhibitReason != lastInhibitReason &&
+          (sampleTick - lastInhibitEventTick) >= kDriveEventCooldown) {
+        String msg;
+        msg.reserve(92);
+        msg += "[DRIVE][EVENT] THROTTLE_INHIBIT reason=";
+        msg += driveThrottleInhibitReasonText(inhibitReason);
+        msg += " src=";
+        msg += speedControlSourceText(speedControlSource);
+        broadcastIf(true, msg);
+        lastInhibitEventTick = sampleTick;
+      }
+      lastInhibitReason = inhibitReason;
+
+      if (speedControlSource == SpeedControlSource::kRcSpeedPid &&
+          prevSpeedControlSource != SpeedControlSource::kRcSpeedPid &&
+          (sampleTick - lastRcSourceEventTick) >= kDriveEventCooldown) {
+        String msg;
+        msg.reserve(80);
+        msg += "[DRIVE][EVENT] RC_SRC_ENTER";
+        msg += " latch=";
+        msg += rcUsingLatchThisCycle ? "Y" : "N";
+        broadcastIf(true, msg);
+        lastRcSourceEventTick = sampleTick;
+      }
+
+      if (rcUsingLatchThisCycle != lastRcUsingLatchState &&
+          (sampleTick - lastRcSourceEventTick) >= kDriveEventCooldown) {
+        String msg;
+        msg.reserve(92);
+        msg += "[DRIVE][EVENT] ";
+        msg += rcUsingLatchThisCycle ? "RC_SRC_DROP_LATCH" : "RC_SRC_DROP_LATCH_EXIT";
+        msg += " fresh=";
+        msg += rcFresh ? "Y" : "N";
+        msg += " src=";
+        msg += speedControlSourceText(speedControlSource);
+        broadcastIf(true, msg);
+        lastRcSourceEventTick = sampleTick;
+      }
+      lastRcUsingLatchState = rcUsingLatchThisCycle;
+
+      if (prevSpeedControlSource == SpeedControlSource::kRcSpeedPid &&
+          speedControlSource != SpeedControlSource::kRcSpeedPid &&
+          !piFresh && !speedTargetOverrideEnabled && !rcManualBrakeActive &&
+          !rcFresh && !rcDropoutGraceActive &&
+          (sampleTick - lastRcSourceEventTick) >= kDriveEventCooldown) {
+        broadcastIf(true, "[DRIVE][EVENT] RC_SRC_DROP_TIMEOUT");
+        lastRcSourceEventTick = sampleTick;
+      }
+
+      if (rcInputState != lastRcInputState &&
+          (sampleTick - lastRcStateEventTick) >= kDriveEventCooldown) {
+        String msg;
+        msg.reserve(112);
+        bool emitted = false;
+        if (rcInputState == RcDriveInputState::kManualBrake || lastRcInputState == RcDriveInputState::kManualBrake) {
+          msg += "[DRIVE][EVENT] ";
+          msg += (rcInputState == RcDriveInputState::kManualBrake) ? "RC_BRAKE_ENTER" : "RC_BRAKE_EXIT";
+          emitted = true;
+        } else if (rcInputState == RcDriveInputState::kNeutral || lastRcInputState == RcDriveInputState::kNeutral) {
+          msg += "[DRIVE][EVENT] ";
+          msg += (rcInputState == RcDriveInputState::kNeutral) ? "RC_NEUTRAL_ENTER" : "RC_NEUTRAL_EXIT";
+          emitted = true;
+        }
+        if (emitted) {
+          msg += " raw=";
+          msg += rawThrottle;
+          msg += " norm=";
+          msg += rcValue;
+          broadcastIf(true, msg);
+          lastRcStateEventTick = sampleTick;
+        }
+      }
+      lastRcInputState = rcInputState;
+
+      const bool traceDue =
+          (lastPidTraceTick == 0) || ((sampleTick - lastPidTraceTick) >= drivePidTracePeriodTicks);
+      if (traceDue && speedControlSource != SpeedControlSource::kNone) {
+        const float pwmCmdPercent = throttleInhibit ? 0.0f : clampFloat(static_cast<float>(abs(commandValue)), 0.0f, 100.0f);
+        const float pwmDutyPercent =
+            (g_maxDuty > 0) ? (static_cast<float>(duty) * 100.0f) / static_cast<float>(g_maxDuty) : 0.0f;
+
+        String msg;
+        msg.reserve(520);
+        msg += "[DRIVE][PIDTRACE] tMs=";
+        msg += static_cast<uint32_t>(sampleTick * portTICK_PERIOD_MS);
+        msg += " src=";
+        msg += speedControlSourceText(speedControlSource);
+        msg += " mode=";
+        msg += speedPidModeText(speedPidMode);
+        msg += " targetRawMps=";
+        msg += String(speedTargetRawMps, 3);
+        msg += " targetMps=";
+        msg += String(speedTargetRampedMps, 3);
+        msg += " speedMps=";
+        msg += String(speedMeasuredMps, 3);
+        msg += " speedFiltMps=";
+        msg += String(speedMeasuredFilteredMps, 3);
+        msg += " errMps=";
+        msg += String(speedPidErrorMps, 3);
+        msg += " p=";
+        msg += String(speedPidPTerm, 3);
+        msg += " i=";
+        msg += String(speedPidITerm, 3);
+        msg += " d=";
+        msg += String(speedPidDTerm, 3);
+        msg += " pidUnsat=";
+        msg += String(speedPidUnsatOutput, 3);
+        msg += " pidOutPct=";
+        msg += String(speedPidThrottlePercent, 3);
+        msg += " pidSatPct=";
+        msg += String(speedPidSatOutput, 3);
+        msg += " ffBasePct=";
+        msg += String(speedPidThrottleBasePercent, 3);
+        msg += " ffDeltaPct=";
+        msg += String(speedPidThrottleDeltaPercent, 3);
+        msg += " cmdPreSlewPct=";
+        msg += String(speedPidThrottlePreSlewPercent, 3);
+        msg += " ffActive=";
+        msg += speedPidThrottleBaseActive ? "Y" : "N";
+        msg += " throttleRawPct=";
+        msg += String(speedPidThrottleRawPercent, 3);
+        msg += " throttleFiltPct=";
+        msg += String(speedPidThrottleFilteredPercent, 3);
+        msg += " pwmCmdPct=";
+        msg += String(pwmCmdPercent, 2);
+        msg += " pwmDuty=";
+        msg += duty;
+        msg += "/";
+        msg += static_cast<int>(g_maxDuty);
+        msg += " pwmDutyPct=";
+        msg += String(pwmDutyPercent, 2);
+        msg += " autoBrakeRawPct=";
+        msg += String(speedPidBrakeRawPercent, 2);
+        msg += " autoBrakeFiltPct=";
+        msg += String(speedPidBrakeFilteredPercent, 2);
+        msg += " brakeAppliedPct=";
+        msg += String(static_cast<float>(appliedBrakePercent), 2);
+        msg += " brakeA_pct=";
+        msg += String(brakeServoAPercent, 2);
+        msg += " brakeB_pct=";
+        msg += String(brakeServoBPercent, 2);
+        msg += " launch=";
+        msg += speedPidLaunchAssistActive ? "Y" : "N";
+        msg += " launchAssistActive=";
+        msg += speedPidLaunchAssistActive ? "Y" : "N";
+        msg += " launchMs=";
+        msg += speedPidLaunchAssistRemainingMs;
+        msg += " sat=";
+        msg += speedPidThrottleSaturated ? "Y" : "N";
+        msg += " throttleSaturated=";
+        msg += speedPidThrottleSaturated ? "Y" : "N";
+        msg += " iclamp=";
+        msg += speedPidIntegratorClamped ? "Y" : "N";
+        msg += " integratorClamped=";
+        msg += speedPidIntegratorClamped ? "Y" : "N";
+        msg += " fb=";
+        msg += speedPidFeedbackOk ? "Y" : "N";
+        msg += " fs=";
+        msg += speedPidFailsafe ? "Y" : "N";
+        msg += " ovs=";
+        msg += speedPidOverspeed ? "Y" : "N";
+        msg += " estop=";
+        msg += piEstopActive ? "Y" : "N";
+        msg += " inhibit=";
+        msg += driveThrottleInhibitReasonText(inhibitReason);
+        if (speedControlSource == SpeedControlSource::kRcSpeedPid) {
+          msg += " rcRaw=";
+          msg += rawThrottle;
+          msg += " rcFilt=";
+          msg += rcFilteredThrottle;
+          msg += " rcNorm=";
+          msg += rcValue;
+          msg += " rcFresh=";
+          msg += rcFresh ? "Y" : "N";
+          msg += " rcElig=";
+          msg += rcSpeedPidEligible ? "Y" : "N";
+          msg += " rcBrake=";
+          msg += rcManualBrakeActive ? "Y" : "N";
+          msg += " rcLatched=";
+          msg += rcUsingLatchThisCycle ? "Y" : "N";
+          msg += " rcState=";
+          msg += rcDriveInputStateText(rcInputState);
+          msg += " rcTargetRawMps=";
+          msg += String(rcTargetRawMpsDebug, 3);
+          msg += " rcTargetShapedMps=";
+          msg += String(rcTargetShapedMpsDebug, 3);
+        }
+        broadcastIf(true, msg);
+        lastPidTraceTick = sampleTick;
+      }
+    }
+    lastRcInputState = rcInputState;
+    lastRcUsingLatchState = rcUsingLatchThisCycle;
 
     if (driveLogEnabled && !snapshotFresh && !commandFromPi) {
       if ((sampleTick - lastStaleLog) >= pdMS_TO_TICKS(500)) {

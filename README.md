@@ -94,7 +94,7 @@ Troubleshooting OTA rapido:
   - Pi fresca + `DRIVE_EN=1`: `accel_i8` -> objetivo `m/s`.
   - si Pi no esta fresca y RC esta fresco: `rc_throttle` -> objetivo `m/s` lineal (`0..100%` -> `0..4.17 m/s`).
 - En ambos casos ejecuta `speedPidCompute` (modos `NORMAL/OVERSPEED/FAILSAFE`) y aplica `quadThrottleUpdate` con salida PID.
-- Overspeed: cuando `speed > target`, corta throttle (`0`) y aplica freno automático proporcional limitado por `overspeedBrakeMaxPercent`.
+- Overspeed: cuando `speed > target`, corta throttle (`0`) y aplica freno automático proporcional limitado por `overspeedBrakeMaxPercent`, con `deadband + hold + slew` para reducir chatter del servo de freno.
 - Arbitraje de freno: con Pi fresca aplica `max(brake_u8_pi, brake_overspeed_auto)`; en RC aplica `max(brake_rc_manual, brake_overspeed_auto)`; con `ESTOP` fuerza `100%`.
 - Datos viejos: si el snapshot supera 50 ms sin actualizar, fuerza 0 como entrada y cada 500 ms emite `[DRIVE] sin datos frescos` cuando el logging esta habilitado.
 - Logging: combina en un solo mensaje `[DRIVE]` los cambios de RC filtrado, duty y angulo de freno, reduciendo el ruido en Telnet.
@@ -140,9 +140,12 @@ Troubleshooting OTA rapido:
   - `speed.reset` reinicia contadores Hall.
   - `speed.stream on [ms]` / `speed.stream off` habilita stream periódico por Telnet.
   - `speed.uart` responde `N/A source=hall` (ya no existe backend UART de velocidad).
-  - `spid.status`, `spid.set`, `spid.kp/ki/kd`, `spid.ramp`, `spid.max`, `spid.brakecap`, `spid.hys`, `spid.save`, `spid.reset` ajustan PID de velocidad (persistencia NVS `speed_pid`).
+  - `pid.status`, `pid.deadband`, `pid.minactive`, `pid.stream on [ms]` / `pid.stream off` permiten debug/tuning del PID de direccion en vivo.
+  - `spid.status`, `spid.set`, `spid.kp/ki/kd`, `spid.ramp`, `spid.minthrottle`, `spid.thslewup`, `spid.thslewdown`, `spid.minth.spd`, `spid.launchwin`, `spid.iunwind`, `spid.dfilter`, `spid.max`, `spid.brakecap`, `spid.hys`, `spid.brakeslewup`, `spid.brakeslewdown`, `spid.brakehold`, `spid.brakedb`, `spid.target`, `spid.save`, `spid.reset` ajustan PID de velocidad (incluye `p/i/d`, salida saturada/no saturada, launch-assist controlado y persistencia NVS `speed_pid` `ver=3`).
   - `spid.stream on [ms]` / `spid.stream off` permite monitoreo continuo de estado/tuning PID.
-  - `drive.log on|off` habilita o deshabilita logs `[DRIVE]` en runtime para debug RC/PI por Telnet.
+  - `drive.log on|off` habilita/deshabilita logs `[DRIVE]` base.
+  - `drive.log pid on [ms] | drive.log pid off` habilita/deshabilita trace forense periódico `[DRIVE][PIDTRACE]` para analizar estabilidad de velocidad y autofrenado (`target`, `speed`, `PWM`, `P/I/D`, `throttleRaw/Filt`, `launchAssistActive`, `throttleSaturated`, `integratorClamped`, `brakeA_pct`, `brakeB_pct`, `failsafe/overspeed/inhibit`).
+  - `python3 tools/tests/speed_pid_hil.py --mode interactive` ejecuta pruebas HIL guiadas del PID de velocidad (evidencia en `artifacts/speed_pid_test_report.json` y `.md`).
 
 ### `loop()` (src/main.cpp)
 - Corre en el contexto de Arduino (core 1).

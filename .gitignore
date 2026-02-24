@@ -1,4 +1,15 @@
 .pio
 .vscode/
+
+# Python virtualenvs
+.venv/
+.venv-*/
 .venv-telnet-ui/
+venv/
+
+# Python caches
 __pycache__/
+*.py[cod]
+
+# Test/calibration generated outputs
+artifacts/

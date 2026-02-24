@@ -101,7 +101,7 @@ Se considera frame de Pi "fresco" si su edad es <= `120 ms`.
 - Si Pi esta fresca:
   - el freno aplicado se arbitra como:
     - `brake = max(brake_u8_pi, brake_overspeed_auto)`
-    - `brake_overspeed_auto` solo aplica en modo `OVERSPEED` del speed PID
+    - `brake_overspeed_auto` solo aplica en modo `OVERSPEED` del speed PID y se filtra con `deadband + hold + slew` para reducir oscilacion del servo hidraulico
     - en `ESTOP`, freno forzado a `100%`
 - Si Pi NO esta fresca:
   - el sistema cae a control RC para traccion y freno
