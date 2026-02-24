@@ -65,6 +65,21 @@ struct PidTaskConfig {
   bool autoInitBridge;
 };
 
+struct PidRuntimeSnapshot {
+  bool valid;
+  bool calibrationActive;
+  bool steeringFromPi;
+  bool sensorValid;
+  bool limitLeftActive;
+  bool limitRightActive;
+  int steeringCommand;
+  float dtSeconds;
+  float measuredDeg;
+  float targetDeg;
+  float errorDeg;
+  float outputPercent;
+};
+
 void taskPidControl(void* parameter);
 
 void pidRegisterController(PidController* controller);
@@ -74,6 +89,6 @@ bool pidSetTunings(float kp, float ki, float kd);
 bool pidGetOutputModifiers(float& deadbandPercent, float& minActivePercent);
 bool pidSetDeadband(float deadbandPercent);
 bool pidSetMinActive(float minActivePercent);
+bool pidGetRuntimeSnapshot(PidRuntimeSnapshot& snapshot);
 
 #endif  // PID_H
-

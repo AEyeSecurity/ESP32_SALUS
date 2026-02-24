@@ -64,6 +64,7 @@ constexpr TickType_t kPiSnapshotFreshTicks = pdMS_TO_TICKS(120);
 portMUX_TYPE g_pidMux = portMUX_INITIALIZER_UNLOCKED;
 PidController* g_pidController = nullptr;
 PidTaskConfig* g_pidConfig = nullptr;
+PidRuntimeSnapshot g_pidRuntimeSnapshot{};
 }  // namespace
 
 namespace {
@@ -295,6 +296,13 @@ bool pidSetMinActive(float minActivePercent) {
   return true;
 }
 
+bool pidGetRuntimeSnapshot(PidRuntimeSnapshot& snapshot) {
+  portENTER_CRITICAL(&g_pidMux);
+  snapshot = g_pidRuntimeSnapshot;
+  portEXIT_CRITICAL(&g_pidMux);
+  return snapshot.valid;
+}
+
 void taskPidControl(void* parameter) {
   PidTaskConfig* cfg = static_cast<PidTaskConfig*>(parameter);
   if (cfg == nullptr || cfg->sensor == nullptr || cfg->controller == nullptr) {
@@ -332,6 +340,11 @@ void taskPidControl(void* parameter) {
   TickType_t lastRuntimeWarningTick = 0;
   TickType_t lastCalibrationDebugTick = 0;
 
+  portENTER_CRITICAL(&g_pidMux);
+  g_pidRuntimeSnapshot = PidRuntimeSnapshot{};
+  g_pidRuntimeSnapshot.valid = true;
+  portEXIT_CRITICAL(&g_pidMux);
+
   enum class CalibrationState { Idle, MoveLeft, ReleaseLeft, MoveRight, ReleaseRight };
   CalibrationState calibrationState = CalibrationState::Idle;
   CalibrationState lastCalibrationState = CalibrationState::Idle;
@@ -357,6 +370,12 @@ void taskPidControl(void* parameter) {
       default:
         return "Idle";
     }
+  };
+
+  auto publishRuntimeSnapshot = [](const PidRuntimeSnapshot& snapshot) {
+    portENTER_CRITICAL(&g_pidMux);
+    g_pidRuntimeSnapshot = snapshot;
+    portEXIT_CRITICAL(&g_pidMux);
   };
 
   for (;;) {
@@ -433,6 +452,20 @@ void taskPidControl(void* parameter) {
 
     const bool limitLeftActive = bridge_limit_left_active();
     const bool limitRightActive = bridge_limit_right_active();
+
+    PidRuntimeSnapshot runtimeSnapshot{};
+    runtimeSnapshot.valid = true;
+    runtimeSnapshot.calibrationActive = calibrationActive;
+    runtimeSnapshot.steeringFromPi = steeringFromPi;
+    runtimeSnapshot.sensorValid = measuredDeg >= 0.0f;
+    runtimeSnapshot.limitLeftActive = limitLeftActive;
+    runtimeSnapshot.limitRightActive = limitRightActive;
+    runtimeSnapshot.steeringCommand = steeringCommand;
+    runtimeSnapshot.dtSeconds = dtSeconds;
+    runtimeSnapshot.measuredDeg = measuredDeg;
+    runtimeSnapshot.targetDeg = 0.0f;
+    runtimeSnapshot.errorDeg = 0.0f;
+    runtimeSnapshot.outputPercent = 0.0f;
 
     const bool shouldLog = cfg->log && (logInterval == 0 || (nowTicks - lastLog) >= logInterval);
 
@@ -642,12 +675,15 @@ void taskPidControl(void* parameter) {
         lastCalibrationDebugTick = 0;
         cfg->controller->reset();
       }
+      runtimeSnapshot.calibrationActive = calibrationActive;
+      publishRuntimeSnapshot(runtimeSnapshot);
       continue;
     }
 
     const SteeringCalibrationData calibrationData = steeringCalibrationSnapshot();
     const float targetDeg =
         mapRcValueToAngle(steeringCommand, calibrationData, cfg->centerDeg, cfg->spanDeg);
+    runtimeSnapshot.targetDeg = targetDeg;
 
     bool skipControl = false;
     if (measuredDeg < 0.0f) {
@@ -745,6 +781,10 @@ void taskPidControl(void* parameter) {
         lastLog = nowTicks;
       }
     }
+
+    runtimeSnapshot.errorDeg = errorDeg;
+    runtimeSnapshot.outputPercent = outputPercent;
+    publishRuntimeSnapshot(runtimeSnapshot);
 
     const int64_t iterationDurationUs = esp_timer_get_time() - iterationStartUs;
     if (cfg->log && iterationDurationUs > 4000) {

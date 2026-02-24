@@ -40,9 +40,9 @@ El proyecto crea dos tareas FreeRTOS dedicadas al enlace:
 
 ```
 0: 0xAA
-1: ver_flags (bits 7-4 versión, bits 0-2 = ESTOP/DRIVE_EN/ALLOW_REVERSE)
+1: ver_flags (bits 7-4 versión, bits 0-1 = ESTOP/DRIVE_EN, bit2 reservado)
 2: steer_i8  (-100..100)
-3: accel_i8  (-100..100)
+3: accel_i8  (objetivo de velocidad normalizado)
 4: brake_u8  (0..100)
 5: CRC-8 Dallas/Maxim (bytes 0-4)
 ```
@@ -74,17 +74,23 @@ Implementación de CRC: `crc8_maxim` en `src/pi_comms.cpp`.
 ### 4.1 Tracción y freno (frame fresco <=120 ms)
 
 - Si `ESTOP=1`, `taskQuadDriveControl` inhibe acelerador (`cmd=0`, duty mínimo) y fuerza `brake=100%`.
-- Si `ESTOP=0` y `DRIVE_EN=1`, usa `accelEffective` como comando de tracción.
+- Si `ESTOP=0` y `DRIVE_EN=1`, usa `accel_i8` como setpoint de velocidad:
+  - `accel_i8<=0` -> `target=0 m/s`
+  - `1..100` -> `target=(accel_i8/100)*max_speed_mps` (default `4.17 m/s`, equivalente a `15 km/h`)
+  - `>100` -> clamp a `100`
+- El PWM de tracción lo genera el PID de velocidad (`speed_pid`) con feedback Hall.
+- Si el feedback Hall no es válido durante control por velocidad, entra fail-safe conservador: `throttle=0` y sin freno automático adicional.
 - Si `ESTOP=0` y `DRIVE_EN=0`, la tracción queda en RC (no en Pi).
-- Cuando el frame de Pi está fresco, el freno siempre se toma de `brake_u8` (0..100) vía `quadBrakeApplyPercent`.
+- Cuando el frame de Pi está fresco, el freno aplicado se arbitra como:
+  - `applied_brake = max(brake_u8_pi, brake_overspeed_auto)`
+  - `brake_overspeed_auto` solo aparece en modo `OVERSPEED` del speed PID
+  - `ESTOP` fuerza `applied_brake=100`
 
-### 4.2 Reversa segura
+### 4.2 Reversa (estado actual)
 
-1. La Pi envía `accel_i8 < 0`.
-2. En RX, la ESP32 calcula `reverseRequestActive = wantsReverse && !allowReverse`.
-3. En TX, el bit `REVERSE_REQ` se refleja desde `reverseRequestActive`.
-4. Solo cuando llega `ALLOW_REVERSE=1`, `accelEffective` habilita el valor negativo real.
-5. Si `ALLOW_REVERSE=0` y `accel_i8` sigue negativo, `accelEffective` se mantiene en `0`.
+- En el modo PID de velocidad actual, reversa por protocolo está deshabilitada.
+- `accel_i8 < 0` se clampa a `0`.
+- `REVERSE_REQ` no se activa (bit 3 en `status_flags` permanece en `0`).
 
 ### 4.3 ESTOP y timeout de enlace
 
@@ -120,7 +126,7 @@ Recomendado: activar `debug::kLogDrive` temporalmente para ver qué comandos ter
 4. **Verificar handshake**:  
    - En Telnet ejecutar `comms.status` → debería mostrar `driver=READY` y `ageMs` estable.  
    - Mover `accel_i8` positivo con `DRIVE_EN=1`; comprobar logs `[PI][RX]` y `[DRIVE]`.  
-   - Solicitar reversa (`accel<0`). Confirmar que aparece `reverse{req=Y wait=Y}` y que al activar el relé (`ALLOW_REVERSE`) cambia a `granted=Y`.  
+   - Enviar `accel_i8<0` y confirmar que se clampa a `target=0 m/s` (sin reversa por protocolo).  
 5. **Probar ESTOP**: setear `ESTOP=1` y validar que `cmd=0`, `brake=100` y duty en mínimo.  
 6. **Integrar en el vehículo** una vez que no existan CRC errors y los tiempos (`ageMs`) se mantengan <50 ms.
 
@@ -135,8 +141,8 @@ de forma continua, la ESP32 puede priorizar Pi sobre RC y parecer que se
 Puntos clave:
 
 - Si el frame Pi esta fresco (`<=120 ms`), direccion usa `steer` de Pi.
-- Si ademas `DRIVE_EN=1`, traccion usa `accelEffective` de Pi.
-- Con frame fresco, freno usa `brake_u8` de Pi.
+- Si ademas `DRIVE_EN=1`, traccion usa el PID de velocidad con setpoint derivado de `accel_i8`.
+- Con frame fresco, freno aplica `max(brake_u8_pi, brake_overspeed_auto)`.
 
 Procedimiento recomendado para pruebas con manejo manual:
 
@@ -157,7 +163,7 @@ Procedimiento recomendado para pruebas con manejo manual:
 |-------------------------------------------|----------------------------------------------------------------|
 | `driver=NOT_READY` en `comms.status`      | La UART no inicializó; revisar `piCommsInit` y cableado.       |
 | `ok=0 crcErr>0`                           | Ruido o baud incorrecto; revisar velocidad y masa compartida.  |
-| `reverse wait=Y` no pasa a `granted=Y`    | La Pi no activó `ALLOW_REVERSE`; chequear relé y lógica.       |
+| `accel<0` no genera reversa               | Esperado en modo PID de velocidad actual: negativos se clamped a `0`. |
 | `cmd=0 (RC)` aun con Pi en marcha         | `DRIVE_EN` en 0 o frames viejos (>120 ms); revisar envío/tiempos. |
 | `ESTOP` no frena                          | Verificar que bit 0 del `ver_flags` realmente se escribe y llega (logs `[PI][RX]`). |
 | Se pierde control manual al testear desde Pi | Algún proceso Pi está transmitiendo control; detener `salus-ws.service` y usar modo solo RX. |

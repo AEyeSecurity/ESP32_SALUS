@@ -11,6 +11,7 @@
 #include "quad_functions.h"
 #include "pi_comms.h"
 #include "hall_speed.h"
+#include "speed_pid.h"
 
 constexpr uint16_t STACK_OTA = 4096;
 constexpr uint16_t STACK_BRIDGE = 4096;
@@ -27,11 +28,39 @@ constexpr int AS5600_SCL_PIN = 33;
 constexpr float PID_CENTER_DEG = 240.0f;
 constexpr float PID_SPAN_DEG = 40.0f;
 constexpr float PID_DEADBAND_PERCENT = 0.25f;
-constexpr float PID_MIN_ACTIVE_PERCENT = 10.0f;
+constexpr float PID_MIN_ACTIVE_PERCENT = 0.0f;
 constexpr float PID_KP = 6.0f;
 constexpr float PID_KI = 6.0f;
 constexpr float PID_KD = 0.0f;
 constexpr float PID_INTEGRAL_LIMIT = 50.0f;
+
+constexpr float SPEED_PID_KP = 10.0f;
+constexpr float SPEED_PID_KI = 2.0f;
+constexpr float SPEED_PID_KD = 0.0f;
+constexpr float SPEED_PID_MAX_MPS = 4.17f;
+constexpr float SPEED_PID_RAMP_MPS2 = 2.0f;
+constexpr float SPEED_PID_INTEGRAL_LIMIT = 100.0f;
+constexpr float SPEED_PID_DEADBAND_MPS = 0.05f;
+constexpr float SPEED_PID_MIN_THROTTLE_PERCENT = 90.0f;
+constexpr float SPEED_PID_THROTTLE_SLEW_UP_PCTPS = 30.0f;
+constexpr float SPEED_PID_THROTTLE_SLEW_DOWN_PCTPS = 45.0f;
+constexpr float SPEED_PID_MIN_THROTTLE_ASSIST_MAX_SPEED_MPS = 0.35f;
+constexpr uint16_t SPEED_PID_LAUNCH_ASSIST_WINDOW_MS = 1200;
+constexpr bool SPEED_PID_THROTTLE_BASE_ENABLE = true;
+constexpr float SPEED_PID_THROTTLE_BASE_AT_ZERO_MPS_PERCENT = 0.0f;
+constexpr float SPEED_PID_THROTTLE_BASE_AT_MAX_MPS_PERCENT = 55.0f;
+constexpr float SPEED_PID_THROTTLE_BASE_PID_DELTA_UP_MAX_PERCENT = 35.0f;
+constexpr float SPEED_PID_THROTTLE_BASE_PID_DELTA_DOWN_MAX_PERCENT = 45.0f;
+constexpr float SPEED_PID_THROTTLE_BASE_ACTIVATION_MIN_MPS = 0.10f;
+constexpr uint16_t SPEED_PID_FEEDBACK_LAUNCH_GRACE_MS = 1200;
+constexpr float SPEED_PID_INTEGRATOR_UNWIND_GAIN = 0.35f;
+constexpr float SPEED_PID_DERIVATIVE_FILTER_HZ = 3.0f;
+constexpr float SPEED_PID_OVERSPEED_BRAKE_CAP_PERCENT = 30.0f;
+constexpr float SPEED_PID_OVERSPEED_HYSTERESIS_MPS = 0.3f;
+constexpr float SPEED_PID_BRAKE_SLEW_UP_PCTPS = 35.0f;
+constexpr float SPEED_PID_BRAKE_SLEW_DOWN_PCTPS = 55.0f;
+constexpr uint16_t SPEED_PID_BRAKE_HOLD_MS = 200;
+constexpr float SPEED_PID_BRAKE_DEADBAND_PERCENT = 3.0f;
 
 constexpr uint8_t THROTTLE_PWM_PIN = 13;
 constexpr uint8_t THROTTLE_LEDC_CHANNEL = 4;
@@ -137,6 +166,37 @@ static QuadDriveTaskConfig g_driveTaskConfig = {
         BRAKE_APPLY_ANGLE_SERVO_B,
         BRAKE_THRESHOLD,
     },
+    {
+        SPEED_PID_KP,
+        SPEED_PID_KI,
+        SPEED_PID_KD,
+    },
+    {
+        SPEED_PID_MAX_MPS,
+        SPEED_PID_RAMP_MPS2,
+        SPEED_PID_INTEGRAL_LIMIT,
+        SPEED_PID_DEADBAND_MPS,
+        SPEED_PID_MIN_THROTTLE_PERCENT,
+        SPEED_PID_THROTTLE_SLEW_UP_PCTPS,
+        SPEED_PID_THROTTLE_SLEW_DOWN_PCTPS,
+        SPEED_PID_MIN_THROTTLE_ASSIST_MAX_SPEED_MPS,
+        SPEED_PID_LAUNCH_ASSIST_WINDOW_MS,
+        SPEED_PID_THROTTLE_BASE_ENABLE,
+        SPEED_PID_THROTTLE_BASE_AT_ZERO_MPS_PERCENT,
+        SPEED_PID_THROTTLE_BASE_AT_MAX_MPS_PERCENT,
+        SPEED_PID_THROTTLE_BASE_PID_DELTA_UP_MAX_PERCENT,
+        SPEED_PID_THROTTLE_BASE_PID_DELTA_DOWN_MAX_PERCENT,
+        SPEED_PID_THROTTLE_BASE_ACTIVATION_MIN_MPS,
+        SPEED_PID_FEEDBACK_LAUNCH_GRACE_MS,
+        SPEED_PID_INTEGRATOR_UNWIND_GAIN,
+        SPEED_PID_DERIVATIVE_FILTER_HZ,
+        SPEED_PID_OVERSPEED_BRAKE_CAP_PERCENT,
+        SPEED_PID_OVERSPEED_HYSTERESIS_MPS,
+        SPEED_PID_BRAKE_SLEW_UP_PCTPS,
+        SPEED_PID_BRAKE_SLEW_DOWN_PCTPS,
+        SPEED_PID_BRAKE_HOLD_MS,
+        SPEED_PID_BRAKE_DEADBAND_PERCENT,
+    },
     true,
     THROTTLE_PERIOD,
     debug::kLogDrive};
@@ -176,6 +236,9 @@ void setup() {
   pidRegisterConfig(&g_pidTaskConfig);
 
   steeringCalibrationInit(PID_CENTER_DEG, PID_SPAN_DEG);
+  if (!speedPidInit(g_driveTaskConfig.speedPidTuningsDefaults, g_driveTaskConfig.speedPidConfigDefaults)) {
+    broadcastIf(true, "[SPD][PID] Configuracion por defecto invalida");
+  }
 
   String rcInitMsg = "Iniciando pruebas FS-iA6 (AUX1 GPIO" + String(kRcAux1Pin) + ", AUX2 GPIO" +
                      String(kRcAux2Pin) + ", acelerador GPIO" + String(kRcThrottlePin) +
@@ -201,7 +264,7 @@ void setup() {
     startTaskPinned(taskRcMonitor, "RCMonitor", STACK_RC, &g_rcConfig, 1, nullptr, 1);
   }
   if (debug::kEnableDriveTask) {
-    startTaskPinned(taskQuadDriveControl, "Drive", STACK_DRIVE, &g_driveTaskConfig, 3, nullptr, 1);
+    startTaskPinned(taskQuadDriveControl, "Drive", STACK_DRIVE, &g_driveTaskConfig, 4, nullptr, 1);
   }
 
   g_as5600.begin(AS5600_SDA_PIN, AS5600_SCL_PIN);

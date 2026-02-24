@@ -49,10 +49,10 @@ Troubleshooting OTA rapido:
 | `taskRcSampler`          | `src/fs_ia6.cpp`         | 2048 (~8 KB)         | 4    | 1      | Notificacin RMT (timeout 10 ms)            | Siempre                  | Usa RMT para medir pulsos del FS-iA6, actualiza `RcSharedState` y despierta consumidores. |
 | `taskAs5600Monitor`      | `src/AS5600.cpp`         | 3072 (~12 KB)        | 1    | 1      | 30 ms periodica, log cada 500 ms            | Siempre                  | Mide estado del AS5600 y opcionalmente reporta estado de iman y angulo. |
 | `taskPidControl`         | `src/pid.cpp`            | 4096 (~16 KB)        | 4    | 0      | Notificacin RC (timeout 30 ms)             | `debug::kEnablePidTask` (true) | Cierra el lazo PID, incluye estado de calibracion y protege limites via finales de carrera. |
-| `taskQuadDriveControl`   | `src/quad_functions.cpp` | 4096 (~16 KB)        | 3    | 1      | Notificacin RC (timeout 30 ms)             | `debug::kEnableDriveTask` (true) | Filtra acelerador, actualiza LEDC y servos de freno en una nica tarea coherente. |
+| `taskQuadDriveControl`   | `src/quad_functions.cpp` | 4096 (~16 KB)        | 4    | 1      | Notificacin RC (timeout 30 ms)             | `debug::kEnableDriveTask` (true) | Lazo de velocidad (m/s) con Hall, actualiza LEDC y mezcla freno Pi/overspeed. |
 | `taskRcMonitor`          | `src/fs_ia6.cpp`         | 2048 (~8 KB)         | 1    | 1      | 100 ms periodica (`vTaskDelay`)              | `debug::kEnableRcTask` (false) | Solo loguea el snapshot compartido; ideal para calibracion. |
 | `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~16 KB)        | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
-| `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~12 KB)        | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA`, mantiene `PiCommsRxSnapshot` y levanta `REVERSE_REQ`. |
+| `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~12 KB)        | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA`, mantiene `PiCommsRxSnapshot` y clampa `accel_i8` a `0..100`. |
 | `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~8 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status telemetry crc]`; en automático la telemetría queda en `255` (`N/A`). |
 | `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Supervisor liviano sin lógica de comunicaciones (solo `vTaskDelay`). |
 
@@ -90,10 +90,15 @@ Troubleshooting OTA rapido:
 ### `taskQuadDriveControl` (src/quad_functions.cpp)
 - Configuracion: `QuadDriveTaskConfig` agrupa la configuracion del LEDC de acelerador, los servos de freno y el flag `autoInitHardware` que llama `initQuadThrottle/Brake` al crear la tarea.
 - Disparo: espera notificaciones RC con `ulTaskNotifyTake` (timeout 30 ms) y utiliza `esp_timer_get_time` para medir la duracion de cada ciclo.
-- Flujo: ejecuta `updateThrottleFilter`, aplica el duty con `quadThrottleUpdate` y reutiliza el valor filtrado para calcular el angulo de freno mediante `quadBrakeUpdate`, garantizando coherencia entre ambos actuadores.
+- Flujo: selecciona fuente de setpoint para `speed_pid` segun prioridad:
+  - Pi fresca + `DRIVE_EN=1`: `accel_i8` -> objetivo `m/s`.
+  - si Pi no esta fresca y RC esta fresco: `rc_throttle` -> objetivo `m/s` lineal (`0..100%` -> `0..4.17 m/s`).
+- En ambos casos ejecuta `speedPidCompute` (modos `NORMAL/OVERSPEED/FAILSAFE`) y aplica `quadThrottleUpdate` con salida PID.
+- Overspeed: cuando `speed > target`, corta throttle (`0`) y aplica freno automático proporcional limitado por `overspeedBrakeMaxPercent`, con `deadband + hold + slew` para reducir chatter del servo de freno.
+- Arbitraje de freno: con Pi fresca aplica `max(brake_u8_pi, brake_overspeed_auto)`; en RC aplica `max(brake_rc_manual, brake_overspeed_auto)`; con `ESTOP` fuerza `100%`.
 - Datos viejos: si el snapshot supera 50 ms sin actualizar, fuerza 0 como entrada y cada 500 ms emite `[DRIVE] sin datos frescos` cuando el logging esta habilitado.
 - Logging: combina en un solo mensaje `[DRIVE]` los cambios de RC filtrado, duty y angulo de freno, reduciendo el ruido en Telnet.
-- Instrumentacion: reporta ciclos >2 ms una vez por segundo para detectar latencias anormales en la tarea de conduccion.
+- Instrumentacion: reporta `dt` fuera de objetivo y ciclos >4 ms con cooldown de 1 s para detectar latencias anormales.
 
 ### `taskRcMonitor` (src/fs_ia6.cpp)
 - Activacion: controlada por `debug::kEnableRcTask`. Reutiliza el `RcSharedState` mediante `rcGetStateCopy`, sin tocar el hardware.
@@ -109,16 +114,18 @@ Troubleshooting OTA rapido:
 ## Comunicaciones UART con Raspberry Pi
 
 - El enlace binario se implementa en `taskPiCommsRx`/`taskPiCommsTx` (`src/pi_comms.cpp`) y usa `GPIO3/GPIO1` a **460 800 bps**.  
-- `taskPiCommsRx` publica un `PiCommsRxSnapshot` con `steer`, `accelRaw`, `accelEffective`, `brake`, `estop`, `driveEnabled` y el estado del pedido de reversa.  
-- `taskPiCommsTx` refleja `REVERSE_REQ` desde el estado RX (`accelRaw<0` y `ALLOW_REVERSE=0` en frame válido).  
+- `taskPiCommsRx` publica un `PiCommsRxSnapshot` con `steer`, `accelRaw`, `accelEffective`, `brake`, `estop`, `driveEnabled` y flags de reversa (actualmente en `false` por protocolo).  
+- `taskPiCommsTx` mantiene `REVERSE_REQ` en `0` en el modo PID de velocidad actual.  
 - `taskPiCommsTx` codifica `telemetry_u8` como velocidad:
   - `0..254` = `km/h` estimados por backend Hall
   - `255` = `N/A` si el backend Hall no está listo
   - override manual si `piCommsSetTelemetry(x)` se usa con `x!=255`.
 - `taskQuadDriveControl` consume el snapshot:  
   - `ESTOP` → freno completo y duty mínimo.  
-  - `DRIVE_EN` + `accelEffective` (-100..100, con negativo solo si `ALLOW_REVERSE`) → tracción proporcional.  
-  - con frame fresco de Pi, `brake_u8` gobierna servos (0 % liberado, 100 % freno).  
+  - `DRIVE_EN` + `accel_i8` -> setpoint de velocidad (`m/s`) para PID Hall:
+    - `accel<=0` -> `0 m/s`
+    - `1..100` -> `target=(accel/100)*max_speed_mps` (default `4.17`, equivalente a `15 km/h`)  
+  - con frame fresco de Pi, freno aplicado = `max(brake_u8_pi, brake_overspeed_auto)` (y `ESTOP` fuerza 100 %).  
 - `taskPidControl` usa `steer` de Pi cuando el frame está fresco (<=120 ms); si no, vuelve a steering RC.  
 - Para inspeccionar el estado usa Telnet (`comms.status`, `comms.reset`) o activa `debug::kLogPiComms`.  
 - Documentación detallada, pasos de prueba y troubleshooting: **[PI_COMMS_README.md](PI_COMMS_README.md)**.
@@ -133,6 +140,12 @@ Troubleshooting OTA rapido:
   - `speed.reset` reinicia contadores Hall.
   - `speed.stream on [ms]` / `speed.stream off` habilita stream periódico por Telnet.
   - `speed.uart` responde `N/A source=hall` (ya no existe backend UART de velocidad).
+  - `pid.status`, `pid.deadband`, `pid.minactive`, `pid.stream on [ms]` / `pid.stream off` permiten debug/tuning del PID de direccion en vivo.
+  - `spid.status`, `spid.set`, `spid.kp/ki/kd`, `spid.ramp`, `spid.minthrottle`, `spid.thslewup`, `spid.thslewdown`, `spid.minth.spd`, `spid.launchwin`, `spid.iunwind`, `spid.dfilter`, `spid.max`, `spid.brakecap`, `spid.hys`, `spid.brakeslewup`, `spid.brakeslewdown`, `spid.brakehold`, `spid.brakedb`, `spid.target`, `spid.save`, `spid.reset` ajustan PID de velocidad (incluye `p/i/d`, salida saturada/no saturada, launch-assist controlado y persistencia NVS `speed_pid` `ver=3`).
+  - `spid.stream on [ms]` / `spid.stream off` permite monitoreo continuo de estado/tuning PID.
+  - `drive.log on|off` habilita/deshabilita logs `[DRIVE]` base.
+  - `drive.log pid on [ms] | drive.log pid off` habilita/deshabilita trace forense periódico `[DRIVE][PIDTRACE]` para analizar estabilidad de velocidad y autofrenado (`target`, `speed`, `PWM`, `P/I/D`, `throttleRaw/Filt`, `launchAssistActive`, `throttleSaturated`, `integratorClamped`, `brakeA_pct`, `brakeB_pct`, `failsafe/overspeed/inhibit`).
+  - `python3 tools/tests/speed_pid_hil.py --mode interactive` ejecuta pruebas HIL guiadas del PID de velocidad (evidencia en `artifacts/speed_pid_test_report.json` y `.md`).
 
 ### `loop()` (src/main.cpp)
 - Corre en el contexto de Arduino (core 1).
