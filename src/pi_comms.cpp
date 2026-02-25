@@ -2,18 +2,25 @@
 
 #include <array>
 #include <cstring>
+#include <limits>
+
+#include <math.h>
 
 #include "esp_err.h"
 
 #include "hall_speed.h"
 #include "ota_telnet.h"
+#include "pid.h"
+#include "quad_functions.h"
+#include "steering_calibration.h"
 
 namespace {
 
 constexpr uint8_t kHeaderRx = 0xAA;
 constexpr uint8_t kHeaderTx = 0x55;
-constexpr size_t kRxFrameSize = 6;
-constexpr size_t kTxFrameSize = 4;
+constexpr size_t kRxFrameSize = 7;
+constexpr size_t kTxFrameSize = 8;
+constexpr uint8_t kProtocolVersion = 2;
 
 PiCommsConfig g_config{};
 bool g_initialized = false;
@@ -23,29 +30,17 @@ struct PiRxState {
   TickType_t lastFrameTick = 0;
   uint8_t verFlags = 0;
   int8_t steer = 0;
-  int8_t accelRaw = 0;
-  int8_t accelEffective = 0;
+  uint16_t speedCmdCentiMps = 0;
   bool driveEnabled = false;
   bool estop = false;
-  bool allowReverse = false;
-  bool wantsReverse = false;
-  bool reverseRequestActive = false;
-  bool reverseAwaitingGrant = false;
-  bool reverseGranted = false;
   uint8_t brake = 0;
   uint32_t framesOk = 0;
   uint32_t framesCrcError = 0;
   uint32_t framesMalformed = 0;
-};
-
-struct PiTxState {
-  uint8_t statusFlags = 0x01;  // READY asserted por defecto
-  uint8_t telemetry = 255;     // Valor “no disponible”
+  uint32_t framesVersionError = 0;
 };
 
 PiRxState g_rxState{};
-PiTxState g_txState{};
-uint8_t g_manualStatusFlags = 0;
 
 portMUX_TYPE g_stateMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -54,10 +49,15 @@ constexpr uint8_t kCmdFlagDriveEnable = 1 << 1;
 constexpr uint8_t kCmdFlagReserved2 = 1 << 2;
 
 constexpr uint8_t kStatusReady = 1 << 0;
-constexpr uint8_t kStatusFault = 1 << 1;
-constexpr uint8_t kStatusOvercurrent = 1 << 2;
-constexpr uint8_t kStatusReverseReq = 1 << 3;
-constexpr uint8_t kTelemetryAuto = 255;
+constexpr uint8_t kStatusEstopActive = 1 << 1;
+constexpr uint8_t kStatusFailsafeActive = 1 << 2;
+constexpr uint8_t kStatusPiFresh = 1 << 3;
+constexpr uint8_t kStatusControlSourceShift = 4;
+constexpr uint8_t kStatusControlSourceMask = static_cast<uint8_t>(0x03u << kStatusControlSourceShift);
+constexpr uint8_t kStatusOverspeedActive = 1 << 6;
+
+constexpr uint16_t kSpeedTelemetryNotAvailable = 0xFFFFu;
+constexpr int16_t kSteerTelemetryNotAvailable = std::numeric_limits<int16_t>::min();
 
 uint8_t crc8_maxim(const uint8_t* data, size_t len) {
   uint8_t c = 0x00;
@@ -125,58 +125,169 @@ String describeCommandFlags(uint8_t verFlags) {
   msg += (verFlags >> 4) & 0x0F;
   msg += " flags=";
   String flags;
-  appendFlag(flags, (verFlags & 0x01) != 0, "ESTOP");
-  appendFlag(flags, (verFlags & 0x02) != 0, "DRIVE_EN");
+  appendFlag(flags, (verFlags & kCmdFlagEstop) != 0, "ESTOP");
+  appendFlag(flags, (verFlags & kCmdFlagDriveEnable) != 0, "DRIVE_EN");
   appendFlag(flags, (verFlags & kCmdFlagReserved2) != 0, "RESV2");
   appendFlag(flags, (verFlags & 0x08) != 0, "RESV3");
   msg += (flags.length() > 0) ? flags : "none";
   return msg;
 }
 
+const char* statusSourceText(uint8_t sourceCode) {
+  switch (sourceCode) {
+    case 1:
+      return "PI";
+    case 2:
+      return "RC";
+    case 3:
+      return "TEL";
+    case 0:
+    default:
+      return "NONE";
+  }
+}
+
 String describeStatusFlags(uint8_t status) {
   String flags;
-  flags.reserve(48);
-  appendFlag(flags, (status & 0x01) != 0, "READY");
-  appendFlag(flags, (status & 0x02) != 0, "FAULT");
-  appendFlag(flags, (status & 0x04) != 0, "OVERCURRENT");
-  appendFlag(flags, (status & 0x08) != 0, "REV_REQ");
+  flags.reserve(64);
+  appendFlag(flags, (status & kStatusReady) != 0, "READY");
+  appendFlag(flags, (status & kStatusEstopActive) != 0, "ESTOP");
+  appendFlag(flags, (status & kStatusFailsafeActive) != 0, "FAILSAFE");
+  appendFlag(flags, (status & kStatusPiFresh) != 0, "PI_FRESH");
+  appendFlag(flags, (status & kStatusOverspeedActive) != 0, "OVERSPEED");
+
+  const uint8_t sourceCode = static_cast<uint8_t>((status & kStatusControlSourceMask) >> kStatusControlSourceShift);
+
   String msg;
-  msg.reserve(64);
+  msg.reserve(96);
   msg += "status=0x";
   msg += String(status, HEX);
   msg += " (";
   msg += (flags.length() > 0) ? flags : "none";
+  msg += " src=";
+  msg += statusSourceText(sourceCode);
   msg += ")";
   return msg;
 }
 
-String describeTelemetry(uint8_t telemetry) {
-  if (telemetry == kTelemetryAuto) {
+String describeSpeedTelemetry(uint16_t speedCentiMps) {
+  if (speedCentiMps == kSpeedTelemetryNotAvailable) {
     return "N/A";
   }
-  if (telemetry <= 254) {
-    String kmh = String(telemetry);
-    kmh += "km/h";
-    return kmh;
-  }
-  String hex = "0x";
-  hex += String(telemetry, HEX);
-  return hex;
+  String msg = String(static_cast<float>(speedCentiMps) / 100.0f, 2);
+  msg += "m/s";
+  return msg;
 }
 
-uint8_t encodeTelemetryFromSpeed() {
+String describeSteerTelemetry(int16_t steerCentiDeg) {
+  if (steerCentiDeg == kSteerTelemetryNotAvailable) {
+    return "N/A";
+  }
+  String msg = String(static_cast<float>(steerCentiDeg) / 100.0f, 2);
+  msg += "deg";
+  return msg;
+}
+
+uint16_t encodeSpeedTelemetryFromHall() {
   HallSpeedSnapshot speed{};
-  if (!hallSpeedGetSnapshot(speed) || !speed.driverReady) {
-    return kTelemetryAuto;
+  if (!hallSpeedGetSnapshot(speed) || !speed.driverReady || !isfinite(speed.speedMps)) {
+    return kSpeedTelemetryNotAvailable;
   }
 
-  int telemetry = static_cast<int>(speed.speedKmh + 0.5f);
-  if (telemetry < 0) {
-    telemetry = 0;
-  } else if (telemetry > 254) {
-    telemetry = 254;
+  float speedMps = speed.speedMps;
+  if (speedMps < 0.0f) {
+    speedMps = 0.0f;
   }
-  return static_cast<uint8_t>(telemetry);
+
+  long speedCenti = lroundf(speedMps * 100.0f);
+  if (speedCenti < 0) {
+    speedCenti = 0;
+  } else if (speedCenti > 65534L) {
+    speedCenti = 65534L;
+  }
+  return static_cast<uint16_t>(speedCenti);
+}
+
+int16_t encodeSteerTelemetryCentered() {
+  PidRuntimeSnapshot pidSnapshot{};
+  if (!pidGetRuntimeSnapshot(pidSnapshot) || !pidSnapshot.valid || !pidSnapshot.sensorValid ||
+      !isfinite(pidSnapshot.measuredDeg)) {
+    return kSteerTelemetryNotAvailable;
+  }
+
+  const SteeringCalibrationData calibration = steeringCalibrationSnapshot();
+  const float centerDeg = calibration.initialized ? calibration.adjustedCenterDeg : 0.0f;
+  float centeredDeg = wrapAngleDegrees(pidSnapshot.measuredDeg - centerDeg);
+  if (!isfinite(centeredDeg)) {
+    return kSteerTelemetryNotAvailable;
+  }
+
+  if (centeredDeg < -180.0f) {
+    centeredDeg = -180.0f;
+  } else if (centeredDeg > 180.0f) {
+    centeredDeg = 180.0f;
+  }
+
+  long centeredCenti = lroundf(centeredDeg * 100.0f);
+  if (centeredCenti < -18000L) {
+    centeredCenti = -18000L;
+  } else if (centeredCenti > 18000L) {
+    centeredCenti = 18000L;
+  }
+  return static_cast<int16_t>(centeredCenti);
+}
+
+uint8_t encodeDriveSource(QuadDriveControlSource source) {
+  switch (source) {
+    case QuadDriveControlSource::kPi:
+      return 1;
+    case QuadDriveControlSource::kRc:
+      return 2;
+    case QuadDriveControlSource::kTelnet:
+      return 3;
+    case QuadDriveControlSource::kNone:
+    default:
+      return 0;
+  }
+}
+
+uint8_t encodeStatusFlags() {
+  uint8_t status = kStatusReady;
+
+  QuadDriveRuntimeSnapshot driveSnapshot{};
+  if (!quadDriveGetRuntimeSnapshot(driveSnapshot) || !driveSnapshot.valid) {
+    return status;
+  }
+
+  if (driveSnapshot.piEstopActive) {
+    status |= kStatusEstopActive;
+  }
+  if (driveSnapshot.speedPidFailsafe) {
+    status |= kStatusFailsafeActive;
+  }
+  if (driveSnapshot.piFresh) {
+    status |= kStatusPiFresh;
+  }
+
+  const uint8_t source = encodeDriveSource(driveSnapshot.source);
+  status |= static_cast<uint8_t>((source << kStatusControlSourceShift) & kStatusControlSourceMask);
+
+  if (driveSnapshot.speedPidOverspeed) {
+    status |= kStatusOverspeedActive;
+  }
+
+  return status;
+}
+
+uint8_t encodeAppliedBrakePercent() {
+  QuadDriveRuntimeSnapshot driveSnapshot{};
+  if (!quadDriveGetRuntimeSnapshot(driveSnapshot) || !driveSnapshot.valid) {
+    return 0;
+  }
+  if (driveSnapshot.appliedBrakePercent > 100u) {
+    return 100u;
+  }
+  return driveSnapshot.appliedBrakePercent;
 }
 
 void logRxFrame(const PiCommsConfig& cfg, const PiRxState& state, TickType_t nowTick) {
@@ -189,18 +300,15 @@ void logRxFrame(const PiCommsConfig& cfg, const PiRxState& state, TickType_t now
     return;
   }
   String msg;
-  msg.reserve(160);
+  msg.reserve(176);
   msg += "[PI][RX] ";
   msg += describeCommandFlags(state.verFlags);
   msg += " steer=";
   msg += state.steer;
   msg += "%";
-  msg += " accelRaw=";
-  msg += state.accelRaw;
-  msg += "%";
-  msg += " accelEff=";
-  msg += state.accelEffective;
-  msg += "%";
+  msg += " speedCmd=";
+  msg += String(static_cast<float>(state.speedCmdCentiMps) / 100.0f, 2);
+  msg += "m/s";
   msg += " brake=";
   msg += state.brake;
   msg += "%";
@@ -214,6 +322,8 @@ void logRxFrame(const PiCommsConfig& cfg, const PiRxState& state, TickType_t now
   msg += state.framesCrcError;
   msg += " malformed=";
   msg += state.framesMalformed;
+  msg += " verErr=";
+  msg += state.framesVersionError;
   msg += "}";
   broadcastIf(true, msg);
   s_lastLogTick = nowTick;
@@ -233,7 +343,7 @@ void logRxError(const PiCommsConfig& cfg, const char* reason, TickType_t nowTick
   snapshot = g_rxState;
   portEXIT_CRITICAL(&g_stateMux);
   String msg;
-  msg.reserve(128);
+  msg.reserve(144);
   msg += "[PI][RX][WARN] ";
   msg += reason;
   msg += " stats{ok=";
@@ -242,12 +352,19 @@ void logRxError(const PiCommsConfig& cfg, const char* reason, TickType_t nowTick
   msg += snapshot.framesCrcError;
   msg += " malformed=";
   msg += snapshot.framesMalformed;
+  msg += " verErr=";
+  msg += snapshot.framesVersionError;
   msg += "}";
   broadcastIf(true, msg);
   s_lastErrorLogTick = nowTick;
 }
 
-void logTxFrame(const PiCommsConfig& cfg, uint8_t status, uint8_t telemetry, TickType_t nowTick) {
+void logTxFrame(const PiCommsConfig& cfg,
+                uint8_t status,
+                uint16_t speedCentiMps,
+                int16_t steerCentiDeg,
+                uint8_t brakePercent,
+                TickType_t nowTick) {
   if (!cfg.logTx) {
     return;
   }
@@ -257,11 +374,16 @@ void logTxFrame(const PiCommsConfig& cfg, uint8_t status, uint8_t telemetry, Tic
     return;
   }
   String msg;
-  msg.reserve(112);
+  msg.reserve(200);
   msg += "[PI][TX] ";
   msg += describeStatusFlags(status);
-  msg += " telemetry=";
-  msg += describeTelemetry(telemetry);
+  msg += " speed=";
+  msg += describeSpeedTelemetry(speedCentiMps);
+  msg += " steer=";
+  msg += describeSteerTelemetry(steerCentiDeg);
+  msg += " brake=";
+  msg += brakePercent;
+  msg += "%";
   broadcastIf(true, msg);
   s_lastLogTick = nowTick;
 }
@@ -299,10 +421,6 @@ bool piCommsInit(const PiCommsConfig& config) {
 
   portENTER_CRITICAL(&g_stateMux);
   g_rxState = PiRxState{};
-  g_txState = PiTxState{};
-  g_txState.statusFlags = kStatusReady;
-  g_txState.telemetry = kTelemetryAuto;
-  g_manualStatusFlags = 0;
   portEXIT_CRITICAL(&g_stateMux);
 
   g_initialized = true;
@@ -316,19 +434,14 @@ bool piCommsGetRxSnapshot(PiCommsRxSnapshot& snapshot) {
   snapshot.lastFrameTick = g_rxState.lastFrameTick;
   snapshot.verFlags = g_rxState.verFlags;
   snapshot.steer = g_rxState.steer;
-  snapshot.accelRaw = g_rxState.accelRaw;
-  snapshot.accelEffective = g_rxState.accelEffective;
+  snapshot.speedCmdCentiMps = g_rxState.speedCmdCentiMps;
   snapshot.brake = g_rxState.brake;
   snapshot.driveEnabled = g_rxState.driveEnabled;
   snapshot.estop = g_rxState.estop;
-  snapshot.allowReverse = g_rxState.allowReverse;
-  snapshot.wantsReverse = g_rxState.wantsReverse;
-  snapshot.reverseRequestActive = g_rxState.reverseRequestActive;
-  snapshot.reverseAwaitingGrant = g_rxState.reverseAwaitingGrant;
-  snapshot.reverseGranted = g_rxState.reverseGranted;
   snapshot.framesOk = g_rxState.framesOk;
   snapshot.framesCrcError = g_rxState.framesCrcError;
   snapshot.framesMalformed = g_rxState.framesMalformed;
+  snapshot.framesVersionError = g_rxState.framesVersionError;
   portEXIT_CRITICAL(&g_stateMux);
   return snapshot.driverReady;
 }
@@ -338,19 +451,7 @@ void piCommsResetStats() {
   g_rxState.framesOk = 0;
   g_rxState.framesCrcError = 0;
   g_rxState.framesMalformed = 0;
-  portEXIT_CRITICAL(&g_stateMux);
-}
-
-void piCommsSetStatusFlags(uint8_t flags) {
-  portENTER_CRITICAL(&g_stateMux);
-  const uint8_t sanitized = (flags | kStatusReady) & ~kStatusReverseReq;
-  g_txState.statusFlags = sanitized;
-  portEXIT_CRITICAL(&g_stateMux);
-}
-
-void piCommsSetTelemetry(uint8_t telemetry) {
-  portENTER_CRITICAL(&g_stateMux);
-  g_txState.telemetry = telemetry;
+  g_rxState.framesVersionError = 0;
   portEXIT_CRITICAL(&g_stateMux);
 }
 
@@ -403,47 +504,40 @@ void taskPiCommsRx(void* parameter) {
           continue;
         }
 
+        const uint8_t version = static_cast<uint8_t>((frame[1] >> 4) & 0x0F);
+        if (version != kProtocolVersion) {
+          portENTER_CRITICAL(&g_stateMux);
+          g_rxState.framesVersionError++;
+          portEXIT_CRITICAL(&g_stateMux);
+          logRxError(*cfg, "Version de protocolo no soportada", nowTick);
+          continue;
+        }
+
         PiRxState newState{};
         newState.hasFrame = true;
         newState.lastFrameTick = nowTick;
         newState.verFlags = frame[1];
         newState.steer = static_cast<int8_t>(frame[2]);
-        newState.accelRaw = static_cast<int8_t>(frame[3]);
-        newState.brake = frame[4];
+        newState.speedCmdCentiMps =
+            static_cast<uint16_t>(frame[3]) | static_cast<uint16_t>(frame[4]) << 8;
+        newState.brake = frame[5];
         newState.estop = (newState.verFlags & kCmdFlagEstop) != 0;
         newState.driveEnabled = (newState.verFlags & kCmdFlagDriveEnable) != 0;
-        newState.allowReverse = false;
-        newState.wantsReverse = false;
-        newState.reverseRequestActive = false;
-        newState.reverseAwaitingGrant = false;
-        newState.reverseGranted = false;
-        if (newState.accelRaw <= 0) {
-          newState.accelEffective = 0;
-        } else if (newState.accelRaw > 100) {
-          newState.accelEffective = 100;
-        } else {
-          newState.accelEffective = newState.accelRaw;
-        }
 
         portENTER_CRITICAL(&g_stateMux);
         g_rxState.hasFrame = newState.hasFrame;
         g_rxState.lastFrameTick = newState.lastFrameTick;
         g_rxState.verFlags = newState.verFlags;
         g_rxState.steer = newState.steer;
-        g_rxState.accelRaw = newState.accelRaw;
-        g_rxState.accelEffective = newState.accelEffective;
+        g_rxState.speedCmdCentiMps = newState.speedCmdCentiMps;
         g_rxState.estop = newState.estop;
         g_rxState.driveEnabled = newState.driveEnabled;
-        g_rxState.allowReverse = newState.allowReverse;
-        g_rxState.wantsReverse = newState.wantsReverse;
-        g_rxState.reverseRequestActive = newState.reverseRequestActive;
-        g_rxState.reverseAwaitingGrant = newState.reverseAwaitingGrant;
-        g_rxState.reverseGranted = newState.reverseGranted;
         g_rxState.brake = newState.brake;
         g_rxState.framesOk++;
         newState.framesOk = g_rxState.framesOk;
         newState.framesCrcError = g_rxState.framesCrcError;
         newState.framesMalformed = g_rxState.framesMalformed;
+        newState.framesVersionError = g_rxState.framesVersionError;
         portEXIT_CRITICAL(&g_stateMux);
 
         logRxFrame(*cfg, newState, nowTick);
@@ -467,24 +561,24 @@ void taskPiCommsTx(void* parameter) {
 
   while (true) {
     if (g_initialized) {
-      uint8_t status = 0;
-      uint8_t telemetryOverride = kTelemetryAuto;
-      portENTER_CRITICAL(&g_stateMux);
-      status = g_txState.statusFlags;
-      telemetryOverride = g_txState.telemetry;
-      portEXIT_CRITICAL(&g_stateMux);
-      status &= ~kStatusReverseReq;
-      const uint8_t telemetry =
-          (telemetryOverride == kTelemetryAuto) ? encodeTelemetryFromSpeed() : telemetryOverride;
+      const uint8_t status = encodeStatusFlags();
+      const uint16_t speedTelemetry = encodeSpeedTelemetryFromHall();
+      const int16_t steerTelemetry = encodeSteerTelemetryCentered();
+      const uint8_t brakePercent = encodeAppliedBrakePercent();
 
       uint8_t frame[kTxFrameSize];
       frame[0] = kHeaderTx;
       frame[1] = status;
-      frame[2] = telemetry;
-      frame[3] = crc8_maxim(frame, kTxFrameSize - 1);
+      frame[2] = static_cast<uint8_t>(speedTelemetry & 0xFFu);
+      frame[3] = static_cast<uint8_t>((speedTelemetry >> 8) & 0xFFu);
+      const uint16_t steerBits = static_cast<uint16_t>(steerTelemetry);
+      frame[4] = static_cast<uint8_t>(steerBits & 0xFFu);
+      frame[5] = static_cast<uint8_t>((steerBits >> 8) & 0xFFu);
+      frame[6] = brakePercent;
+      frame[7] = crc8_maxim(frame, kTxFrameSize - 1);
 
       uart_write_bytes(cfg->uartNum, reinterpret_cast<const char*>(frame), sizeof(frame));
-      logTxFrame(*cfg, status, telemetry, xTaskGetTickCount());
+      logTxFrame(*cfg, status, speedTelemetry, steerTelemetry, brakePercent, xTaskGetTickCount());
     }
 
     vTaskDelayUntil(&lastWake, period);

@@ -1,12 +1,14 @@
 # COMMS UART ESP32 <-> Raspberry Pi (estado real del firmware)
 
-Este documento describe lo que **hace hoy** el codigo en `src/pi_comms.cpp`,
-`src/quad_functions.cpp` y `src/pid.cpp`.
+Este documento describe el comportamiento actual implementado en:
+- `src/pi_comms.cpp`
+- `src/quad_functions.cpp`
+- `src/pid.cpp`
 
 > Referencia de protocolo (espejo): `ESP32_UART_PROTOCOL.md`  
 > Fuente de verdad documental: `aeye-ros-workspace/src/sensores/ESP32_UART_PROTOCOL.md`.
 
-## 1. Configuracion UART usada por el proyecto
+## 1. UART configurada
 
 Definida en `src/main.cpp` (`g_piCommsConfig`):
 
@@ -15,19 +17,22 @@ Definida en `src/main.cpp` (`g_piCommsConfig`):
 - Baudrate: `460800`
 - Formato: `8N1`, sin paridad, sin flow control
 - Buffer driver: RX `512`, TX `256`
-- Tarea RX: periodo `1 ms`, `uart_read_bytes` con timeout `2 ms`
-- Tarea TX: periodo `10 ms` (100 Hz)
+- RX task: periodo `1 ms`, `uart_read_bytes` timeout `2 ms`
+- TX task: periodo `10 ms` (100 Hz)
 
-## 2. Formato de tramas
+## 2. Tramas del protocolo
 
-### 2.1 Pi -> ESP32 (6 bytes)
+### 2.1 Pi -> ESP32 (7 bytes)
 
 - Byte 0: `0xAA`
-- Byte 1: `ver_flags` (nibble alto version, nibble bajo flags)
+- Byte 1: `ver_flags` (nibble alto versión, nibble bajo flags)
 - Byte 2: `steer_i8` (`-100..100` esperado)
-- Byte 3: `accel_i8` (setpoint de velocidad normalizado)
-- Byte 4: `brake_u8` (`0..100` esperado)
-- Byte 5: `crc8` (CRC-8 Dallas/Maxim sobre bytes 0..4)
+- Byte 3: `speed_cmd_lsb`
+- Byte 4: `speed_cmd_msb`
+- Byte 5: `brake_u8` (`0..100` esperado)
+- Byte 6: `crc8` (CRC-8 Dallas/Maxim sobre bytes `0..5`)
+
+`speed_cmd_u16` usa **little-endian** y representa `m/s x100`.
 
 Flags en `ver_flags` (nibble bajo):
 
@@ -36,143 +41,105 @@ Flags en `ver_flags` (nibble bajo):
 - Bit 2: reservado
 - Bit 3: reservado
 
-### 2.2 ESP32 -> Pi (4 bytes)
+Versión esperada en firmware: `2`.
+
+### 2.2 ESP32 -> Pi (8 bytes)
 
 - Byte 0: `0x55`
 - Byte 1: `status_flags`
-- Byte 2: `telemetry_u8` (velocidad)
-- Byte 3: `crc8` (CRC-8 Dallas/Maxim sobre bytes 0..2)
+- Byte 2: `speed_meas_lsb`
+- Byte 3: `speed_meas_msb`
+- Byte 4: `steer_meas_lsb`
+- Byte 5: `steer_meas_msb`
+- Byte 6: `brake_applied_u8`
+- Byte 7: `crc8` (CRC-8 Dallas/Maxim sobre bytes `0..6`)
 
-Status bits:
+Campos:
+
+- `speed_meas_u16` (LE): `m/s x100` (Hall)
+  - `0xFFFF`: N/A (backend Hall no válido)
+- `steer_meas_i16` (LE): ángulo real centrado (`deg x100`)
+  - `-32768`: N/A (sensor/datos de dirección inválidos)
+- `brake_applied_u8`: freno realmente aplicado (`0..100`)
+
+`status_flags`:
 
 - Bit 0: `READY`
-- Bit 1: `FAULT`
-- Bit 2: `OVERCURRENT`
-- Bit 3: `REVERSE_REQ` (no usado en modo PID de velocidad actual)
+- Bit 1: `ESTOP_ACTIVE`
+- Bit 2: `FAILSAFE_ACTIVE`
+- Bit 3: `PI_FRESH`
+- Bit 4-5: `CONTROL_SOURCE`
+  - `00`: NONE
+  - `01`: PI
+  - `10`: RC
+  - `11`: TEL
+- Bit 6: `OVERSPEED_ACTIVE`
+- Bit 7: reservado
 
-Semantica de `telemetry_u8`:
+## 3. RX real (`taskPiCommsRx`)
 
-- `0..254`: velocidad actual en `km/h`
-- `255`: `N/A` (sin velocidad valida disponible)
+- Sincroniza por header `0xAA`.
+- Si aparece `0xAA` antes de completar 7 bytes, cuenta `framesMalformed` y resincroniza.
+- Si CRC falla, descarta trama y suma `framesCrcError`.
+- Si la versión (`ver_flags >> 4`) no es `2`, descarta trama y suma `framesVersionError`.
+- Si la trama es válida, actualiza snapshot RX y suma `framesOk`.
 
-## 3. Comportamiento RX real (`taskPiCommsRx`)
+Snapshot RX expuesto (`PiCommsRxSnapshot`):
 
-- Solo sincroniza con header `0xAA`.
-- Si aparece otro `0xAA` antes de completar 6 bytes, cuenta `framesMalformed` y resincroniza.
-- Si CRC falla, descarta trama y cuenta `framesCrcError`.
-- Si CRC es valido, actualiza snapshot (`PiCommsRxSnapshot`) y `framesOk`.
+- `steer`
+- `speedCmdCentiMps`
+- `brake`
+- `driveEnabled`
+- `estop`
+- contadores: `framesOk`, `framesCrcError`, `framesMalformed`, `framesVersionError`
 
-Campos derivados que calcula RX:
+## 4. TX real (`taskPiCommsTx`)
 
-- `accelEffective`:
-  - `accelRaw <= 0` -> `0`
-  - `1..100` -> pasa directo
-  - `>100` -> clamp a `100`
-- `wantsReverse/reverseRequestActive/reverseGranted` quedan en `false`
+Cada 10 ms envía frame `[0x55 ... crc]` con:
 
-## 4. Comportamiento TX real (`taskPiCommsTx`)
+- `speed_meas_u16`: desde `hallSpeedGetSnapshot().speedMps` (`m/s x100`)
+- `steer_meas_i16`: desde `pidGetRuntimeSnapshot().measuredDeg`, centrado con `steeringCalibrationSnapshot().adjustedCenterDeg`
+- `brake_applied_u8`: desde estado runtime de `taskQuadDriveControl`
+- `status_flags`: desde estado runtime de `taskQuadDriveControl`
 
-- Envia cada 10 ms: `[0x55, status, telemetry, crc]`.
-- `status` sale de `g_txState.statusFlags`, pero:
-  - `READY` queda forzado en `piCommsSetStatusFlags`.
-  - `REVERSE_REQ` se fuerza a `0` en cada envio.
-- `telemetry` por defecto inicia en `255` (`N/A`) y en ese modo se calcula
-  automaticamente desde el backend Hall (`GPIO26/27/14`):
-  - `0..254` cuando `speedKmh` Hall está disponible.
-  - `255` si el backend Hall no está listo.
-- Override manual opcional: si se llama `piCommsSetTelemetry(x)` con `x!=255`,
-  TX usa ese valor fijo y no la velocidad.
+## 5. Uso en control
 
-## 5. Como se usan los datos en control (importante)
+### 5.1 Tracción/freno (`taskQuadDriveControl`)
 
-### 5.1 Traccion/freno (`taskQuadDriveControl`)
+Un frame de Pi es fresco si edad `<= 120 ms`.
 
-Se considera frame de Pi "fresco" si su edad es <= `120 ms`.
+- Con Pi fresca y `ESTOP=1`: throttle inhibido + freno `100%`.
+- Con Pi fresca y `DRIVE_EN=1`: setpoint PI de velocidad vía `speed_cmd_u16` (`m/s x100`) clamped a `spid.max`.
+- Si falla feedback Hall en speed PID: modo failsafe (`throttle=0`).
+- Freno aplicado:
+  - Pi fresca: `max(brake_u8_pi, brake_overspeed_auto)`
+  - Pi no fresca: `max(brake_rc_manual, brake_overspeed_auto)`
 
-- Si Pi esta fresca y `ESTOP=1`:
-  - throttle inhibido (duty minimo)
-  - `commandValue=0`
-  - freno aplicado al `100%`
-- Si Pi esta fresca y `DRIVE_EN=1`:
-  - throttle usa PID de velocidad Hall con setpoint derivado de `accel_i8`:
-    - `accel<=0` -> `target=0 m/s`
-    - `1..100` -> `target=(accel/100)*max_speed_mps` (default `4.17`, equivalente a `15 km/h`)
-  - si falla feedback Hall, el controlador entra en fail-safe: `throttle=0` y sin freno automatico adicional
-- Si Pi esta fresca:
-  - el freno aplicado se arbitra como:
-    - `brake = max(brake_u8_pi, brake_overspeed_auto)`
-    - `brake_overspeed_auto` solo aplica en modo `OVERSPEED` del speed PID y se filtra con `deadband + hold + slew` para reducir oscilacion del servo hidraulico
-    - en `ESTOP`, freno forzado a `100%`
-- Si Pi NO esta fresca:
-  - el sistema cae a control RC para traccion y freno
-  - en RC fresco, la traccion tambien usa speed PID:
-    - `rc_throttle<=0` -> `target=0 m/s`
-    - `1..100` -> `target=(rc/100)*max_speed_mps` (lineal, default `4.17`)
-  - el freno RC manual (throttle negativo bajo umbral) se mezcla con overspeed: `max(brake_rc, brake_overspeed_auto)`
+### 5.2 Dirección (`taskPidControl`)
 
-### 5.2 Direccion (`taskPidControl`)
+- Pi fresca (`<=120 ms`): dirección usa `piSnapshot.steer`
+- Pi no fresca: vuelve a RC
 
-- Si Pi esta fresca (<= `120 ms`), el PID usa `piSnapshot.steer`.
-- Si no, vuelve a steering de RC.
-- Hoy `steer` de Pi no depende de `DRIVE_EN` ni de `ESTOP`.
+## 6. Failsafe de enlace
 
-### 5.3 Prioridad PI vs RC durante pruebas
+Al perder frescura de trama Pi, el firmware deja de usar comandos Pi y vuelve a ruta RC/local según la lógica de `taskQuadDriveControl` y `taskPidControl`.
 
-Si llegan frames de Pi frescos (`<=120 ms`), el firmware prioriza entrada Pi:
-
-- Traccion: con `DRIVE_EN=1`, usa setpoint de velocidad de Pi (`accel_i8`).
-- Direccion: usa `steer` de Pi aunque `DRIVE_EN=0`.
-- Freno: con frame fresco, usa `max(brake_u8_pi, brake_overspeed_auto)`.
-
-Consecuencia practica:
-
-- Si una prueba en Raspberry transmite continuamente con `accel=0`, el vehiculo
-  puede quedar "sin acelerador manual" (RC) porque entra en control Pi.
-- Para pruebas con manejo manual, usar captura **solo RX** en Raspberry (no TX
-  hacia ESP32).
-
-## 6. Modo de prueba seguro (sin bloquear control manual)
-
-1. En Raspberry, detener el servicio de bridge:
-   - `sudo systemctl stop salus-ws.service`
-   - verificar: `systemctl is-active salus-ws.service` -> `inactive`
-2. Para evitar auto-reinicio durante pruebas:
-   - `sudo systemctl mask --runtime salus-ws.service`
-3. Correr prueba pasiva (solo lectura de `/dev/serial0`), sin enviar frames
-   `0xAA` a la ESP32.
-4. Al finalizar, restaurar servicio:
-   - `sudo systemctl unmask salus-ws.service`
-   - `sudo systemctl start salus-ws.service` (si corresponde)
-
-## 7. Failsafe real vs supuesto comun
-
-Lo que **si** ocurre al perder tramas frescas de Pi:
-
-- Se dejan de usar comandos Pi.
-- Drive/PID vuelven a RC cuando corresponde.
-
-Lo que **no** ocurre automaticamente en `pi_comms`:
-
-- No existe una rutina que fuerce globalmente `brake=100`, `drive_en=0` o
-  `steer=0` por timeout dentro del modulo UART.
-
-## 8. CRC usado
+## 7. CRC
 
 `crc8_maxim` en `src/pi_comms.cpp`:
 
 - Init: `0x00`
 - Polinomio: `0x31`
-- Procesamiento MSB-first (Dallas/Maxim)
+- Procesamiento: MSB-first
 
-## 9. Observabilidad
+## 8. Observabilidad
 
-Comandos Telnet utiles (`src/ota_telnet.cpp`):
+Telnet (`src/ota_telnet.cpp`):
 
-- `comms.status`: snapshot actual (edad de frame, flags, accel/brake efectivos,
-  contadores OK/CRC/malformed)
-- `comms.reset`: resetea contadores de RX
+- `comms.status`: snapshot RX actual (edad frame, flags, `speedCmd`, contadores)
+- `comms.reset`: resetea contadores RX
 
 ---
 
-Si cambias `PiCommsConfig`, `kPiSnapshotFreshTicks` o la logica de
+Si cambias `PiCommsConfig`, `kPiSnapshotFreshTicks` o la lógica de
 `taskQuadDriveControl/taskPidControl`, actualiza este archivo.

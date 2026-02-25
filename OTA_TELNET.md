@@ -131,7 +131,7 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low).
 - `spid.ff.grace <ms>`: tolerancia extra de feedback Hall durante arranque (`feedbackLaunchGraceMs`, default `1200`).
 - `spid.iunwind <gain>`: descarga del integrador en saturación (`anti-windup`, default `0.35`).
 - `spid.dfilter <hz>`: filtro del derivativo sobre medición Hall (default `3.0`).
-- `spid.max <mps>`: ajusta velocidad máxima mapeada desde `accel_i8` (default `4.17`, equivalente a `15 km/h`).
+- `spid.max <mps>`: ajusta velocidad máxima usada para clamp de setpoints remotos/RC (default `4.17`, equivalente a `15 km/h`).
 - `spid.brakecap <pct>`: tope de freno automático por overspeed (`0..100`, default `30`).
 - `spid.hys <mps>`: histéresis de salida de overspeed (default `0.3`).
 - `spid.brakeslewup <pctps>`: limita subida del freno automático (`%/s`, default `35`).

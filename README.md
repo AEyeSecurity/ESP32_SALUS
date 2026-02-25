@@ -52,8 +52,8 @@ Troubleshooting OTA rapido:
 | `taskQuadDriveControl`   | `src/quad_functions.cpp` | 4096 (~16 KB)        | 4    | 1      | Notificacin RC (timeout 30 ms)             | `debug::kEnableDriveTask` (true) | Lazo de velocidad (m/s) con Hall, actualiza LEDC y mezcla freno Pi/overspeed. |
 | `taskRcMonitor`          | `src/fs_ia6.cpp`         | 2048 (~8 KB)         | 1    | 1      | 100 ms periodica (`vTaskDelay`)              | `debug::kEnableRcTask` (false) | Solo loguea el snapshot compartido; ideal para calibracion. |
 | `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~16 KB)        | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
-| `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~12 KB)        | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA`, mantiene `PiCommsRxSnapshot` y clampa `accel_i8` a `0..100`. |
-| `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~8 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status telemetry crc]`; en automático la telemetría queda en `255` (`N/A`). |
+| `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~12 KB)        | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA` v2 (7 bytes), valida versión/CRC y mantiene `PiCommsRxSnapshot` con `speed_cmd` en `m/s x100`. |
+| `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~8 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status speed steer brake crc]` (8 bytes) con velocidad Hall, ángulo centrado y flags de seguridad. |
 | `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Supervisor liviano sin lógica de comunicaciones (solo `vTaskDelay`). |
 
 > Nota: FreeRTOS en ESP32 interpreta el parametro `stackSize` en palabras de 32 bits. 4096 palabras equivalen a ~16 KB.
@@ -91,7 +91,7 @@ Troubleshooting OTA rapido:
 - Configuracion: `QuadDriveTaskConfig` agrupa la configuracion del LEDC de acelerador, los servos de freno y el flag `autoInitHardware` que llama `initQuadThrottle/Brake` al crear la tarea.
 - Disparo: espera notificaciones RC con `ulTaskNotifyTake` (timeout 30 ms) y utiliza `esp_timer_get_time` para medir la duracion de cada ciclo.
 - Flujo: selecciona fuente de setpoint para `speed_pid` segun prioridad:
-  - Pi fresca + `DRIVE_EN=1`: `accel_i8` -> objetivo `m/s`.
+  - Pi fresca + `DRIVE_EN=1`: `speed_cmd_u16` (`m/s x100`) -> objetivo `m/s`.
   - si Pi no esta fresca y RC esta fresco: `rc_throttle` -> objetivo `m/s` lineal (`0..100%` -> `0..4.17 m/s`).
 - En ambos casos ejecuta `speedPidCompute` (modos `NORMAL/OVERSPEED/FAILSAFE`) y aplica `quadThrottleUpdate` con salida PID.
 - Overspeed: cuando `speed > target`, corta throttle (`0`) y aplica freno automático proporcional limitado por `overspeedBrakeMaxPercent`, con `deadband + hold + slew` para reducir chatter del servo de freno.
@@ -113,18 +113,16 @@ Troubleshooting OTA rapido:
 
 ## Comunicaciones UART con Raspberry Pi
 
-- El enlace binario se implementa en `taskPiCommsRx`/`taskPiCommsTx` (`src/pi_comms.cpp`) y usa `GPIO3/GPIO1` a **460 800 bps**.  
-- `taskPiCommsRx` publica un `PiCommsRxSnapshot` con `steer`, `accelRaw`, `accelEffective`, `brake`, `estop`, `driveEnabled` y flags de reversa (actualmente en `false` por protocolo).  
-- `taskPiCommsTx` mantiene `REVERSE_REQ` en `0` en el modo PID de velocidad actual.  
-- `taskPiCommsTx` codifica `telemetry_u8` como velocidad:
-  - `0..254` = `km/h` estimados por backend Hall
-  - `255` = `N/A` si el backend Hall no está listo
-  - override manual si `piCommsSetTelemetry(x)` se usa con `x!=255`.
+- El enlace binario se implementa en `taskPiCommsRx`/`taskPiCommsTx` (`src/pi_comms.cpp`) y usa `GPIO3/GPIO1` a **460 800 bps**.  
+- `taskPiCommsRx` procesa frame v2 de 7 bytes (`0xAA ... crc`) y publica `PiCommsRxSnapshot` con `steer`, `speedCmdCentiMps`, `brake`, `estop`, `driveEnabled` y contadores (`ok/crc/malformed/verErr`).  
+- `taskPiCommsTx` envía frame v2 de 8 bytes (`0x55 ... crc`) con:
+  - `speed_meas_u16` (`m/s x100`, Hall; `0xFFFF` si N/A),
+  - `steer_meas_i16` (`deg x100` centrado; `-32768` si N/A),
+  - `brake_applied_u8` real,
+  - `status_flags` (`READY`, `ESTOP_ACTIVE`, `FAILSAFE_ACTIVE`, `PI_FRESH`, `CONTROL_SOURCE`, `OVERSPEED_ACTIVE`).
 - `taskQuadDriveControl` consume el snapshot:  
   - `ESTOP` → freno completo y duty mínimo.  
-  - `DRIVE_EN` + `accel_i8` -> setpoint de velocidad (`m/s`) para PID Hall:
-    - `accel<=0` -> `0 m/s`
-    - `1..100` -> `target=(accel/100)*max_speed_mps` (default `4.17`, equivalente a `15 km/h`)  
+  - `DRIVE_EN` + `speed_cmd_u16` -> setpoint de velocidad (`m/s`) para PID Hall, clamped a `spid.max`.  
   - con frame fresco de Pi, freno aplicado = `max(brake_u8_pi, brake_overspeed_auto)` (y `ESTOP` fuerza 100 %).  
 - `taskPidControl` usa `steer` de Pi cuando el frame está fresco (<=120 ms); si no, vuelve a steering RC.  
 - Para inspeccionar el estado usa Telnet (`comms.status`, `comms.reset`) o activa `debug::kLogPiComms`.  
@@ -134,7 +132,7 @@ Troubleshooting OTA rapido:
 
 - Backend activo: lectura Hall por ISR en IRAM sobre `GPIO26`, `GPIO27`, `GPIO14` (active-low).
 - Parámetros actuales: `motorPoles=8`, `gearReduction=10.0`, `wheelDiameterM=0.45`, `rpmTimeoutUs=500000`.
-- `telemetry_u8` en modo automático se calcula desde `speedKmh` Hall (redondeado y clamped a `0..254`).
+- La telemetría de velocidad UART se reporta como `speed_meas_u16` en `m/s x100` desde Hall.
 - Comandos Telnet:
   - `speed.status` muestra snapshot Hall (`km/h`, `m/s`) y contadores ISR/validación.
   - `speed.reset` reinicia contadores Hall.

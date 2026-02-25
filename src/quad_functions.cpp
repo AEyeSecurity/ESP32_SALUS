@@ -49,6 +49,8 @@ volatile bool g_rcNeutralOffsetCalEnabled = true;
 volatile bool g_rcNeutralOffsetCalAllowUpdate = true;
 QuadDriveRcDebugSnapshot g_rcDebugSnapshot{};
 portMUX_TYPE g_driveRcDebugMux = portMUX_INITIALIZER_UNLOCKED;
+QuadDriveRuntimeSnapshot g_driveRuntimeSnapshot{};
+portMUX_TYPE g_driveRuntimeMux = portMUX_INITIALIZER_UNLOCKED;
 
 uint32_t computeMaxDuty(uint8_t resolutionBits) {
   if (resolutionBits == 0) {
@@ -204,15 +206,16 @@ enum class RcDriveInputState : uint8_t {
   kManualBrake,
 };
 
-float mapAccelToSpeedTargetMps(int accelRaw) {
-  if (accelRaw <= 0) {
+float mapPiSpeedCmdToTargetMps(uint16_t speedCmdCentiMps) {
+  float targetMps = static_cast<float>(speedCmdCentiMps) / 100.0f;
+  const float maxSpeed = speedPidGetMaxSpeedMps();
+  if (targetMps < 0.0f) {
     return 0.0f;
   }
-  if (accelRaw > 100) {
-    accelRaw = 100;
+  if (targetMps > maxSpeed) {
+    return maxSpeed;
   }
-  const float maxSpeed = speedPidGetMaxSpeedMps();
-  return (static_cast<float>(accelRaw) * maxSpeed) / 100.0f;
+  return targetMps;
 }
 
 float mapRcToSpeedTargetMps(int rcValue) {
@@ -285,6 +288,26 @@ void setRcDebugSnapshot(const QuadDriveRcDebugSnapshot& snapshot) {
   portENTER_CRITICAL(&g_driveRcDebugMux);
   g_rcDebugSnapshot = snapshot;
   portEXIT_CRITICAL(&g_driveRcDebugMux);
+}
+
+QuadDriveControlSource mapSpeedControlSourceToRuntime(SpeedControlSource source) {
+  switch (source) {
+    case SpeedControlSource::kPiSpeedPid:
+      return QuadDriveControlSource::kPi;
+    case SpeedControlSource::kRcSpeedPid:
+      return QuadDriveControlSource::kRc;
+    case SpeedControlSource::kTelnetSpeedPid:
+      return QuadDriveControlSource::kTelnet;
+    case SpeedControlSource::kNone:
+    default:
+      return QuadDriveControlSource::kNone;
+  }
+}
+
+void setDriveRuntimeSnapshot(const QuadDriveRuntimeSnapshot& snapshot) {
+  portENTER_CRITICAL(&g_driveRuntimeMux);
+  g_driveRuntimeSnapshot = snapshot;
+  portEXIT_CRITICAL(&g_driveRuntimeMux);
 }
 
 uint8_t clampPercentFromFloat(float percent) {
@@ -544,6 +567,13 @@ bool quadDriveGetRcDebugSnapshot(QuadDriveRcDebugSnapshot& out) {
   return true;
 }
 
+bool quadDriveGetRuntimeSnapshot(QuadDriveRuntimeSnapshot& out) {
+  portENTER_CRITICAL(&g_driveRuntimeMux);
+  out = g_driveRuntimeSnapshot;
+  portEXIT_CRITICAL(&g_driveRuntimeMux);
+  return true;
+}
+
 bool quadDriveSetRcNeutralCalEnabled(bool enabled) {
   g_rcNeutralOffsetCalEnabled = enabled;
   if (!enabled) {
@@ -615,6 +645,16 @@ void taskQuadDriveControl(void* parameter) {
   if (!rcRegisterConsumer(self)) {
     broadcastIf(true, "[DRIVE] No se pudo registrar la tarea para notificaciones RC");
   }
+
+  QuadDriveRuntimeSnapshot initialRuntime{};
+  initialRuntime.valid = true;
+  initialRuntime.source = QuadDriveControlSource::kNone;
+  initialRuntime.piFresh = false;
+  initialRuntime.piEstopActive = false;
+  initialRuntime.speedPidFailsafe = false;
+  initialRuntime.speedPidOverspeed = false;
+  initialRuntime.appliedBrakePercent = 0;
+  setDriveRuntimeSnapshot(initialRuntime);
 
   for (;;) {
     const int64_t iterationStartUs = esp_timer_get_time();
@@ -820,7 +860,7 @@ void taskQuadDriveControl(void* parameter) {
         speedLastTransitionsOk = 0;
       }
       if (speedControlSource == SpeedControlSource::kPiSpeedPid) {
-        speedTargetRawMps = mapAccelToSpeedTargetMps(piSnapshot.accelRaw);
+        speedTargetRawMps = mapPiSpeedCmdToTargetMps(piSnapshot.speedCmdCentiMps);
       } else if (speedControlSource == SpeedControlSource::kRcSpeedPid) {
         const float rcTargetInstantMps =
             rcUsingLatchThisCycle ? rcLastTargetRawMps : mapRcToSpeedTargetMps(rcValue);
@@ -999,6 +1039,16 @@ void taskQuadDriveControl(void* parameter) {
       throttleInhibit = true;
     }
     quadBrakeApplyPercent(appliedBrakePercent);
+
+    QuadDriveRuntimeSnapshot driveRuntime{};
+    driveRuntime.valid = true;
+    driveRuntime.source = mapSpeedControlSourceToRuntime(speedControlSource);
+    driveRuntime.piFresh = piFresh;
+    driveRuntime.piEstopActive = piEstopActive;
+    driveRuntime.speedPidFailsafe = speedPidFailsafe;
+    driveRuntime.speedPidOverspeed = speedPidOverspeed;
+    driveRuntime.appliedBrakePercent = appliedBrakePercent;
+    setDriveRuntimeSnapshot(driveRuntime);
 
     int duty = 0;
     if (throttleInhibit) {

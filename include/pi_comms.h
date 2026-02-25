@@ -26,26 +26,19 @@ struct PiCommsRxSnapshot {
   TickType_t lastFrameTick;
   uint8_t verFlags;
   int8_t steer;
-  int8_t accelRaw;
-  int8_t accelEffective;
+  uint16_t speedCmdCentiMps;
   uint8_t brake;
   bool driveEnabled;
   bool estop;
-  bool allowReverse;
-  bool wantsReverse;
-  bool reverseRequestActive;
-  bool reverseAwaitingGrant;
-  bool reverseGranted;
   uint32_t framesOk;
   uint32_t framesCrcError;
   uint32_t framesMalformed;
+  uint32_t framesVersionError;
 };
 
 bool piCommsInit(const PiCommsConfig& config);
 bool piCommsGetRxSnapshot(PiCommsRxSnapshot& snapshot);
 void piCommsResetStats();
-void piCommsSetStatusFlags(uint8_t flags);
-void piCommsSetTelemetry(uint8_t telemetry);
 
 void taskPiCommsRx(void* parameter);
 void taskPiCommsTx(void* parameter);

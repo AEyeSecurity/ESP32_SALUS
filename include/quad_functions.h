@@ -63,6 +63,23 @@ struct QuadDriveRcDebugSnapshot {
   float rcTargetShapedMps;
 };
 
+enum class QuadDriveControlSource : uint8_t {
+  kNone = 0,
+  kPi = 1,
+  kRc = 2,
+  kTelnet = 3,
+};
+
+struct QuadDriveRuntimeSnapshot {
+  bool valid;
+  QuadDriveControlSource source;
+  bool piFresh;
+  bool piEstopActive;
+  bool speedPidFailsafe;
+  bool speedPidOverspeed;
+  uint8_t appliedBrakePercent;
+};
+
 void taskQuadDriveControl(void* parameter);
 bool quadDriveSetLogEnabled(bool enabled);
 bool quadDriveGetLogEnabled(bool& enabledOut);
@@ -71,6 +88,7 @@ bool quadDriveGetPidTraceConfig(bool& enabledOut, TickType_t& periodTicksOut);
 bool quadDriveSetSpeedTargetOverride(bool enabled, float targetMps);
 bool quadDriveGetSpeedTargetOverride(bool& enabledOut, float& targetMpsOut);
 bool quadDriveGetRcDebugSnapshot(QuadDriveRcDebugSnapshot& out);
+bool quadDriveGetRuntimeSnapshot(QuadDriveRuntimeSnapshot& out);
 bool quadDriveSetRcNeutralCalEnabled(bool enabled);
 bool quadDriveGetRcNeutralCalEnabled(bool& enabledOut);
 
