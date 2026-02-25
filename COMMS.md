@@ -14,7 +14,7 @@ Definida en `src/main.cpp` (`g_piCommsConfig`):
 
 - Puerto: `UART_NUM_0`
 - Pines: `TX=GPIO1`, `RX=GPIO3`
-- Baudrate: `460800`
+- Baudrate: `115200`
 - Formato: `8N1`, sin paridad, sin flow control
 - Buffer driver: RX `512`, TX `256`
 - RX task: periodo `1 ms`, `uart_read_bytes` timeout `2 ms`

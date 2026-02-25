@@ -15,7 +15,7 @@ Documento canónico del protocolo UART entre ESP32 y Raspberry Pi para control y
 
 - Enlace: UART0 ESP32 <-> UART Raspberry Pi
 - Pines ESP32: `TX=GPIO1`, `RX=GPIO3`
-- Velocidad: `460800`
+- Velocidad: `115200`
 - Formato: `8N1`
 - Paridad: `none`
 - Flow control: `none`

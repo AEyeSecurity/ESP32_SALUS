@@ -14,7 +14,7 @@ Guía operativa del enlace UART entre ESP32 y Raspberry Pi con el protocolo actu
 | GND          | GND         | Masa común obligatoria   |
 
 - Nivel lógico: `3.3V`
-- Enlace: `460800`, `8N1`, sin flow control
+- Enlace: `115200`, `8N1`, sin flow control
 
 ## 2. Tareas FreeRTOS
 
@@ -94,7 +94,7 @@ Sentinels:
 
 ## 6. Prueba rápida
 
-1. Verificar cableado y `460800 8N1`.
+1. Verificar cableado y `115200 8N1`.
 2. Enviar frame Pi v2 válido (`ver=2`) y revisar `comms.status`.
 3. Confirmar que `speedCmd` refleja `m/s x100`.
 4. Observar telemetría UART de salida y validar:

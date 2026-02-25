@@ -204,7 +204,7 @@ static PiCommsConfig g_piCommsConfig = {
     UART_NUM_0,
     1,
     3,
-    460800,
+    115200,
     512,
     256,
     pdMS_TO_TICKS(1),
