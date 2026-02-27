@@ -11,6 +11,7 @@
 #include "hall_speed.h"
 #include "ota_telnet.h"
 #include "pi_comms.h"
+#include "system_diag.h"
 
 namespace {
 
@@ -639,6 +640,7 @@ void taskQuadDriveControl(void* parameter) {
   if (expectedPeriodSeconds <= 0.0f) {
     expectedPeriodSeconds = 0.001f;
   }
+  const uint32_t expectedPeriodUs = static_cast<uint32_t>(expectedPeriodSeconds * 1000000.0f + 0.5f);
   const float dtOverrunThreshold = expectedPeriodSeconds + 0.010f;
 
   TaskHandle_t self = xTaskGetCurrentTaskHandle();
@@ -662,7 +664,11 @@ void taskQuadDriveControl(void* parameter) {
     (void)notificationCount;
     const TickType_t sampleTick = xTaskGetTickCount();
 
-    float dtSeconds = static_cast<float>(iterationStartUs - lastLoopUs) * 1e-6f;
+    uint32_t cycleUs = 0;
+    if (iterationStartUs > lastLoopUs) {
+      cycleUs = static_cast<uint32_t>(iterationStartUs - lastLoopUs);
+    }
+    float dtSeconds = static_cast<float>(cycleUs) * 1e-6f;
     lastLoopUs = iterationStartUs;
     if (!isfinite(dtSeconds) || dtSeconds <= 0.0f || dtSeconds > 1.0f) {
       dtSeconds = expectedPeriodSeconds;
@@ -1422,5 +1428,8 @@ void taskQuadDriveControl(void* parameter) {
         lastPerfLog = sampleTick;
       }
     }
+
+    const bool overrun = cycleUs > expectedPeriodUs;
+    systemDiagReportLoop(SystemDiagTaskId::kDrive, cycleUs, expectedPeriodUs, overrun, notificationCount == 0);
   }
 }

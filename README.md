@@ -138,12 +138,16 @@ Troubleshooting OTA rapido:
   - `speed.reset` reinicia contadores Hall.
   - `speed.stream on [ms]` / `speed.stream off` habilita stream periódico por Telnet.
   - `speed.uart` responde `N/A source=hall` (ya no existe backend UART de velocidad).
+  - `sys.rt`, `sys.stack`, `sys.jitter on [ms]|off`, `sys.reset [keep|full]` exponen métricas RT/stack y permiten resetear acumulados por etapa.
   - `pid.status`, `pid.deadband`, `pid.minactive`, `pid.stream on [ms]` / `pid.stream off` permiten debug/tuning del PID de direccion en vivo.
   - `spid.status`, `spid.set`, `spid.kp/ki/kd`, `spid.ramp`, `spid.minthrottle`, `spid.thslewup`, `spid.thslewdown`, `spid.minth.spd`, `spid.launchwin`, `spid.iunwind`, `spid.dfilter`, `spid.max`, `spid.brakecap`, `spid.hys`, `spid.brakeslewup`, `spid.brakeslewdown`, `spid.brakehold`, `spid.brakedb`, `spid.target`, `spid.save`, `spid.reset` ajustan PID de velocidad (incluye `p/i/d`, salida saturada/no saturada, launch-assist controlado y persistencia NVS `speed_pid` `ver=3`).
   - `spid.stream on [ms]` / `spid.stream off` permite monitoreo continuo de estado/tuning PID.
   - `drive.log on|off` habilita/deshabilita logs `[DRIVE]` base.
   - `drive.log pid on [ms] | drive.log pid off` habilita/deshabilita trace forense periódico `[DRIVE][PIDTRACE]` para analizar estabilidad de velocidad y autofrenado (`target`, `speed`, `PWM`, `P/I/D`, `throttleRaw/Filt`, `launchAssistActive`, `throttleSaturated`, `integratorClamped`, `brakeA_pct`, `brakeB_pct`, `failsafe/overspeed/inhibit`).
+    Operación normal recomendada: mantener `drive.log pid off` (el trace se reinicia a OFF al cerrar sesión Telnet).
   - `python3 tools/tests/speed_pid_hil.py --mode interactive` ejecuta pruebas HIL guiadas del PID de velocidad (evidencia en `artifacts/speed_pid_test_report.json` y `.md`).
+  - `python3 tools/tests/system_rt_hil.py --host <esp32-host>` ejecuta captura estructurada de `TC-RT-01/TC-RT-02` usando `sys.rt/sys.stack/sys.jitter` y `sys.reset`.
+    El runner valida por defecto `PiUartRx` con umbral realista `p95<=800us`, `p99<=2000us` (ajustable con `--pi-rx-p95-max-us` y `--pi-rx-p99-max-us`).
 
 ### `loop()` (src/main.cpp)
 - Corre en el contexto de Arduino (core 1).

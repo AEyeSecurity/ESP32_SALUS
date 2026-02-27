@@ -304,6 +304,41 @@ _COMMANDS: List[CommandDefinition] = [
         poll_after=["comms.status"],
     ),
     CommandDefinition(
+        id="sys.rt",
+        label="RT snapshot",
+        group="sys",
+        template="sys.rt",
+    ),
+    CommandDefinition(
+        id="sys.stack",
+        label="Stack snapshot",
+        group="sys",
+        template="sys.stack",
+    ),
+    CommandDefinition(
+        id="sys.jitter.on",
+        label="Jitter stream ON",
+        group="sys",
+        args=[_arg("period_ms", "int", "Periodo (ms)", required=False, min_value=50, max_value=5000, step=10, default=500)],
+        poll_after=["sys.rt"],
+    ),
+    CommandDefinition(
+        id="sys.jitter.off",
+        label="Jitter stream OFF",
+        group="sys",
+        template="sys.jitter off",
+        poll_after=["sys.rt"],
+    ),
+    CommandDefinition(
+        id="sys.reset",
+        label="Reset métricas SYS",
+        group="sys",
+        template="sys.reset keep",
+        requires_confirmation=True,
+        confirm_message="Reiniciará los acumulados de diagnóstico RT/stack.",
+        poll_after=["sys.rt", "sys.stack"],
+    ),
+    CommandDefinition(
         id="drive.log",
         label="Estado drive.log",
         group="drive",
@@ -374,6 +409,12 @@ def render_command(command_id: str, args: Dict[str, Any]) -> str:
             return "spid.stream on"
         return "spid.stream on %s" % _fmt_number(period)
 
+    if command_id == "sys.jitter.on":
+        period = args.get("period_ms")
+        if period in (None, ""):
+            return "sys.jitter on"
+        return "sys.jitter on %s" % _fmt_number(period)
+
     if not cmd.template:
         raise ValueError("Command has no template: %s" % command_id)
 
@@ -402,6 +443,7 @@ def bootstrap_commands() -> List[str]:
         "spid.status",
         "comms.status",
         "speed.status",
+        "sys.rt",
         "drive.log",
     ]
 

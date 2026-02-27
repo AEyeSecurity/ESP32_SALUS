@@ -2,10 +2,13 @@
 
 #include <WiFi.h>
 #include <ArduinoOTA.h>
+#include <esp_timer.h>
 
 #include <ctype.h>
 #include <string.h>
 #include <stdlib.h>
+
+#include <freertos/queue.h>
 
 #include "steering_calibration.h"
 #include "pi_comms.h"
@@ -13,6 +16,7 @@
 #include "hall_speed.h"
 #include "speed_pid.h"
 #include "quad_functions.h"
+#include "system_diag.h"
 
 #ifndef WIFI_STA_SSID
 #define WIFI_STA_SSID "TU_SSID"
@@ -59,8 +63,15 @@ constexpr int kDrivePidTraceMaxPeriodMs = 1000;
 constexpr TickType_t kDriveRcStreamDefaultPeriod = pdMS_TO_TICKS(100);
 constexpr int kDriveRcStreamMinPeriodMs = 50;
 constexpr int kDriveRcStreamMaxPeriodMs = 1000;
+constexpr TickType_t kSystemJitterDefaultPeriod = pdMS_TO_TICKS(500);
+constexpr int kSystemJitterMinPeriodMs = 50;
+constexpr int kSystemJitterMaxPeriodMs = 5000;
 constexpr TickType_t kTelnetIdleTimeout = pdMS_TO_TICKS(300000);
 constexpr bool kFocusedControlLogsOnly = true;
+constexpr size_t kTelnetLogQueueLength = 64;
+constexpr size_t kTelnetLogMessageMaxLen = 256;
+constexpr size_t kTelnetDrainMaxMessagesPerCycle = 4;
+constexpr uint32_t kTelnetDrainTimeBudgetUs = 800;
 
 enum class NetworkMode {
   kUnknown,
@@ -68,8 +79,16 @@ enum class NetworkMode {
   kAp,
 };
 
+struct TelnetLogMessage {
+  char text[kTelnetLogMessageMaxLen];
+};
+
 WiFiServer g_telnetServer(kTelnetPort);
 WiFiClient g_telnetClient;
+QueueHandle_t g_telnetLogQueue = nullptr;
+TaskHandle_t g_otaTaskHandleRuntime = nullptr;
+portMUX_TYPE g_telnetStatsMux = portMUX_INITIALIZER_UNLOCKED;
+uint32_t g_telnetLogDropCount = 0;
 String g_telnetCommandBuffer;
 NetworkMode g_networkMode = NetworkMode::kUnknown;
 String g_networkSsid;
@@ -108,6 +127,87 @@ void updateNetworkState(NetworkMode mode, const String& ssid, const IPAddress& i
   g_networkIp = ip;
 }
 
+bool isCurrentTaskOtaTelnet() {
+  return g_otaTaskHandleRuntime != nullptr && xTaskGetCurrentTaskHandle() == g_otaTaskHandleRuntime;
+}
+
+uint32_t telnetLogDropCount() {
+  uint32_t out = 0;
+  portENTER_CRITICAL(&g_telnetStatsMux);
+  out = g_telnetLogDropCount;
+  portEXIT_CRITICAL(&g_telnetStatsMux);
+  return out;
+}
+
+void incrementTelnetLogDropCount() {
+  portENTER_CRITICAL(&g_telnetStatsMux);
+  g_telnetLogDropCount++;
+  portEXIT_CRITICAL(&g_telnetStatsMux);
+}
+
+size_t telnetQueueDepth() {
+  if (g_telnetLogQueue == nullptr) {
+    return 0;
+  }
+  return static_cast<size_t>(uxQueueMessagesWaiting(g_telnetLogQueue));
+}
+
+void clearTelnetLogQueue() {
+  if (g_telnetLogQueue == nullptr) {
+    return;
+  }
+  TelnetLogMessage dropped{};
+  while (xQueueReceive(g_telnetLogQueue, &dropped, 0) == pdTRUE) {
+  }
+}
+
+bool sendTelnetDirect(const String& message) {
+  if (!(g_telnetClient && g_telnetClient.connected())) {
+    return false;
+  }
+  g_telnetClient.println(message);
+  return true;
+}
+
+bool enqueueTelnetLog(const String& message) {
+  if (g_telnetLogQueue == nullptr) {
+    return sendTelnetDirect(message);
+  }
+  TelnetLogMessage msg{};
+  message.toCharArray(msg.text, sizeof(msg.text));
+  if (xQueueSend(g_telnetLogQueue, &msg, 0) != pdTRUE) {
+    incrementTelnetLogDropCount();
+    return false;
+  }
+  return true;
+}
+
+void drainTelnetLogQueue(size_t maxMessages) {
+  if (g_telnetLogQueue == nullptr) {
+    return;
+  }
+  if (!(g_telnetClient && g_telnetClient.connected())) {
+    clearTelnetLogQueue();
+    return;
+  }
+  TelnetLogMessage msg{};
+  size_t drained = 0;
+  const int64_t startUs = esp_timer_get_time();
+  while (drained < maxMessages) {
+    if ((esp_timer_get_time() - startUs) >= kTelnetDrainTimeBudgetUs) {
+      break;
+    }
+    if (g_telnetClient.availableForWrite() <= 0) {
+      break;
+    }
+    if (xQueueReceive(g_telnetLogQueue, &msg, 0) != pdTRUE) {
+      break;
+    }
+    g_telnetClient.println(msg.text);
+    drained++;
+  }
+}
+
 void sendTelnet(const String& message) {
   EnviarMensajeTelnet(message);
 }
@@ -128,6 +228,10 @@ void resetTelnetSession() {
   if (g_telnetClient) {
     g_telnetClient.stop();
   }
+  clearTelnetLogQueue();
+  // Return to low-noise operation when a Telnet session ends.
+  quadDriveSetLogEnabled(false);
+  quadDriveSetPidTraceEnabled(false, kDrivePidTraceDefaultPeriod);
   g_telnetCommandBuffer = "";
   g_speedStreamEnabled = false;
   g_lastSpeedStreamTick = 0;
@@ -137,6 +241,7 @@ void resetTelnetSession() {
   g_lastSpeedPidStreamTick = 0;
   g_driveRcStreamEnabled = false;
   g_lastDriveRcStreamTick = 0;
+  systemDiagSetJitterStream(false, 1);
   g_telnetLastActivityTick = 0;
 }
 
@@ -148,7 +253,7 @@ void openTelnetSession(WiFiClient& incoming) {
   g_telnetClient.println("=== Servidor Telnet ESP32 ===");
   g_telnetClient.println("Conexion establecida correctamente");
   g_telnetClient.println(
-      "Comandos: steer.help | pid.help | spid.help | comms.status | speed.status | speed.reset | speed.stream | speed.uart | pid.stream | spid.stream | spid.target | drive.log | drive.rc.status | drive.rc.stream | net.status");
+      "Comandos: steer.help | pid.help | spid.help | comms.status | speed.status | speed.reset | speed.stream | speed.uart | pid.stream | spid.stream | spid.target | drive.log | drive.rc.status | drive.rc.stream | sys.rt | sys.stack | sys.jitter | sys.reset | net.status");
   reportNetworkStatus();
 }
 
@@ -476,6 +581,12 @@ void reportNetworkStatus() {
   msg += OTA_HOSTNAME;
   msg += " telnetPort=";
   msg += String(kTelnetPort);
+  msg += " logQ=";
+  msg += String(static_cast<uint32_t>(telnetQueueDepth()));
+  msg += "/";
+  msg += String(static_cast<uint32_t>(kTelnetLogQueueLength));
+  msg += " logDrop=";
+  msg += String(telnetLogDropCount());
   sendTelnet(msg);
 }
 
@@ -558,6 +669,109 @@ String buildSpeedStatusMessage() {
   msg += " wheelM=";
   msg += String(cfg.wheelDiameterM, 3);
   msg += "}";
+  return msg;
+}
+
+void reportSystemRtStatus() {
+  SystemDiagSnapshot snapshot{};
+  if (!systemDiagGetSnapshot(snapshot)) {
+    sendTelnet("[SYS][RT] N/A");
+    return;
+  }
+
+  String header = "[SYS][RT] tsMs=";
+  header += snapshot.timestampMs;
+  header += " tasks=";
+  header += snapshot.taskCount;
+  header += " worstJitterUs=";
+  header += snapshot.worstJitterUs;
+  header += " cpuStats=";
+  header += snapshot.cpuStatsEnabled ? "ON" : "OFF";
+  sendTelnet(header);
+
+  for (size_t i = 0; i < kSystemDiagTaskCount; ++i) {
+    const SystemDiagTaskSample& task = snapshot.tasks[i];
+    if (!task.registered) {
+      continue;
+    }
+    String line = "[SYS][RT] ";
+    line += task.name;
+    line += " core=";
+    line += task.core;
+    line += " prio=";
+    line += task.priority;
+    line += " loopUs=";
+    line += task.lastLoopUs;
+    line += " maxLoopUs=";
+    line += task.maxLoopUs;
+    line += " jitterUs=";
+    line += task.jitterUs;
+    line += " maxJitterUs=";
+    line += task.maxJitterUs;
+    line += " overrun=";
+    line += task.overrunCount;
+    line += " notifyTimeout=";
+    line += task.notifyTimeoutCount;
+    sendTelnet(line);
+  }
+}
+
+void reportSystemStackStatus() {
+  SystemDiagSnapshot snapshot{};
+  if (!systemDiagGetSnapshot(snapshot)) {
+    sendTelnet("[SYS][STACK] N/A");
+    return;
+  }
+
+  String header = "[SYS][STACK] tsMs=";
+  header += snapshot.timestampMs;
+  header += " tasks=";
+  header += snapshot.taskCount;
+  sendTelnet(header);
+
+  for (size_t i = 0; i < kSystemDiagTaskCount; ++i) {
+    const SystemDiagTaskSample& task = snapshot.tasks[i];
+    if (!task.registered) {
+      continue;
+    }
+    const uint32_t stackBytes = task.stackHighWaterWords * sizeof(StackType_t);
+    String line = "[SYS][STACK] ";
+    line += task.name;
+    line += " highWaterWords=";
+    line += task.stackHighWaterWords;
+    line += " highWaterBytes=";
+    line += stackBytes;
+    line += " core=";
+    line += task.core;
+    sendTelnet(line);
+  }
+}
+
+String buildSystemJitterSummary() {
+  SystemDiagSnapshot snapshot{};
+  if (!systemDiagGetSnapshot(snapshot)) {
+    return "[SYS][JITTER] N/A";
+  }
+
+  String msg = "[SYS][JITTER] tsMs=";
+  msg += snapshot.timestampMs;
+  msg += " worstMaxUs=";
+  msg += snapshot.worstJitterUs;
+  msg += " tasks=";
+  msg += snapshot.taskCount;
+
+  for (size_t i = 0; i < kSystemDiagTaskCount; ++i) {
+    const SystemDiagTaskSample& task = snapshot.tasks[i];
+    if (!task.registered) {
+      continue;
+    }
+    msg += " ";
+    msg += task.name;
+    msg += "=";
+    msg += task.jitterUs;
+    msg += "/";
+    msg += task.maxJitterUs;
+  }
   return msg;
 }
 
@@ -1769,6 +1983,109 @@ void handleTelnetCommand(String line) {
     return;
   }
 
+  if (command.equalsIgnoreCase("sys.rt")) {
+    reportSystemRtStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("sys.stack")) {
+    reportSystemStackStatus();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("sys.reset")) {
+    bool keepRegistration = true;
+    if (!args.isEmpty()) {
+      String normalized = args;
+      normalized.toLowerCase();
+      if (normalized == "full" || normalized == "all" || normalized == "0" || normalized == "false") {
+        keepRegistration = false;
+      } else if (normalized == "keep" || normalized == "1" || normalized == "true") {
+        keepRegistration = true;
+      } else {
+        sendTelnet("[SYS][RESET] Uso: sys.reset [keep|full]");
+        return;
+      }
+    }
+    if (!systemDiagResetStats(keepRegistration)) {
+      sendTelnet("[SYS][RESET] ERROR");
+      return;
+    }
+    String msg = "[SYS][RESET] OK keepRegistration=";
+    msg += keepRegistration ? "1" : "0";
+    sendTelnet(msg);
+    return;
+  }
+
+  if (command.equalsIgnoreCase("sys.jitter")) {
+    if (args.isEmpty()) {
+      bool enabled = false;
+      TickType_t periodTicks = kSystemJitterDefaultPeriod;
+      systemDiagGetJitterStreamConfig(enabled, periodTicks);
+      String msg = "[SYS][JITTER] ";
+      msg += enabled ? "ON" : "OFF";
+      msg += " periodo=";
+      msg += static_cast<uint32_t>(periodTicks * portTICK_PERIOD_MS);
+      msg += "ms";
+      sendTelnet(msg);
+      sendTelnet(buildSystemJitterSummary());
+      return;
+    }
+
+    String normalized = args;
+    normalized.toLowerCase();
+    if (normalized == "off" || normalized == "0" || normalized == "stop") {
+      if (!systemDiagSetJitterStream(false, 1)) {
+        sendTelnet("[SYS][JITTER] Error desactivando stream");
+        return;
+      }
+      sendTelnet("[SYS][JITTER] OFF");
+      return;
+    }
+
+    int periodMs = static_cast<int>(kSystemJitterDefaultPeriod * portTICK_PERIOD_MS);
+    bool hasPeriodArg = false;
+    String periodText;
+
+    if (normalized.startsWith("on")) {
+      periodText = args.substring(2);
+      periodText.trim();
+      hasPeriodArg = !periodText.isEmpty();
+    } else {
+      periodText = args;
+      hasPeriodArg = true;
+    }
+
+    if (hasPeriodArg) {
+      int parsedPeriod = 0;
+      if (!parseIntArg(periodText, parsedPeriod)) {
+        sendTelnet("[SYS][JITTER] Uso: sys.jitter on [ms] | sys.jitter off");
+        return;
+      }
+      if (parsedPeriod < kSystemJitterMinPeriodMs) {
+        parsedPeriod = kSystemJitterMinPeriodMs;
+      } else if (parsedPeriod > kSystemJitterMaxPeriodMs) {
+        parsedPeriod = kSystemJitterMaxPeriodMs;
+      }
+      periodMs = parsedPeriod;
+    }
+
+    TickType_t periodTicks = pdMS_TO_TICKS(periodMs);
+    if (periodTicks == 0) {
+      periodTicks = 1;
+    }
+    if (!systemDiagSetJitterStream(true, periodTicks)) {
+      sendTelnet("[SYS][JITTER] Error activando stream");
+      return;
+    }
+    String msg = "[SYS][JITTER] ON periodo=";
+    msg += periodMs;
+    msg += "ms";
+    sendTelnet(msg);
+    sendTelnet(buildSystemJitterSummary());
+    return;
+  }
+
   if (command.equalsIgnoreCase("net.status")) {
     reportNetworkStatus();
     return;
@@ -1894,15 +2211,23 @@ void InicializaOTA() {
 }
 
 void InicializaTelnet() {  // Inicia Telnet en puerto 23
+  if (g_telnetLogQueue == nullptr) {
+    g_telnetLogQueue = xQueueCreate(kTelnetLogQueueLength, sizeof(TelnetLogMessage));
+  }
+  portENTER_CRITICAL(&g_telnetStatsMux);
+  g_telnetLogDropCount = 0;
+  portEXIT_CRITICAL(&g_telnetStatsMux);
   g_telnetServer.begin();
   g_telnetServer.setNoDelay(true);
   delay(1000);  // Esperar a que se inicie el servidor
 }
 
 void EnviarMensajeTelnet(const String& txt) {  // Envia mensaje por Telnet
-  if (g_telnetClient && g_telnetClient.connected()) {
-    g_telnetClient.println(txt);
+  if (isCurrentTaskOtaTelnet()) {
+    sendTelnetDirect(txt);
+    return;
   }
+  (void)enqueueTelnetLog(txt);
 }
 
 void serialIf(bool enabled, const String& message) {
@@ -1927,15 +2252,25 @@ void broadcastIf(bool enabled, const String& message) {
 
 void taskOtaTelnet(void* parameter) {
   OtaTelnetTaskConfig* config = static_cast<OtaTelnetTaskConfig*>(parameter);
+  g_otaTaskHandleRuntime = xTaskGetCurrentTaskHandle();
   const TickType_t period = (config != nullptr) ? config->taskPeriod : pdMS_TO_TICKS(20);
+  const uint32_t expectedPeriodUs = static_cast<uint32_t>(period * portTICK_PERIOD_MS * 1000U);
   const TickType_t heartbeat = (config != nullptr) ? config->heartbeatInterval : pdMS_TO_TICKS(5000);
   const bool logHeartbeat = (config != nullptr) ? config->logHeartbeat : false;
   TickType_t lastWake = xTaskGetTickCount();
   TickType_t lastHeartbeat = lastWake;
+  int64_t lastIterationStartUs = esp_timer_get_time();
   for (;;) {
+    const int64_t iterationStartUs = esp_timer_get_time();
+    uint32_t cycleUs = 0;
+    if (iterationStartUs > lastIterationStartUs) {
+      cycleUs = static_cast<uint32_t>(iterationStartUs - lastIterationStartUs);
+    }
+    lastIterationStartUs = iterationStartUs;
     ArduinoOTA.handle();
     handleTelnetClient();
     processTelnetInput();
+    drainTelnetLogQueue(kTelnetDrainMaxMessagesPerCycle);
     if (g_speedStreamEnabled && g_telnetClient && g_telnetClient.connected()) {
       const TickType_t now = xTaskGetTickCount();
       if (g_lastSpeedStreamTick == 0 || (now - g_lastSpeedStreamTick) >= g_speedStreamPeriod) {
@@ -1964,10 +2299,18 @@ void taskOtaTelnet(void* parameter) {
         g_lastPidStreamTick = now;
       }
     }
+    if (g_telnetClient && g_telnetClient.connected()) {
+      const TickType_t now = xTaskGetTickCount();
+      if (systemDiagShouldEmitJitter(now)) {
+        sendTelnet(buildSystemJitterSummary());
+      }
+    }
     if (logHeartbeat && (xTaskGetTickCount() - lastHeartbeat >= heartbeat)) {
       EnviarMensajeTelnet("ESP32 activo - " + String(millis() / 1000) + "s");
       lastHeartbeat = xTaskGetTickCount();
     }
+    const bool overrun = cycleUs > expectedPeriodUs;
+    systemDiagReportLoop(SystemDiagTaskId::kOtaTelnet, cycleUs, expectedPeriodUs, overrun, false);
     vTaskDelayUntil(&lastWake, period);
   }
 }

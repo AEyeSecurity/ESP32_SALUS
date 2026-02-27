@@ -25,6 +25,7 @@ class TelnetUiStateStore:
             "spid": {},
             "speed": {},
             "comms": {},
+            "system": {},
             "drive_log": {},
             "streams": {
                 "speed": {"state": "OFF", "period_ms": None, "updated_at": None},
@@ -70,7 +71,7 @@ class TelnetUiStateStore:
                 "updated_at": now,
             }
 
-            if event.section in ("net", "steer", "pid", "spid", "speed", "comms", "drive_log"):
+            if event.section in ("net", "steer", "pid", "spid", "speed", "comms", "system", "drive_log"):
                 self._state[event.section] = section_payload
                 patch[event.section] = copy.deepcopy(section_payload)
 

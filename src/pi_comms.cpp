@@ -7,12 +7,15 @@
 #include <math.h>
 
 #include "esp_err.h"
+#include "esp_timer.h"
+#include "esp32-hal-timer.h"
 
 #include "hall_speed.h"
 #include "ota_telnet.h"
 #include "pid.h"
 #include "quad_functions.h"
 #include "steering_calibration.h"
+#include "system_diag.h"
 
 namespace {
 
@@ -21,6 +24,10 @@ constexpr uint8_t kHeaderTx = 0x55;
 constexpr size_t kRxFrameSize = 7;
 constexpr size_t kTxFrameSize = 8;
 constexpr uint8_t kProtocolVersion = 2;
+constexpr uint32_t kPiRxWakeTimeoutFactor = 4;
+constexpr uint8_t kPiRxWakeTimerIndex = 0;
+constexpr uint16_t kPiRxWakeTimerDivider = 80;  // 1 tick = 1 us (80 MHz / 80)
+constexpr size_t kPiRxReadChunkSize = 24;       // Bound RX parse work per 2ms cycle
 
 PiCommsConfig g_config{};
 bool g_initialized = false;
@@ -43,6 +50,9 @@ struct PiRxState {
 PiRxState g_rxState{};
 
 portMUX_TYPE g_stateMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE g_piRxWakeMux = portMUX_INITIALIZER_UNLOCKED;
+TaskHandle_t g_piRxWakeTaskHandle = nullptr;
+hw_timer_t* g_piRxWakeTimer = nullptr;
 
 constexpr uint8_t kCmdFlagEstop = 1 << 0;
 constexpr uint8_t kCmdFlagDriveEnable = 1 << 1;
@@ -388,6 +398,20 @@ void logTxFrame(const PiCommsConfig& cfg,
   s_lastLogTick = nowTick;
 }
 
+void IRAM_ATTR onPiRxWakeTimer() {
+  BaseType_t taskWoken = pdFALSE;
+  TaskHandle_t task = nullptr;
+  portENTER_CRITICAL_ISR(&g_piRxWakeMux);
+  task = g_piRxWakeTaskHandle;
+  portEXIT_CRITICAL_ISR(&g_piRxWakeMux);
+  if (task != nullptr) {
+    vTaskNotifyGiveFromISR(task, &taskWoken);
+    if (taskWoken == pdTRUE) {
+      portYIELD_FROM_ISR();
+    }
+  }
+}
+
 }  // namespace
 
 bool piCommsInit(const PiCommsConfig& config) {
@@ -464,12 +488,48 @@ void taskPiCommsRx(void* parameter) {
   }
 
   const TickType_t period = (cfg->rxTaskPeriod > 0) ? cfg->rxTaskPeriod : pdMS_TO_TICKS(1);
+  const uint32_t expectedPeriodUs = static_cast<uint32_t>(period * portTICK_PERIOD_MS * 1000U);
+  const uint32_t wakeTimeoutMs = static_cast<uint32_t>(period * portTICK_PERIOD_MS * kPiRxWakeTimeoutFactor);
+  TickType_t wakeTimeoutTicks = pdMS_TO_TICKS(wakeTimeoutMs);
+  if (wakeTimeoutTicks == 0) {
+    wakeTimeoutTicks = 1;
+  }
   FrameParser parser;
-  TickType_t lastWake = xTaskGetTickCount();
+  const TaskHandle_t selfHandle = xTaskGetCurrentTaskHandle();
+  int64_t lastIterationStartUs = esp_timer_get_time();
 
-  std::array<uint8_t, 64> chunk{};
+  bool usePeriodicWakeTimer = false;
+  portENTER_CRITICAL(&g_piRxWakeMux);
+  if (g_piRxWakeTimer == nullptr) {
+    g_piRxWakeTimer = timerBegin(kPiRxWakeTimerIndex, kPiRxWakeTimerDivider, true);
+    if (g_piRxWakeTimer != nullptr) {
+      timerAttachInterrupt(g_piRxWakeTimer, &onPiRxWakeTimer, true);
+    }
+  }
+  if (g_piRxWakeTimer != nullptr) {
+    g_piRxWakeTaskHandle = selfHandle;
+    timerAlarmDisable(g_piRxWakeTimer);
+    timerAlarmWrite(g_piRxWakeTimer, expectedPeriodUs, true);
+    timerAlarmEnable(g_piRxWakeTimer);
+    usePeriodicWakeTimer = true;
+  }
+  portEXIT_CRITICAL(&g_piRxWakeMux);
+
+  std::array<uint8_t, kPiRxReadChunkSize> chunk{};
 
   while (true) {
+    bool notifyTimeout = false;
+    if (usePeriodicWakeTimer) {
+      const uint32_t notifyCount = ulTaskNotifyTake(pdTRUE, wakeTimeoutTicks);
+      notifyTimeout = (notifyCount == 0);
+    }
+
+    const int64_t iterationStartUs = esp_timer_get_time();
+    uint32_t cycleUs = 0;
+    if (iterationStartUs > lastIterationStartUs) {
+      cycleUs = static_cast<uint32_t>(iterationStartUs - lastIterationStartUs);
+    }
+    lastIterationStartUs = iterationStartUs;
     const int len = g_initialized
                         ? uart_read_bytes(cfg->uartNum, chunk.data(), chunk.size(), cfg->rxReadTimeout)
                         : 0;
@@ -544,7 +604,11 @@ void taskPiCommsRx(void* parameter) {
       }
     }
 
-    vTaskDelayUntil(&lastWake, period);
+    const bool overrun = cycleUs > expectedPeriodUs;
+    systemDiagReportLoop(SystemDiagTaskId::kPiUartRx, cycleUs, expectedPeriodUs, overrun, notifyTimeout);
+    if (!usePeriodicWakeTimer) {
+      vTaskDelay(period);
+    }
   }
 }
 
@@ -557,9 +621,17 @@ void taskPiCommsTx(void* parameter) {
   }
 
   const TickType_t period = (cfg->txTaskPeriod > 0) ? cfg->txTaskPeriod : pdMS_TO_TICKS(10);
+  const uint32_t expectedPeriodUs = static_cast<uint32_t>(period * portTICK_PERIOD_MS * 1000U);
   TickType_t lastWake = xTaskGetTickCount();
+  int64_t lastIterationStartUs = esp_timer_get_time();
 
   while (true) {
+    const int64_t iterationStartUs = esp_timer_get_time();
+    uint32_t cycleUs = 0;
+    if (iterationStartUs > lastIterationStartUs) {
+      cycleUs = static_cast<uint32_t>(iterationStartUs - lastIterationStartUs);
+    }
+    lastIterationStartUs = iterationStartUs;
     if (g_initialized) {
       const uint8_t status = encodeStatusFlags();
       const uint16_t speedTelemetry = encodeSpeedTelemetryFromHall();
@@ -581,6 +653,8 @@ void taskPiCommsTx(void* parameter) {
       logTxFrame(*cfg, status, speedTelemetry, steerTelemetry, brakePercent, xTaskGetTickCount());
     }
 
+    const bool overrun = cycleUs > expectedPeriodUs;
+    systemDiagReportLoop(SystemDiagTaskId::kPiUartTx, cycleUs, expectedPeriodUs, overrun, false);
     vTaskDelayUntil(&lastWake, period);
   }
 }

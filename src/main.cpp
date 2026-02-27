@@ -12,6 +12,7 @@
 #include "pi_comms.h"
 #include "hall_speed.h"
 #include "speed_pid.h"
+#include "system_diag.h"
 
 constexpr uint16_t STACK_OTA = 4096;
 constexpr uint16_t STACK_BRIDGE = 4096;
@@ -128,7 +129,7 @@ static FsIa6SamplerConfig g_rcSamplerConfig = {
     debug::kLogRc,
     RC_SAMPLER_PERIOD,
     pdMS_TO_TICKS(75),
-    pdMS_TO_TICKS(5)};
+    0};
 static FsIa6TaskConfig g_rcConfig = {debug::kLogRc, RC_MONITOR_PERIOD};
 static AS5600MonitorConfig g_as5600TaskConfig = {&g_as5600, debug::kLogAs5600, AS5600_PERIOD, AS5600_LOG_INTERVAL};
 static PidTaskConfig g_pidTaskConfig = {
@@ -207,9 +208,9 @@ static PiCommsConfig g_piCommsConfig = {
     115200,
     512,
     256,
-    pdMS_TO_TICKS(1),
-    pdMS_TO_TICKS(10),
     pdMS_TO_TICKS(2),
+    pdMS_TO_TICKS(10),
+    0,
     debug::kLogPiComms,
     debug::kLogPiComms};
 static HallSpeedConfig g_hallSpeedConfig = {
@@ -223,10 +224,18 @@ static HallSpeedConfig g_hallSpeedConfig = {
     500000,  // rpmTimeoutUs
 };
 
+static TaskHandle_t g_taskOtaHandle = nullptr;
+static TaskHandle_t g_taskRcSamplerHandle = nullptr;
+static TaskHandle_t g_taskPidHandle = nullptr;
+static TaskHandle_t g_taskDriveHandle = nullptr;
+static TaskHandle_t g_taskPiRxHandle = nullptr;
+static TaskHandle_t g_taskPiTxHandle = nullptr;
+
 void setup() {
   InicializaWiFi();
   InicializaTelnet();
   InicializaOTA();
+  systemDiagInit();
 
   g_pidController.setTunings(PID_KP, PID_KI, PID_KD);
   g_pidController.setOutputLimits(-100.0f, 100.0f);
@@ -255,16 +264,22 @@ void setup() {
     broadcastIf(debug::kLogBridge, "Inicializado H-bridge (pins 21 enable, 19 left PWM, 18 right PWM)");
   }
 
-  startTaskPinned(taskOtaTelnet, "OTA", STACK_OTA, &g_otaConfig, 3, nullptr, 0);
+  if (startTaskPinned(taskOtaTelnet, "OTA", STACK_OTA, &g_otaConfig, 3, &g_taskOtaHandle, 0)) {
+    systemDiagRegisterTask(SystemDiagTaskId::kOtaTelnet, "OTA", g_taskOtaHandle);
+  }
   if (debug::kEnableBridgeTask) {
     startTaskPinned(taskBridgeTest, "BridgeTest", STACK_BRIDGE, &g_bridgeConfig, 2, nullptr, 1);
   }
-  startTaskPinned(taskRcSampler, "RCSampler", STACK_RC, &g_rcSamplerConfig, 4, nullptr, 1);
+  if (startTaskPinned(taskRcSampler, "RCSampler", STACK_RC, &g_rcSamplerConfig, 4, &g_taskRcSamplerHandle, 1)) {
+    systemDiagRegisterTask(SystemDiagTaskId::kRcSampler, "RCSampler", g_taskRcSamplerHandle);
+  }
   if (debug::kEnableRcTask) {
     startTaskPinned(taskRcMonitor, "RCMonitor", STACK_RC, &g_rcConfig, 1, nullptr, 1);
   }
   if (debug::kEnableDriveTask) {
-    startTaskPinned(taskQuadDriveControl, "Drive", STACK_DRIVE, &g_driveTaskConfig, 4, nullptr, 1);
+    if (startTaskPinned(taskQuadDriveControl, "Drive", STACK_DRIVE, &g_driveTaskConfig, 4, &g_taskDriveHandle, 1)) {
+      systemDiagRegisterTask(SystemDiagTaskId::kDrive, "Drive", g_taskDriveHandle);
+    }
   }
 
   g_as5600.begin(AS5600_SDA_PIN, AS5600_SCL_PIN);
@@ -276,13 +291,19 @@ void setup() {
       broadcastIf(true, "[PID] BridgeTest habilitado; omitiendo tarea PID para evitar conflictos");
     } else {
       broadcastIf(debug::kLogPid, "[PID] Tarea PID iniciada");
-      startTaskPinned(taskPidControl, "PID", STACK_PID, &g_pidTaskConfig, 4, nullptr, 0);
+      if (startTaskPinned(taskPidControl, "PID", STACK_PID, &g_pidTaskConfig, 5, &g_taskPidHandle, 0)) {
+        systemDiagRegisterTask(SystemDiagTaskId::kPid, "PID", g_taskPidHandle);
+      }
     }
   }
 
   if (piCommsInit(g_piCommsConfig)) {
-    startTaskPinned(taskPiCommsRx, "PiUartRx", STACK_PI_RX, &g_piCommsConfig, 3, nullptr, 0);
-    startTaskPinned(taskPiCommsTx, "PiUartTx", STACK_PI_TX, &g_piCommsConfig, 3, nullptr, 0);
+    if (startTaskPinned(taskPiCommsRx, "PiUartRx", STACK_PI_RX, &g_piCommsConfig, 3, &g_taskPiRxHandle, 0)) {
+      systemDiagRegisterTask(SystemDiagTaskId::kPiUartRx, "PiUartRx", g_taskPiRxHandle);
+    }
+    if (startTaskPinned(taskPiCommsTx, "PiUartTx", STACK_PI_TX, &g_piCommsConfig, 3, &g_taskPiTxHandle, 0)) {
+      systemDiagRegisterTask(SystemDiagTaskId::kPiUartTx, "PiUartTx", g_taskPiTxHandle);
+    }
   } else {
     broadcastIf(true, "[PI][UART] Error inicializando UART0 para Raspberry Pi");
   }

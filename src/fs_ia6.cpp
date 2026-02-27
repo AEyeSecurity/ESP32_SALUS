@@ -5,8 +5,10 @@
 #include <driver/gpio.h>
 #include <driver/rmt.h>
 #include <esp_err.h>
+#include <esp_timer.h>
 
 #include "ota_telnet.h"
+#include "system_diag.h"
 
 namespace {
 constexpr uint32_t kMinPulseUs = 950;
@@ -264,8 +266,8 @@ void taskRcSampler(void* parameter) {
   const TickType_t period = (cfg != nullptr && cfg->period > 0) ? cfg->period : pdMS_TO_TICKS(10);
   const TickType_t staleThreshold =
       (cfg != nullptr && cfg->staleThreshold > 0) ? cfg->staleThreshold : pdMS_TO_TICKS(60);
-  const TickType_t receiveTimeout =
-      (cfg != nullptr && cfg->rmtReceiveTimeout > 0) ? cfg->rmtReceiveTimeout : pdMS_TO_TICKS(5);
+  // A timeout of 0 is valid: non-blocking read for each channel.
+  const TickType_t receiveTimeout = (cfg != nullptr) ? cfg->rmtReceiveTimeout : pdMS_TO_TICKS(5);
 
   if (!ensureRmtInitialized(log)) {
     broadcastIf(true, "[RC][RMT] No se pudo inicializar RMT para FS-iA6, finalizando tarea");
@@ -274,8 +276,16 @@ void taskRcSampler(void* parameter) {
   }
 
   TickType_t lastWake = xTaskGetTickCount();
+  const uint32_t expectedPeriodUs = static_cast<uint32_t>(period * portTICK_PERIOD_MS * 1000U);
+  int64_t lastIterationStartUs = esp_timer_get_time();
 
   for (;;) {
+    const int64_t iterationStartUs = esp_timer_get_time();
+    uint32_t cycleUs = 0;
+    if (iterationStartUs > lastIterationStartUs) {
+      cycleUs = static_cast<uint32_t>(iterationStartUs - lastIterationStartUs);
+    }
+    lastIterationStartUs = iterationStartUs;
     const TickType_t now = xTaskGetTickCount();
     bool anyUpdated = false;
 
@@ -319,6 +329,9 @@ void taskRcSampler(void* parameter) {
     if (anyUpdated) {
       notifyConsumers();
     }
+
+    const bool overrun = cycleUs > expectedPeriodUs;
+    systemDiagReportLoop(SystemDiagTaskId::kRcSampler, cycleUs, expectedPeriodUs, overrun, false);
 
     vTaskDelayUntil(&lastWake, period);
   }

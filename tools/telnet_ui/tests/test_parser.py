@@ -28,6 +28,15 @@ def test_parse_unknown_line():
     assert event.tags == []
 
 
+def test_parse_sys_line():
+    parser = TelnetLineParser()
+    event = parser.parse_line("[SYS][JITTER] tsMs=123 worstMaxUs=50 tasks=2 OTA=5/20 PID=8/30")
+
+    assert event.section == "system"
+    assert event.fields["tsMs"] == "123"
+    assert event.fields["worstMaxUs"] == "50"
+
+
 def test_parse_spid_status_nested_groups_and_duplicate_keys():
     parser = TelnetLineParser()
     line = (

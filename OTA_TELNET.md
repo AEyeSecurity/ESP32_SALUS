@@ -95,6 +95,10 @@ drive.log
 drive.rc.status
 drive.rc.stream
 drive.rc.cal
+sys.rt
+sys.stack
+sys.jitter
+sys.reset
 ```
 
 Notas de sesion:
@@ -110,6 +114,14 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low).
 - `speed.reset`: reinicia contadores Hall y devuelve estado actualizado.
 - `speed.stream on [ms] | speed.stream off`: stream periódico de `speed.status` (rango `20..5000 ms`).
 - `speed.uart`: responde `N/A source=hall` (sin backend UART de velocidad).
+
+## Diagnóstico de sistema (`sys.*`)
+
+- `sys.rt`: snapshot de runtime por tarea instrumentada (`loopUs`, `maxLoopUs`, `jitter`, `overrun`, `notifyTimeout`, `core`, `prio`).
+- `sys.stack`: high-water mark de stack por tarea instrumentada (palabras y bytes).
+- `sys.jitter`: estado del stream de jitter.
+- `sys.jitter on [ms] | sys.jitter off`: habilita/deshabilita stream periódico de resumen de jitter (`50..5000 ms`).
+- `sys.reset [keep|full]`: resetea acumulados de diagnóstico (`keep` por defecto preserva registro de tareas).
 
 ## PID de velocidad (`spid.*`)
 
@@ -163,6 +175,7 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low).
 - `drive.log off`: deshabilita logs de `taskQuadDriveControl` en runtime.
 - `drive.log pid on [ms]`: habilita trace forense periódico (`50..1000 ms`, default `100 ms`).
 - `drive.log pid off`: deshabilita trace forense PID.
+- recomendación operacional: mantener `drive.log pid off` fuera de diagnósticos (al cerrar sesión Telnet se restablece OFF).
 - cuando `src=RC`, agrega campos de diagnóstico: `rcRaw`, `rcFilt`, `rcNorm`, `rcFresh`, `rcElig`, `rcBrake`, `rcLatched`, `rcState`, `rcTargetRawMps`, `rcTargetShapedMps`.
 - formato forense:  
   `[DRIVE][PIDTRACE] tMs=... src=PI|RC|TEL mode=... targetRawMps=... targetMps=... speedMps=... errMps=... p=... i=... d=... pidUnsat=... pidOutPct=... pidSatPct=... ffBasePct=... ffDeltaPct=... cmdPreSlewPct=... ffActive=Y/N throttleRawPct=... throttleFiltPct=... pwmCmdPct=... pwmDuty=x/y pwmDutyPct=... autoBrakeRawPct=... autoBrakeFiltPct=... brakeAppliedPct=... brakeA_pct=... brakeB_pct=... launchAssistActive=Y/N launchMs=... throttleSaturated=Y/N integratorClamped=Y/N fb=Y/N fs=Y/N ovs=Y/N estop=Y/N inhibit=...`
@@ -178,6 +191,20 @@ Script de pruebas guiadas para validar `speed_pid` y diagnosticar por que no ent
 ```bash
 python3 tools/tests/speed_pid_hil.py --mode interactive
 ```
+
+Script recomendado para auditoría RT de este branch:
+
+```bash
+python3 tools/tests/system_rt_hil.py \
+  --host esp32-salus.local \
+  --nominal-duration-s 1200 \
+  --stress-duration-s 600 \
+  --jitter-period-ms 500 \
+  --stress-pidtrace-ms 100
+```
+
+Validación por defecto del runner para `PiUartRx`: `p95<=800us` y `p99<=2000us`.
+Puedes ajustar límites con `--pi-rx-p95-max-us` y `--pi-rx-p99-max-us`.
 
 Opciones utiles:
 

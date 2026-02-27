@@ -31,3 +31,12 @@ def test_stream_patch_updates_speed_stream_state():
 
     assert patch["streams"]["speed"]["state"] == "ON"
     assert patch["streams"]["speed"]["period_ms"] == 500
+
+
+def test_system_section_patch():
+    store = TelnetUiStateStore()
+    patch = store.apply_event(
+        _event("[SYS][RT] tsMs=1 tasks=1 worstJitterUs=20", ["SYS", "RT"], "system", {"tsMs": "1"})
+    )
+
+    assert patch["system"]["fields"]["tsMs"] == "1"

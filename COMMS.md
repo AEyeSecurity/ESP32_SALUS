@@ -17,7 +17,7 @@ Definida en `src/main.cpp` (`g_piCommsConfig`):
 - Baudrate: `115200`
 - Formato: `8N1`, sin paridad, sin flow control
 - Buffer driver: RX `512`, TX `256`
-- RX task: periodo `1 ms`, `uart_read_bytes` timeout `2 ms`
+- RX task: periodo `2 ms`, `uart_read_bytes` timeout `0 ms` (poll no bloqueante)
 - TX task: periodo `10 ms` (100 Hz)
 
 ## 2. Tramas del protocolo

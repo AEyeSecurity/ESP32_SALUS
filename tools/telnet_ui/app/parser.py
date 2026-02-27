@@ -172,6 +172,8 @@ class TelnetLineParser:
             return "comms"
         if head == "DRIVE" and tail == "LOG":
             return "drive_log"
+        if head == "SYS":
+            return "system"
         if head in ("PI", "DRIVE", "RC"):
             return "logs"
 

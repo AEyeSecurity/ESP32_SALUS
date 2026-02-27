@@ -13,6 +13,7 @@
 #include "ota_telnet.h"
 #include "steering_calibration.h"
 #include "pi_comms.h"
+#include "system_diag.h"
 
 constexpr float kFullRotationDegrees = 360.0f;  // Degrees in one full turn for normalization
 
@@ -332,6 +333,7 @@ void taskPidControl(void* parameter) {
   if (expectedPeriodSeconds <= 0.0f) {
     expectedPeriodSeconds = 0.001f;
   }
+  const uint32_t expectedPeriodUs = static_cast<uint32_t>(expectedPeriodSeconds * 1000000.0f + 0.5f);
   const float dtOverrunThreshold = expectedPeriodSeconds + 0.010f;
   const TickType_t dtWarningCooldown = pdMS_TO_TICKS(500);
   const TickType_t runtimeWarningCooldown = pdMS_TO_TICKS(1000);
@@ -339,6 +341,7 @@ void taskPidControl(void* parameter) {
   TickType_t lastDtWarningTick = 0;
   TickType_t lastRuntimeWarningTick = 0;
   TickType_t lastCalibrationDebugTick = 0;
+  int64_t lastIterationStartUs = esp_timer_get_time();
 
   portENTER_CRITICAL(&g_pidMux);
   g_pidRuntimeSnapshot = PidRuntimeSnapshot{};
@@ -380,6 +383,11 @@ void taskPidControl(void* parameter) {
 
   for (;;) {
     const int64_t iterationStartUs = esp_timer_get_time();
+    uint32_t cycleUs = 0;
+    if (iterationStartUs > lastIterationStartUs) {
+      cycleUs = static_cast<uint32_t>(iterationStartUs - lastIterationStartUs);
+    }
+    lastIterationStartUs = iterationStartUs;
     const uint32_t notificationCount = ulTaskNotifyTake(pdTRUE, period);
     (void)notificationCount;
 
@@ -677,6 +685,8 @@ void taskPidControl(void* parameter) {
       }
       runtimeSnapshot.calibrationActive = calibrationActive;
       publishRuntimeSnapshot(runtimeSnapshot);
+      const bool overrun = cycleUs > expectedPeriodUs;
+      systemDiagReportLoop(SystemDiagTaskId::kPid, cycleUs, expectedPeriodUs, overrun, notificationCount == 0);
       continue;
     }
 
@@ -798,5 +808,7 @@ void taskPidControl(void* parameter) {
         lastRuntimeWarningTick = nowTicks;
       }
     }
+    const bool overrun = cycleUs > expectedPeriodUs;
+    systemDiagReportLoop(SystemDiagTaskId::kPid, cycleUs, expectedPeriodUs, overrun, notificationCount == 0);
   }
 }

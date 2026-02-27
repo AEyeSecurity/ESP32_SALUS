@@ -39,7 +39,7 @@ Si tu gestor de archivos lo permite, marca `run_telnet_ui.py` como ejecutable y 
 
 1. Configurar `host` y `puerto` en la barra superior (`esp32-salus.local:23` o `192.168.4.1:23`).
 2. Clic en **Conectar**.
-3. Usar paneles por dominio (`steer`, `pid`, `spid`, `speed`, `comms`, `drive`, `net`).
+3. Usar paneles por dominio (`steer`, `pid`, `spid`, `speed`, `comms`, `sys`, `drive`, `net`).
 4. Usar **Consola Raw** para comandos libres.
 
 ## API
