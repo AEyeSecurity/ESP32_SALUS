@@ -113,7 +113,7 @@ Troubleshooting OTA rapido:
 
 ## Comunicaciones UART con Raspberry Pi
 
-- El enlace binario se implementa en `taskPiCommsRx`/`taskPiCommsTx` (`src/pi_comms.cpp`) y usa `GPIO3/GPIO1` a **460 800 bps**.  
+- El enlace binario se implementa en `taskPiCommsRx`/`taskPiCommsTx` (`src/pi_comms.cpp`) y usa `GPIO3/GPIO1` a **115200 bps**.  
 - `taskPiCommsRx` procesa frame v2 de 7 bytes (`0xAA ... crc`) y publica `PiCommsRxSnapshot` con `steer`, `speedCmdCentiMps`, `brake`, `estop`, `driveEnabled` y contadores (`ok/crc/malformed/verErr`).  
 - `taskPiCommsTx` envía frame v2 de 8 bytes (`0x55 ... crc`) con:
   - `speed_meas_u16` (`m/s x100`, Hall; `0xFFFF` si N/A),

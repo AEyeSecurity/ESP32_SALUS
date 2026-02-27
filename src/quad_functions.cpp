@@ -172,6 +172,7 @@ bool throttleDataFresh(TickType_t maxAgeTicks) {
 constexpr TickType_t kPiSnapshotFreshTicks = pdMS_TO_TICKS(120);
 constexpr TickType_t kSpeedPidFeedbackStartupGraceTicks = pdMS_TO_TICKS(2500);
 constexpr TickType_t kSpeedPidFeedbackRunGraceTicks = pdMS_TO_TICKS(1000);
+constexpr float kSpeedPidStoppedMpsThreshold = 0.05f;
 constexpr TickType_t kRcSourceDropoutGraceTicks = pdMS_TO_TICKS(150);
 constexpr int kRcNeutralDeadbandPercent = 3;
 constexpr float kRcTargetSlewMps2Up = 2.0f;
@@ -632,6 +633,7 @@ void taskQuadDriveControl(void* parameter) {
   bool rcSourceLatched = false;
   float rcTargetShapedMps = 0.0f;
   float rcLastTargetRawMps = 0.0f;
+  float lastSpeedTargetRawMps = 0.0f;
   TickType_t rcBrakeReleaseReentryHoldUntilTick = 0;
   bool lastRcManualBrakeActive = false;
   RcDriveInputState lastRcInputState = RcDriveInputState::kStale;
@@ -900,6 +902,22 @@ void taskQuadDriveControl(void* parameter) {
       HallSpeedConfig speedCfg{};
       hallSpeedGetConfig(speedCfg);
       const uint32_t rpmTimeoutUs = (speedCfg.rpmTimeoutUs > 0U) ? speedCfg.rpmTimeoutUs : 500000U;
+      const bool transitionStale = !speedSnapshot.hasTransition || speedSnapshot.transitionAgeUs > rpmTimeoutUs;
+      const bool speedEffectivelyStopped = speedOk &&
+                                           speedSnapshot.speedMps <= kSpeedPidStoppedMpsThreshold &&
+                                           transitionStale;
+      const bool startupCommandEdge = (speedTargetRawMps > 0.05f) && (lastSpeedTargetRawMps <= 0.05f);
+      const bool simulatePiDriveReentry =
+          (speedControlSource == SpeedControlSource::kPiSpeedPid) && startupCommandEdge &&
+          speedEffectivelyStopped;
+      if (simulatePiDriveReentry) {
+        // Simular un ciclo drive off/on: reiniciar estado PID y feedback para tratarlo como arranque.
+        speedPidReset();
+        speedFeedbackMissingTick = 0;
+        speedPidSeenTransition = false;
+        speedTransitionCounterPrimed = false;
+        speedLastTransitionsOk = speedSnapshot.transitionsOk;
+      }
       if (speedOk && !speedTransitionCounterPrimed) {
         speedLastTransitionsOk = speedSnapshot.transitionsOk;
         speedTransitionCounterPrimed = true;
@@ -989,6 +1007,7 @@ void taskQuadDriveControl(void* parameter) {
       }
       speedPidWasActive = true;
       lastSpeedControlSource = speedControlSource;
+      lastSpeedTargetRawMps = speedTargetRawMps;
     } else {
       if (speedPidWasActive) {
         speedPidReset();
@@ -999,6 +1018,7 @@ void taskQuadDriveControl(void* parameter) {
       speedTransitionCounterPrimed = false;
       speedLastTransitionsOk = 0;
       lastSpeedControlSource = SpeedControlSource::kNone;
+      lastSpeedTargetRawMps = 0.0f;
       rcTargetShapedMps = 0.0f;
       rcLastTargetRawMps = 0.0f;
       if (piEstopActive) {
