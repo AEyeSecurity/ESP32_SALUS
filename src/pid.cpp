@@ -49,6 +49,25 @@ float applyMinActive(float value, float minActive) {
   return value;
 }
 
+int applySteeringCommandDeadband(int commandPercent, int deadbandPercent) {
+  int clamped = commandPercent;
+  if (clamped < -100) {
+    clamped = -100;
+  } else if (clamped > 100) {
+    clamped = 100;
+  }
+  if (deadbandPercent <= 0) {
+    return clamped;
+  }
+  if (deadbandPercent > 100) {
+    deadbandPercent = 100;
+  }
+  if (clamped >= -deadbandPercent && clamped <= deadbandPercent) {
+    return 0;
+  }
+  return clamped;
+}
+
 float computeDtSeconds(uint32_t prevMicros, uint32_t currentMicros) {
   if (currentMicros >= prevMicros) {
     return static_cast<float>(currentMicros - prevMicros) * 1e-6f;
@@ -72,6 +91,13 @@ namespace {
 constexpr uint8_t kCalibrationDutyPercent = 65;
 constexpr uint8_t kCalibrationReleaseDutyPercent = 30;
 constexpr float kCalibrationStallThresholdDeg = 0.5f;
+constexpr int kRcSteeringCommandDeadbandPercent = 4;
+constexpr int kPiSteeringCommandDeadbandPercent = 1;
+const TickType_t kRcFreshThreshold = pdMS_TO_TICKS(50);
+const TickType_t kRcNeutralCaptureWindow = pdMS_TO_TICKS(800);
+constexpr int kRcNeutralCaptureMaxAbsCommand = 30;
+constexpr int kRcNeutralCaptureMinSamples = 8;
+constexpr float kNeutralHoldErrorDeg = 0.6f;
 const TickType_t kCalibrationTimeout = pdMS_TO_TICKS(10000);
 const TickType_t kCalibrationReleaseDuration = pdMS_TO_TICKS(250);
 const TickType_t kCalibrationStallDuration = pdMS_TO_TICKS(1200);
@@ -358,6 +384,12 @@ void taskPidControl(void* parameter) {
   float calibrationLastAngleDeg = 0.0f;
   TickType_t calibrationLastMoveTick = 0;
   bool calibrationMotionValid = false;
+  bool rcWasFresh = false;
+  bool rcNeutralCaptureActive = false;
+  TickType_t rcNeutralCaptureStartTick = 0;
+  int rcNeutralSampleSum = 0;
+  int rcNeutralSampleCount = 0;
+  int rcSteeringNeutralOffset = 0;
 
   auto calibrationStateName = [](CalibrationState state) -> const char* {
     switch (state) {
@@ -433,10 +465,53 @@ void taskPidControl(void* parameter) {
 
     RcSharedState rcSnapshot{};
     const bool rcValid = rcGetStateCopy(rcSnapshot);
-    if (!rcValid || !rcSnapshot.valid || (nowTicks - rcSnapshot.lastUpdateTick) > pdMS_TO_TICKS(50)) {
+    const bool rcFresh = rcValid && rcSnapshot.valid && (nowTicks - rcSnapshot.lastUpdateTick) <= kRcFreshThreshold;
+    if (!rcFresh) {
       rcSnapshot.steering = 0;
     }
     const int rcValue = rcSnapshot.steering;
+    int rcSteeringCorrected = rcValue;
+
+    if (!rcWasFresh && rcFresh) {
+      rcNeutralCaptureActive = true;
+      rcNeutralCaptureStartTick = nowTicks;
+      rcNeutralSampleSum = 0;
+      rcNeutralSampleCount = 0;
+    }
+
+    if (rcNeutralCaptureActive) {
+      if (!rcFresh) {
+        rcNeutralCaptureActive = false;
+      } else if ((nowTicks - rcNeutralCaptureStartTick) <= kRcNeutralCaptureWindow) {
+        const int absRcValue = (rcValue >= 0) ? rcValue : -rcValue;
+        if (absRcValue <= kRcNeutralCaptureMaxAbsCommand) {
+          rcNeutralSampleSum += rcValue;
+          rcNeutralSampleCount++;
+        }
+      } else {
+        if (rcNeutralSampleCount >= kRcNeutralCaptureMinSamples) {
+          rcSteeringNeutralOffset = static_cast<int>(
+              lroundf(static_cast<float>(rcNeutralSampleSum) / static_cast<float>(rcNeutralSampleCount)));
+          String msg = "[PID] RC neutral capturado offset=";
+          msg += rcSteeringNeutralOffset;
+          msg += " (muestras=";
+          msg += rcNeutralSampleCount;
+          msg += ")";
+          broadcastIf(true, msg);
+        }
+        rcNeutralCaptureActive = false;
+      }
+    }
+    rcWasFresh = rcFresh;
+
+    if (rcFresh) {
+      rcSteeringCorrected = rcValue - rcSteeringNeutralOffset;
+      if (rcSteeringCorrected < -100) {
+        rcSteeringCorrected = -100;
+      } else if (rcSteeringCorrected > 100) {
+        rcSteeringCorrected = 100;
+      }
+    }
 
     PiCommsRxSnapshot piSnapshot{};
     const bool piDriverReady = piCommsGetRxSnapshot(piSnapshot);
@@ -449,12 +524,16 @@ void taskPidControl(void* parameter) {
     const bool piFresh =
         piDriverReady && piSnapshot.hasFrame && piAgeValid && piAgeTicks <= kPiSnapshotFreshTicks;
 
-    int steeringCommand = rcValue;
+    int steeringCommand = rcSteeringCorrected;
     bool steeringFromPi = false;
     if (piFresh) {
       steeringCommand = piSnapshot.steer;
       steeringFromPi = true;
     }
+    const int steeringCommandRaw = steeringCommand;
+    steeringCommand = applySteeringCommandDeadband(
+        steeringCommand,
+        steeringFromPi ? kPiSteeringCommandDeadbandPercent : kRcSteeringCommandDeadbandPercent);
 
     const float measuredDeg = cfg->sensor->getAngleDegrees();
 
@@ -716,6 +795,12 @@ void taskPidControl(void* parameter) {
       outputPercent = applyMinActive(outputPercent, cfg->minActivePercent);
       outputPercent = clampf(outputPercent, -100.0f, 100.0f);
 
+      const bool neutralCommand = steeringCommand == 0;
+      if (neutralCommand && fabsf(errorDeg) <= kNeutralHoldErrorDeg) {
+        cfg->controller->reset();
+        outputPercent = 0.0f;
+      }
+
       bool blockedByLimit = false;
       if (limitLeftActive && outputPercent < -0.001f) {
         outputPercent = 0.0f;
@@ -770,6 +855,10 @@ void taskPidControl(void* parameter) {
         msg += "deg";
         msg += " cmd=";
         msg += steeringCommand;
+        if (steeringCommandRaw != steeringCommand) {
+          msg += " raw=";
+          msg += steeringCommandRaw;
+        }
         msg += steeringFromPi ? " (PI" : " (RC";
         if (steeringFromPi && piAgeValid) {
           msg += " ageMs=";
