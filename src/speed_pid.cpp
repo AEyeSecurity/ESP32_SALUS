@@ -575,15 +575,21 @@ bool speedPidCompute(float targetRawMps,
   measuredMps = isfinite(measuredMps) ? clampf(measuredMps, 0.0f, maxSpeed) : 0.0f;
   const float measuredRawMps = measuredMps;
 
+  const bool requestActiveNow = targetRawMps > 0.05f;
   float targetRampedMps = prevTargetRampedMps;
-  const float maxStep = config.maxSetpointRateMps2 * dtSeconds;
-  const float targetDelta = targetRawMps - targetRampedMps;
-  if (maxStep > 0.0f) {
-    targetRampedMps += clampf(targetDelta, -maxStep, maxStep);
+  if (!requestActiveNow) {
+    // Con consigna en cero, evitar cola de rampa que puede sostener throttle residual.
+    targetRampedMps = 0.0f;
   } else {
-    targetRampedMps = targetRawMps;
+    const float maxStep = config.maxSetpointRateMps2 * dtSeconds;
+    const float targetDelta = targetRawMps - targetRampedMps;
+    if (maxStep > 0.0f) {
+      targetRampedMps += clampf(targetDelta, -maxStep, maxStep);
+    } else {
+      targetRampedMps = targetRawMps;
+    }
+    targetRampedMps = clampf(targetRampedMps, 0.0f, maxSpeed);
   }
-  targetRampedMps = clampf(targetRampedMps, 0.0f, maxSpeed);
 
   float integral = prevIntegral;
   float pidPrevError = prevError;
@@ -624,8 +630,6 @@ bool speedPidCompute(float targetRawMps,
   const float launchAssistWindowSec = static_cast<float>(config.launchAssistWindowMs) * 0.001f;
   const float feedbackLaunchGraceSec =
       static_cast<float>(config.feedbackLaunchGraceMs) * 0.001f;
-  const bool requestActiveNow = targetRawMps > 0.05f;
-
   // Filtro de medicion: limitador de salto + EMA corta.
   // Mantiene el dato raw para logs/diagnostico; el control usa el filtrado.
   if (!measuredFilterPrimed || !isfinite(measuredFilteredMps)) {
@@ -649,6 +653,13 @@ bool speedPidCompute(float targetRawMps,
     launchAssistRemainingSec = 0.0f;
     feedbackLaunchGraceRemainingSec = 0.0f;
     controlActive = false;
+    // En reposo de consigna, limpiar memoria del controlador para evitar residuo al frenar.
+    integral = 0.0f;
+    pidPrevError = 0.0f;
+    firstRun = true;
+    derivativeFiltered = 0.0f;
+    measuredForDerivative = measuredFilteredMps;
+    derivativePrimed = false;
   }
 
   const bool feedbackGraceActive =

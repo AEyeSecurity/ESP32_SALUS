@@ -46,6 +46,9 @@ portMUX_TYPE g_driveLogMux = portMUX_INITIALIZER_UNLOCKED;
 bool g_speedTargetOverrideEnabled = false;
 float g_speedTargetOverrideMps = 0.0f;
 portMUX_TYPE g_speedTargetOverrideMux = portMUX_INITIALIZER_UNLOCKED;
+bool g_pwmOverrideEnabled = false;
+int g_pwmOverridePercent = 0;
+portMUX_TYPE g_pwmOverrideMux = portMUX_INITIALIZER_UNLOCKED;
 volatile bool g_rcNeutralOffsetCalEnabled = true;
 volatile bool g_rcNeutralOffsetCalAllowUpdate = true;
 QuadDriveRcDebugSnapshot g_rcDebugSnapshot{};
@@ -136,7 +139,8 @@ int updateThrottleFilter(int rawValue) {
     g_filterOffsetReady = true;
     g_filterInitialized = true;
   } else {
-    g_filteredThrottleValue = (g_filteredThrottleValue * 2 + rawValue) / 3;
+    // Reducir inercia del filtro del stick para mejorar respuesta de RC.
+    g_filteredThrottleValue = (g_filteredThrottleValue + rawValue) / 2;
     const bool allowOffsetUpdate = g_rcNeutralOffsetCalEnabled && g_rcNeutralOffsetCalAllowUpdate;
     if (allowOffsetUpdate && abs(rawValue) < 15) {
       g_filterOffset = (g_filterOffset * 3 + g_filteredThrottleValue) / 4;
@@ -175,8 +179,9 @@ constexpr TickType_t kSpeedPidFeedbackRunGraceTicks = pdMS_TO_TICKS(1000);
 constexpr float kSpeedPidStoppedMpsThreshold = 0.05f;
 constexpr TickType_t kRcSourceDropoutGraceTicks = pdMS_TO_TICKS(150);
 constexpr int kRcNeutralDeadbandPercent = 3;
-constexpr float kRcTargetSlewMps2Up = 2.0f;
-constexpr float kRcTargetSlewMps2Down = 3.0f;
+// Respuesta RC mas directa sin tocar ganancias del PID.
+constexpr float kRcTargetSlewMps2Up = 4.0f;
+constexpr float kRcTargetSlewMps2Down = 5.0f;
 constexpr float kRcMinValidTargetMps = 0.08f;
 constexpr TickType_t kRcBrakeReleaseReentryHoldTicks = pdMS_TO_TICKS(200);
 constexpr TickType_t kRcOffsetAutoCalNeutralHoldTicks = pdMS_TO_TICKS(250);
@@ -562,6 +567,34 @@ bool quadDriveGetSpeedTargetOverride(bool& enabledOut, float& targetMpsOut) {
   return true;
 }
 
+bool quadDriveSetPwmOverride(bool enabled, int percent) {
+  if (!enabled) {
+    portENTER_CRITICAL(&g_pwmOverrideMux);
+    g_pwmOverrideEnabled = false;
+    g_pwmOverridePercent = 0;
+    portEXIT_CRITICAL(&g_pwmOverrideMux);
+    return true;
+  }
+
+  if (percent < 0 || percent > 100) {
+    return false;
+  }
+
+  portENTER_CRITICAL(&g_pwmOverrideMux);
+  g_pwmOverrideEnabled = true;
+  g_pwmOverridePercent = percent;
+  portEXIT_CRITICAL(&g_pwmOverrideMux);
+  return true;
+}
+
+bool quadDriveGetPwmOverride(bool& enabledOut, int& percentOut) {
+  portENTER_CRITICAL(&g_pwmOverrideMux);
+  enabledOut = g_pwmOverrideEnabled;
+  percentOut = g_pwmOverridePercent;
+  portEXIT_CRITICAL(&g_pwmOverrideMux);
+  return true;
+}
+
 bool quadDriveGetRcDebugSnapshot(QuadDriveRcDebugSnapshot& out) {
   portENTER_CRITICAL(&g_driveRcDebugMux);
   out = g_rcDebugSnapshot;
@@ -613,7 +646,9 @@ void taskQuadDriveControl(void* parameter) {
   TickType_t lastInhibitEventTick = 0;
   TickType_t lastBrakeConfigEventTick = 0;
   TickType_t lastRcSourceEventTick = 0;
+  TickType_t lastRcArbitrationEventTick = 0;
   TickType_t lastRcStateEventTick = 0;
+  TickType_t lastStartupReentryEventTick = 0;
   int lastThrottleCmdValue = 9999;
   int lastDutyReported = -1;
   int lastBrakeReportedA = -1;
@@ -636,6 +671,8 @@ void taskQuadDriveControl(void* parameter) {
   float lastSpeedTargetRawMps = 0.0f;
   TickType_t rcBrakeReleaseReentryHoldUntilTick = 0;
   bool lastRcManualBrakeActive = false;
+  bool lastRcAllowedWithPiPassive = false;
+  bool lastRcBlockedByPi = false;
   RcDriveInputState lastRcInputState = RcDriveInputState::kStale;
   TickType_t rcNeutralStableSinceTick = 0;
   float expectedPeriodSeconds = static_cast<float>(period * portTICK_PERIOD_MS) / 1000.0f;
@@ -722,14 +759,31 @@ void taskQuadDriveControl(void* parameter) {
     const bool piFresh =
         piDriverReady && piSnapshot.hasFrame && piAgeValid && piAgeTicks <= kPiSnapshotFreshTicks;
 
+    bool speedTargetOverrideEnabled = false;
+    float speedTargetOverrideMps = 0.0f;
+    quadDriveGetSpeedTargetOverride(speedTargetOverrideEnabled, speedTargetOverrideMps);
+    bool pwmOverrideEnabled = false;
+    int pwmOverridePercent = 0;
+    quadDriveGetPwmOverride(pwmOverrideEnabled, pwmOverridePercent);
+
     int commandValue = rcValue;
     bool commandFromPi = false;
+    bool commandFromPwmOverride = false;
     bool throttleInhibit = false;
     const bool piEstopActive = piFresh && piSnapshot.estop;
     const uint8_t piBrakePercent = piFresh ? (piEstopActive ? 100u : piSnapshot.brake) : 0u;
     const bool piBrakeActive = piFresh && !piEstopActive && (piBrakePercent > 0u);
+    const bool piDriveEnabled = piFresh && piSnapshot.driveEnabled;
+    const bool piSpeedPidRequested = piDriveEnabled && !piEstopActive && !piBrakeActive;
+    const bool piBlocksRc = piFresh && (piDriveEnabled || piBrakeActive || piEstopActive);
+    const bool rcAuthorityAllowed = !speedTargetOverrideEnabled && !piBlocksRc;
+    const bool rcAllowedWithPiPassive = piFresh && !piBlocksRc && !speedTargetOverrideEnabled;
+    const bool rcBlockedByPi = piFresh && piBlocksRc && !speedTargetOverrideEnabled;
+    const char* rcPiBlockReason =
+        piEstopActive ? "ESTOP" : (piBrakeActive ? "BRAKE" : (piDriveEnabled ? "DRIVE_ON" : "NONE"));
+
     uint8_t rcBrakePercent = 0;
-    if (!piFresh) {
+    if (rcAuthorityAllowed) {
       if (rcFresh) {
         if (rcValue < g_brakeConfig.activationThreshold) {
           rcBrakePercent = 100;
@@ -741,9 +795,9 @@ void taskQuadDriveControl(void* parameter) {
         }
       }
     }
-    const bool rcManualBrakeActive = (!piFresh && rcBrakePercent > 0);
+    const bool rcManualBrakeActive = rcAuthorityAllowed && (rcBrakePercent > 0);
     RcDriveInputState rcInputState = RcDriveInputState::kStale;
-    if (!piFresh) {
+    if (rcAuthorityAllowed) {
       if (rcManualBrakeActive) {
         rcInputState = RcDriveInputState::kManualBrake;
       } else if (rcFresh && rcValue > kRcNeutralDeadbandPercent) {
@@ -761,23 +815,19 @@ void taskQuadDriveControl(void* parameter) {
       rcNeutralStableSinceTick = 0;
     }
 
-    bool speedTargetOverrideEnabled = false;
-    float speedTargetOverrideMps = 0.0f;
-    quadDriveGetSpeedTargetOverride(speedTargetOverrideEnabled, speedTargetOverrideMps);
-
-    const bool piSpeedPidRequested =
-        piFresh && piSnapshot.driveEnabled && !piEstopActive && !piBrakeActive;
     const bool rcSpeedPidEligible =
-        !piFresh && rcFresh && !speedTargetOverrideEnabled && !rcManualBrakeActive;
+        rcAuthorityAllowed && rcFresh && !rcManualBrakeActive;
     const bool rcCanLatch =
-        !piFresh && !speedTargetOverrideEnabled && !rcManualBrakeActive && !piEstopActive;
+        rcAuthorityAllowed && !rcManualBrakeActive && !piEstopActive;
     const bool rcDropoutGraceActive =
         rcSourceLatched && rcCanLatch && rcLastFreshTick != 0 &&
         (sampleTick - rcLastFreshTick) <= kRcSourceDropoutGraceTicks;
     const bool rcSpeedPidRequested = rcSpeedPidEligible || rcDropoutGraceActive;
     const bool rcUsingLatchThisCycle = (!rcSpeedPidEligible && rcDropoutGraceActive);
     SpeedControlSource speedControlSource = SpeedControlSource::kNone;
-    if (speedTargetOverrideEnabled && !piEstopActive) {
+    if (pwmOverrideEnabled) {
+      speedControlSource = SpeedControlSource::kNone;
+    } else if (speedTargetOverrideEnabled && !piEstopActive) {
       speedControlSource = SpeedControlSource::kTelnetSpeedPid;
     } else if (piSpeedPidRequested) {
       speedControlSource = SpeedControlSource::kPiSpeedPid;
@@ -794,7 +844,7 @@ void taskQuadDriveControl(void* parameter) {
     const bool rcManualBrakeReleased = lastRcManualBrakeActive && !rcManualBrakeActive;
     if (rcManualBrakeReleased) {
       rcBrakeReleaseReentryHoldUntilTick = sampleTick + kRcBrakeReleaseReentryHoldTicks;
-      if (!speedTargetOverrideEnabled && !piFresh) {
+      if (rcAuthorityAllowed) {
         speedPidReset();
         speedPidWasActive = false;
       }
@@ -860,7 +910,22 @@ void taskQuadDriveControl(void* parameter) {
       rcSourceLatchedDebug = false;
     }
 
-    if (speedControlSource != SpeedControlSource::kNone) {
+    if (pwmOverrideEnabled) {
+      if (speedPidWasActive) {
+        speedPidReset();
+        speedPidWasActive = false;
+      }
+      speedFeedbackMissingTick = 0;
+      speedPidSeenTransition = false;
+      speedTransitionCounterPrimed = false;
+      speedLastTransitionsOk = 0;
+      lastSpeedControlSource = SpeedControlSource::kNone;
+      lastSpeedTargetRawMps = 0.0f;
+      rcTargetShapedMps = 0.0f;
+      rcLastTargetRawMps = 0.0f;
+      commandValue = pwmOverridePercent;
+      commandFromPwmOverride = true;
+    } else if (speedControlSource != SpeedControlSource::kNone) {
       if (!speedPidWasActive || speedControlSource != lastSpeedControlSource) {
         speedFeedbackMissingTick = 0;
         speedPidSeenTransition = false;
@@ -907,16 +972,27 @@ void taskQuadDriveControl(void* parameter) {
                                            speedSnapshot.speedMps <= kSpeedPidStoppedMpsThreshold &&
                                            transitionStale;
       const bool startupCommandEdge = (speedTargetRawMps > 0.05f) && (lastSpeedTargetRawMps <= 0.05f);
-      const bool simulatePiDriveReentry =
-          (speedControlSource == SpeedControlSource::kPiSpeedPid) && startupCommandEdge &&
-          speedEffectivelyStopped;
-      if (simulatePiDriveReentry) {
+      const bool sourceSupportsStartupReentry =
+          (speedControlSource == SpeedControlSource::kPiSpeedPid) ||
+          (speedControlSource == SpeedControlSource::kRcSpeedPid);
+      const bool simulateDriveReentry =
+          sourceSupportsStartupReentry && startupCommandEdge && speedEffectivelyStopped;
+      if (simulateDriveReentry) {
         // Simular un ciclo drive off/on: reiniciar estado PID y feedback para tratarlo como arranque.
         speedPidReset();
         speedFeedbackMissingTick = 0;
         speedPidSeenTransition = false;
         speedTransitionCounterPrimed = false;
         speedLastTransitionsOk = speedSnapshot.transitionsOk;
+        if (drivePidTraceEnabled &&
+            (sampleTick - lastStartupReentryEventTick) >= kDriveEventCooldown) {
+          String msg;
+          msg.reserve(64);
+          msg += "[DRIVE][EVENT] STARTUP_REENTRY src=";
+          msg += speedControlSourceText(speedControlSource);
+          broadcastIf(true, msg);
+          lastStartupReentryEventTick = sampleTick;
+        }
       }
       if (speedOk && !speedTransitionCounterPrimed) {
         speedLastTransitionsOk = speedSnapshot.transitionsOk;
@@ -1039,7 +1115,7 @@ void taskQuadDriveControl(void* parameter) {
     }
 
     uint8_t appliedBrakePercent = 0;
-    if (piFresh) {
+    if (piBlocksRc) {
       appliedBrakePercent = (piBrakePercent >= overspeedBrakePercent) ? piBrakePercent : overspeedBrakePercent;
       if (piEstopActive) {
         appliedBrakePercent = 100;
@@ -1053,9 +1129,9 @@ void taskQuadDriveControl(void* parameter) {
       inhibitReason = DriveThrottleInhibitReason::kEstop;
     } else if (speedControlSource != SpeedControlSource::kNone && (!speedPidFeedbackOk || speedPidFailsafe)) {
       inhibitReason = DriveThrottleInhibitReason::kFailsafe;
-    } else if (piFresh && piBrakePercent > 0) {
+    } else if (piBlocksRc && piBrakePercent > 0) {
       inhibitReason = DriveThrottleInhibitReason::kPiBrake;
-    } else if (!piFresh && rcBrakePercent > 0) {
+    } else if (!piBlocksRc && rcBrakePercent > 0) {
       inhibitReason = DriveThrottleInhibitReason::kRcBrake;
     } else if (overspeedBrakePercent > 0) {
       inhibitReason = DriveThrottleInhibitReason::kOverspeed;
@@ -1068,7 +1144,8 @@ void taskQuadDriveControl(void* parameter) {
 
     QuadDriveRuntimeSnapshot driveRuntime{};
     driveRuntime.valid = true;
-    driveRuntime.source = mapSpeedControlSourceToRuntime(speedControlSource);
+    driveRuntime.source =
+        commandFromPwmOverride ? QuadDriveControlSource::kTelnet : mapSpeedControlSourceToRuntime(speedControlSource);
     driveRuntime.piFresh = piFresh;
     driveRuntime.piEstopActive = piEstopActive;
     driveRuntime.speedPidFailsafe = speedPidFailsafe;
@@ -1120,7 +1197,11 @@ void taskQuadDriveControl(void* parameter) {
       msg.reserve(196);
       msg += "[DRIVE] cmd=";
       msg += commandValue;
-      msg += commandFromPi ? " (PI)" : " (RC)";
+      if (commandFromPwmOverride) {
+        msg += " (PWM)";
+      } else {
+        msg += commandFromPi ? " (PI)" : " (RC)";
+      }
       msg += " duty=";
       msg += duty;
       msg += "/";
@@ -1248,6 +1329,32 @@ void taskQuadDriveControl(void* parameter) {
       }
       lastInhibitReason = inhibitReason;
 
+      if (rcAllowedWithPiPassive != lastRcAllowedWithPiPassive &&
+          (sampleTick - lastRcArbitrationEventTick) >= kDriveEventCooldown) {
+        String msg;
+        msg.reserve(84);
+        msg += "[DRIVE][EVENT] ";
+        msg += rcAllowedWithPiPassive ? "RC_ALLOWED_PI_PASSIVE" : "RC_ALLOWED_PI_PASSIVE_EXIT";
+        msg += " piFresh=";
+        msg += piFresh ? "Y" : "N";
+        broadcastIf(true, msg);
+        lastRcArbitrationEventTick = sampleTick;
+      }
+      lastRcAllowedWithPiPassive = rcAllowedWithPiPassive;
+
+      if (rcBlockedByPi != lastRcBlockedByPi &&
+          (sampleTick - lastRcArbitrationEventTick) >= kDriveEventCooldown) {
+        String msg;
+        msg.reserve(96);
+        msg += "[DRIVE][EVENT] ";
+        msg += rcBlockedByPi ? "RC_BLOCKED_BY_PI" : "RC_BLOCKED_BY_PI_EXIT";
+        msg += " reason=";
+        msg += rcPiBlockReason;
+        broadcastIf(true, msg);
+        lastRcArbitrationEventTick = sampleTick;
+      }
+      lastRcBlockedByPi = rcBlockedByPi;
+
       if (speedControlSource == SpeedControlSource::kRcSpeedPid &&
           prevSpeedControlSource != SpeedControlSource::kRcSpeedPid &&
           (sampleTick - lastRcSourceEventTick) >= kDriveEventCooldown) {
@@ -1277,7 +1384,7 @@ void taskQuadDriveControl(void* parameter) {
 
       if (prevSpeedControlSource == SpeedControlSource::kRcSpeedPid &&
           speedControlSource != SpeedControlSource::kRcSpeedPid &&
-          !piFresh && !speedTargetOverrideEnabled && !rcManualBrakeActive &&
+          !piBlocksRc && !speedTargetOverrideEnabled && !rcManualBrakeActive &&
           !rcFresh && !rcDropoutGraceActive &&
           (sampleTick - lastRcSourceEventTick) >= kDriveEventCooldown) {
         broadcastIf(true, "[DRIVE][EVENT] RC_SRC_DROP_TIMEOUT");

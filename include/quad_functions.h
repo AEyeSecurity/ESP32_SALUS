@@ -87,6 +87,8 @@ bool quadDriveSetPidTraceEnabled(bool enabled, TickType_t periodTicks);
 bool quadDriveGetPidTraceConfig(bool& enabledOut, TickType_t& periodTicksOut);
 bool quadDriveSetSpeedTargetOverride(bool enabled, float targetMps);
 bool quadDriveGetSpeedTargetOverride(bool& enabledOut, float& targetMpsOut);
+bool quadDriveSetPwmOverride(bool enabled, int percent);
+bool quadDriveGetPwmOverride(bool& enabledOut, int& percentOut);
 bool quadDriveGetRcDebugSnapshot(QuadDriveRcDebugSnapshot& out);
 bool quadDriveGetRuntimeSnapshot(QuadDriveRuntimeSnapshot& out);
 bool quadDriveSetRcNeutralCalEnabled(bool enabled);

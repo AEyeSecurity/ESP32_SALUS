@@ -232,6 +232,7 @@ void resetTelnetSession() {
   // Return to low-noise operation when a Telnet session ends.
   quadDriveSetLogEnabled(false);
   quadDriveSetPidTraceEnabled(false, kDrivePidTraceDefaultPeriod);
+  quadDriveSetPwmOverride(false, 0);
   g_telnetCommandBuffer = "";
   g_speedStreamEnabled = false;
   g_lastSpeedStreamTick = 0;
@@ -253,7 +254,7 @@ void openTelnetSession(WiFiClient& incoming) {
   g_telnetClient.println("=== Servidor Telnet ESP32 ===");
   g_telnetClient.println("Conexion establecida correctamente");
   g_telnetClient.println(
-      "Comandos: steer.help | pid.help | spid.help | comms.status | speed.status | speed.reset | speed.stream | speed.uart | pid.stream | spid.stream | spid.target | drive.log | drive.rc.status | drive.rc.stream | sys.rt | sys.stack | sys.jitter | sys.reset | net.status");
+      "Comandos: steer.help | pid.help | spid.help | comms.status | speed.status | speed.reset | speed.stream | speed.uart | pid.stream | spid.stream | spid.target | drive.log | drive.pwm | drive.rc.status | drive.rc.stream | sys.rt | sys.stack | sys.jitter | sys.reset | net.status");
   reportNetworkStatus();
 }
 
@@ -567,6 +568,21 @@ void reportSpeedPidTargetStatus() {
   msg += " target=";
   msg += String(targetMps, 2);
   msg += "m/s";
+  sendTelnet(msg);
+}
+
+void reportDrivePwmOverrideStatus() {
+  bool enabled = false;
+  int percent = 0;
+  if (!quadDriveGetPwmOverride(enabled, percent)) {
+    sendTelnet("[DRIVE][PWM] N/A");
+    return;
+  }
+  String msg = "[DRIVE][PWM] ";
+  msg += enabled ? "ON" : "OFF";
+  msg += " duty=";
+  msg += percent;
+  msg += "%";
   sendTelnet(msg);
 }
 
@@ -1764,6 +1780,49 @@ void handleTelnetCommand(String line) {
 
     sendTelnet(
         "[DRIVE][LOG] Uso: drive.log | drive.log on | drive.log off | drive.log pid on [ms] | drive.log pid off");
+    return;
+  }
+
+  if (command.equalsIgnoreCase("drive.pwm")) {
+    if (args.isEmpty()) {
+      reportDrivePwmOverrideStatus();
+      return;
+    }
+
+    String normalized = args;
+    normalized.toLowerCase();
+    if (normalized == "off" || normalized == "0" || normalized == "stop") {
+      quadDriveSetPwmOverride(false, 0);
+      sendTelnet("[DRIVE][PWM] OFF");
+      return;
+    }
+
+    int dutyPercent = -1;
+    String dutyText = args;
+    if (normalized.startsWith("on")) {
+      dutyText = args.substring(2);
+      dutyText.trim();
+    }
+    if (!parseIntArg(dutyText, dutyPercent)) {
+      sendTelnet("[DRIVE][PWM] Uso: drive.pwm <0-100> | drive.pwm off");
+      return;
+    }
+    if (dutyPercent < 0 || dutyPercent > 100) {
+      sendTelnet("[DRIVE][PWM] Valor fuera de rango (0..100)");
+      return;
+    }
+
+    // Evitar un objetivo SPID latente al salir del modo PWM directo.
+    quadDriveSetSpeedTargetOverride(false, 0.0f);
+    if (!quadDriveSetPwmOverride(true, dutyPercent)) {
+      sendTelnet("[DRIVE][PWM] No se pudo activar");
+      return;
+    }
+
+    String msg = "[DRIVE][PWM] ON duty=";
+    msg += dutyPercent;
+    msg += "%";
+    sendTelnet(msg);
     return;
   }
 
