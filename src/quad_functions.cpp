@@ -622,6 +622,104 @@ bool quadDriveGetRcNeutralCalEnabled(bool& enabledOut) {
   return true;
 }
 
+uint8_t resolveAppliedBrakePercent(bool piBlocksRc,
+                                   bool piEstopActive,
+                                   uint8_t piBrakePercent,
+                                   uint8_t rcBrakePercent,
+                                   uint8_t overspeedBrakePercent) {
+  uint8_t appliedBrakePercent = 0;
+  if (piBlocksRc) {
+    appliedBrakePercent = (piBrakePercent >= overspeedBrakePercent) ? piBrakePercent : overspeedBrakePercent;
+    if (piEstopActive) {
+      appliedBrakePercent = 100;
+    }
+  } else {
+    appliedBrakePercent = (rcBrakePercent >= overspeedBrakePercent) ? rcBrakePercent : overspeedBrakePercent;
+  }
+  return appliedBrakePercent;
+}
+
+DriveThrottleInhibitReason resolveThrottleInhibitReason(bool piEstopActive,
+                                                        SpeedControlSource speedControlSource,
+                                                        bool speedPidFeedbackOk,
+                                                        bool speedPidFailsafe,
+                                                        bool piBlocksRc,
+                                                        uint8_t piBrakePercent,
+                                                        uint8_t rcBrakePercent,
+                                                        uint8_t overspeedBrakePercent) {
+  if (piEstopActive) {
+    return DriveThrottleInhibitReason::kEstop;
+  }
+  if (speedControlSource != SpeedControlSource::kNone && (!speedPidFeedbackOk || speedPidFailsafe)) {
+    return DriveThrottleInhibitReason::kFailsafe;
+  }
+  if (piBlocksRc && piBrakePercent > 0) {
+    return DriveThrottleInhibitReason::kPiBrake;
+  }
+  if (!piBlocksRc && rcBrakePercent > 0) {
+    return DriveThrottleInhibitReason::kRcBrake;
+  }
+  if (overspeedBrakePercent > 0) {
+    return DriveThrottleInhibitReason::kOverspeed;
+  }
+  return DriveThrottleInhibitReason::kNone;
+}
+
+QuadDriveRuntimeSnapshot makeDriveRuntimeSnapshot(bool commandFromPwmOverride,
+                                                  SpeedControlSource speedControlSource,
+                                                  bool piFresh,
+                                                  bool piEstopActive,
+                                                  bool speedPidFailsafe,
+                                                  bool speedPidOverspeed,
+                                                  uint8_t appliedBrakePercent) {
+  QuadDriveRuntimeSnapshot runtime{};
+  runtime.valid = true;
+  runtime.source =
+      commandFromPwmOverride ? QuadDriveControlSource::kTelnet : mapSpeedControlSourceToRuntime(speedControlSource);
+  runtime.piFresh = piFresh;
+  runtime.piEstopActive = piEstopActive;
+  runtime.speedPidFailsafe = speedPidFailsafe;
+  runtime.speedPidOverspeed = speedPidOverspeed;
+  runtime.appliedBrakePercent = appliedBrakePercent;
+  return runtime;
+}
+
+QuadDriveRcDebugSnapshot makeRcDebugSnapshot(int rawThrottle,
+                                             int rcFilteredThrottle,
+                                             int rcValue,
+                                             bool rcFresh,
+                                             TickType_t sampleTick,
+                                             TickType_t snapshotTick,
+                                             bool rcManualBrakeActive,
+                                             bool rcSpeedPidEligible,
+                                             bool rcUsingLatchThisCycle,
+                                             float rcTargetRawMpsDebug,
+                                             float rcTargetShapedMpsDebug) {
+  QuadDriveRcDebugSnapshot rcDebug{};
+  rcDebug.rawThrottle = rawThrottle;
+  rcDebug.filteredThrottle = rcFilteredThrottle;
+  rcDebug.normalizedThrottle = rcValue;
+  rcDebug.rcFresh = rcFresh;
+  rcDebug.snapshotAgeMs =
+      (snapshotTick != 0) ? static_cast<uint32_t>((sampleTick - snapshotTick) * portTICK_PERIOD_MS) : 0u;
+  rcDebug.rcManualBrakeActive = rcManualBrakeActive;
+  rcDebug.rcSpeedPidEligible = rcSpeedPidEligible;
+  rcDebug.rcSourceLatched = rcUsingLatchThisCycle;
+  rcDebug.rcNeutralOffsetCalEnabled = g_rcNeutralOffsetCalEnabled;
+  rcDebug.rcNeutralOffsetCalAllowed = g_rcNeutralOffsetCalAllowUpdate;
+  rcDebug.rcTargetRawMps = rcTargetRawMpsDebug;
+  rcDebug.rcTargetShapedMps = rcTargetShapedMpsDebug;
+  return rcDebug;
+}
+
+int applyThrottleActuation(bool throttleInhibit, int commandValue) {
+  if (throttleInhibit) {
+    quadThrottleStop();
+    return g_lastDuty;
+  }
+  return quadThrottleUpdate(commandValue);
+}
+
 void taskQuadDriveControl(void* parameter) {
   const QuadDriveTaskConfig* cfg = static_cast<const QuadDriveTaskConfig*>(parameter);
   if (cfg == nullptr) {
@@ -1114,52 +1212,33 @@ void taskQuadDriveControl(void* parameter) {
       overspeedBrakePercent = clampPercentFromFloat(speedPidBrakePercent);
     }
 
-    uint8_t appliedBrakePercent = 0;
-    if (piBlocksRc) {
-      appliedBrakePercent = (piBrakePercent >= overspeedBrakePercent) ? piBrakePercent : overspeedBrakePercent;
-      if (piEstopActive) {
-        appliedBrakePercent = 100;
-      }
-    } else {
-      appliedBrakePercent = (rcBrakePercent >= overspeedBrakePercent) ? rcBrakePercent : overspeedBrakePercent;
-    }
-
-    DriveThrottleInhibitReason inhibitReason = DriveThrottleInhibitReason::kNone;
-    if (piEstopActive) {
-      inhibitReason = DriveThrottleInhibitReason::kEstop;
-    } else if (speedControlSource != SpeedControlSource::kNone && (!speedPidFeedbackOk || speedPidFailsafe)) {
-      inhibitReason = DriveThrottleInhibitReason::kFailsafe;
-    } else if (piBlocksRc && piBrakePercent > 0) {
-      inhibitReason = DriveThrottleInhibitReason::kPiBrake;
-    } else if (!piBlocksRc && rcBrakePercent > 0) {
-      inhibitReason = DriveThrottleInhibitReason::kRcBrake;
-    } else if (overspeedBrakePercent > 0) {
-      inhibitReason = DriveThrottleInhibitReason::kOverspeed;
-    }
+    const uint8_t appliedBrakePercent =
+        resolveAppliedBrakePercent(piBlocksRc, piEstopActive, piBrakePercent, rcBrakePercent, overspeedBrakePercent);
+    const DriveThrottleInhibitReason inhibitReason =
+        resolveThrottleInhibitReason(piEstopActive,
+                                     speedControlSource,
+                                     speedPidFeedbackOk,
+                                     speedPidFailsafe,
+                                     piBlocksRc,
+                                     piBrakePercent,
+                                     rcBrakePercent,
+                                     overspeedBrakePercent);
 
     if (appliedBrakePercent > 0 || inhibitReason != DriveThrottleInhibitReason::kNone) {
       throttleInhibit = true;
     }
     quadBrakeApplyPercent(appliedBrakePercent);
 
-    QuadDriveRuntimeSnapshot driveRuntime{};
-    driveRuntime.valid = true;
-    driveRuntime.source =
-        commandFromPwmOverride ? QuadDriveControlSource::kTelnet : mapSpeedControlSourceToRuntime(speedControlSource);
-    driveRuntime.piFresh = piFresh;
-    driveRuntime.piEstopActive = piEstopActive;
-    driveRuntime.speedPidFailsafe = speedPidFailsafe;
-    driveRuntime.speedPidOverspeed = speedPidOverspeed;
-    driveRuntime.appliedBrakePercent = appliedBrakePercent;
+    const QuadDriveRuntimeSnapshot driveRuntime = makeDriveRuntimeSnapshot(commandFromPwmOverride,
+                                                                           speedControlSource,
+                                                                           piFresh,
+                                                                           piEstopActive,
+                                                                           speedPidFailsafe,
+                                                                           speedPidOverspeed,
+                                                                           appliedBrakePercent);
     setDriveRuntimeSnapshot(driveRuntime);
 
-    int duty = 0;
-    if (throttleInhibit) {
-      quadThrottleStop();
-      duty = g_lastDuty;
-    } else {
-      duty = quadThrottleUpdate(commandValue);
-    }
+    const int duty = applyThrottleActuation(throttleInhibit, commandValue);
 
     bool brakeServoAValid = false;
     bool brakeServoBValid = false;
@@ -1174,20 +1253,18 @@ void taskQuadDriveControl(void* parameter) {
                                  g_brakeConfig.brakeAngleServoBDeg,
                                  brakeServoBValid);
 
-    QuadDriveRcDebugSnapshot rcDebug{};
-    rcDebug.rawThrottle = rawThrottle;
-    rcDebug.filteredThrottle = rcFilteredThrottle;
-    rcDebug.normalizedThrottle = rcValue;
-    rcDebug.rcFresh = rcFresh;
-    rcDebug.snapshotAgeMs = (snapshotTick != 0) ? static_cast<uint32_t>((sampleTick - snapshotTick) * portTICK_PERIOD_MS)
-                                                : 0u;
-    rcDebug.rcManualBrakeActive = rcManualBrakeActive;
-    rcDebug.rcSpeedPidEligible = rcSpeedPidEligible;
-    rcDebug.rcSourceLatched = rcUsingLatchThisCycle;
-    rcDebug.rcNeutralOffsetCalEnabled = g_rcNeutralOffsetCalEnabled;
-    rcDebug.rcNeutralOffsetCalAllowed = g_rcNeutralOffsetCalAllowUpdate;
-    rcDebug.rcTargetRawMps = rcTargetRawMpsDebug;
-    rcDebug.rcTargetShapedMps = rcTargetShapedMpsDebug;
+    const QuadDriveRcDebugSnapshot rcDebug =
+        makeRcDebugSnapshot(rawThrottle,
+                            rcFilteredThrottle,
+                            rcValue,
+                            rcFresh,
+                            sampleTick,
+                            snapshotTick,
+                            rcManualBrakeActive,
+                            rcSpeedPidEligible,
+                            rcUsingLatchThisCycle,
+                            rcTargetRawMpsDebug,
+                            rcTargetShapedMpsDebug);
     setRcDebugSnapshot(rcDebug);
 
     if (driveLogEnabled && (commandValue != lastThrottleCmdValue || duty != lastDutyReported ||

@@ -1,5 +1,7 @@
 # Comandos OTA y Logs WiFi (`ESP32_SALUS`)
 
+Nota operacional: la UI web local fue removida. Las herramientas host soportadas son CLI Telnet y scripts HIL en `tools/tests`.
+
 ## Requisito rapido
 
 Ejecutar desde la carpeta del proyecto:
@@ -225,6 +227,12 @@ Modo rapido (sin pasos manuales RC, solo baseline + chequeos pasivos):
 
 ```bash
 python3 tools/tests/speed_pid_hil.py --mode quick
+```
+
+Regresión segura del parser Telnet (sin aceleración):
+
+```bash
+python3 tools/tests/telnet_command_regression.py --host esp32-salus.local
 ```
 
 ## Autocalibracion PID velocidad (Telnet)

@@ -1,9 +1,7 @@
-#ifndef ARDUINO_H_INCLUDE
-#define ARDUINO_H_INCLUDE
+#ifndef FS_IA6_H
+#define FS_IA6_H
 
 #include <Arduino.h>
-
-#endif  // ARDUINO_H_INCLUDE
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -61,3 +59,5 @@ void taskRcMonitor(void* parameter);
 bool rcGetStateCopy(RcSharedState& out);
 bool rcRegisterConsumer(TaskHandle_t handle);
 void rcUnregisterConsumer(TaskHandle_t handle);
+
+#endif  // FS_IA6_H

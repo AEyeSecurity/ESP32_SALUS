@@ -101,6 +101,7 @@ constexpr float kNeutralHoldErrorDeg = 0.6f;
 const TickType_t kCalibrationTimeout = pdMS_TO_TICKS(10000);
 const TickType_t kCalibrationReleaseDuration = pdMS_TO_TICKS(250);
 const TickType_t kCalibrationStallDuration = pdMS_TO_TICKS(1200);
+const TickType_t kCalibrationDebugInterval = pdMS_TO_TICKS(250);
 }  // namespace
 
 PidController::PidController()
@@ -330,6 +331,280 @@ bool pidGetRuntimeSnapshot(PidRuntimeSnapshot& snapshot) {
   return snapshot.valid;
 }
 
+namespace {
+
+enum class CalibrationState : uint8_t { Idle, MoveLeft, ReleaseLeft, MoveRight, ReleaseRight };
+
+struct PidCalibrationContext {
+  CalibrationState state = CalibrationState::Idle;
+  CalibrationState lastState = CalibrationState::Idle;
+  TickType_t stateStartTick = 0;
+  float leftAngleDeg = 0.0f;
+  float rightAngleDeg = 0.0f;
+  bool active = false;
+  float lastAngleDeg = 0.0f;
+  TickType_t lastMoveTick = 0;
+  bool motionValid = false;
+  TickType_t lastDebugTick = 0;
+};
+
+const char* calibrationStateName(CalibrationState state) {
+  switch (state) {
+    case CalibrationState::MoveLeft:
+      return "MoveLeft";
+    case CalibrationState::ReleaseLeft:
+      return "ReleaseLeft";
+    case CalibrationState::MoveRight:
+      return "MoveRight";
+    case CalibrationState::ReleaseRight:
+      return "ReleaseRight";
+    case CalibrationState::Idle:
+    default:
+      return "Idle";
+  }
+}
+
+void publishPidRuntimeSnapshot(const PidRuntimeSnapshot& snapshot) {
+  portENTER_CRITICAL(&g_pidMux);
+  g_pidRuntimeSnapshot = snapshot;
+  portEXIT_CRITICAL(&g_pidMux);
+}
+
+void finishCalibrationAndReport(float leftAngleDeg, float rightAngleDeg, float measuredDeg) {
+  if (measuredDeg >= 0.0f) {
+    steeringCalibrationApply(leftAngleDeg, rightAngleDeg);
+    String msg = "[PID] Calibracion completa. Izq=";
+    msg += String(leftAngleDeg, 2);
+    msg += "deg, Der=";
+    msg += String(rightAngleDeg, 2);
+    msg += "deg";
+    broadcastIf(true, msg);
+  } else {
+    broadcastIf(true, "[PID] Calibracion completa pero sin lectura de angulo valida");
+  }
+}
+
+bool calibrationStallDetected(PidCalibrationContext& calibration, TickType_t nowTicks, float measuredDeg) {
+  if (measuredDeg < 0.0f) {
+    return false;
+  }
+  if (!calibration.motionValid) {
+    calibration.motionValid = true;
+    calibration.lastAngleDeg = measuredDeg;
+    calibration.lastMoveTick = nowTicks;
+    return false;
+  }
+  if (fabsf(measuredDeg - calibration.lastAngleDeg) > kCalibrationStallThresholdDeg) {
+    calibration.lastAngleDeg = measuredDeg;
+    calibration.lastMoveTick = nowTicks;
+    return false;
+  }
+  return (nowTicks - calibration.lastMoveTick) >= kCalibrationStallDuration;
+}
+
+void stopCalibrationSession(PidCalibrationContext& calibration, PidController* controller) {
+  bridge_stop();
+  calibration.active = false;
+  calibration.state = CalibrationState::Idle;
+  calibration.lastState = CalibrationState::Idle;
+  calibration.stateStartTick = 0;
+  calibration.motionValid = false;
+  calibration.lastDebugTick = 0;
+  controller->reset();
+}
+
+void startCalibrationSession(PidCalibrationContext& calibration,
+                             TickType_t nowTicks,
+                             PidController* controller,
+                             bool& bridgeEnabled) {
+  calibration.active = true;
+  calibration.state = CalibrationState::MoveRight;
+  calibration.lastState = CalibrationState::Idle;
+  calibration.stateStartTick = nowTicks;
+  calibration.leftAngleDeg = 0.0f;
+  calibration.rightAngleDeg = 0.0f;
+  calibration.motionValid = false;
+  calibration.lastMoveTick = nowTicks;
+  calibration.lastDebugTick = 0;
+  controller->reset();
+  if (!bridgeEnabled) {
+    enable_bridge_h();
+    bridgeEnabled = true;
+  }
+  broadcastIf(true, "[PID] Iniciando calibracion de limites de direccion");
+}
+
+void emitCalibrationDebug(PidCalibrationContext& calibration,
+                          TickType_t nowTicks,
+                          float measuredDeg,
+                          bool limitLeftActive,
+                          bool limitRightActive) {
+  if ((nowTicks - calibration.lastDebugTick) < kCalibrationDebugInterval) {
+    return;
+  }
+  String dbg = "[PID][CAL] estado=";
+  dbg += calibrationStateName(calibration.state);
+  dbg += " limL=";
+  dbg += limitLeftActive ? "1" : "0";
+  dbg += " limR=";
+  dbg += limitRightActive ? "1" : "0";
+  dbg += " ang=";
+  if (measuredDeg >= 0.0f) {
+    dbg += String(measuredDeg, 2);
+    dbg += "deg";
+  } else {
+    dbg += "ERR";
+  }
+  dbg += " t=";
+  dbg += static_cast<int>((nowTicks - calibration.stateStartTick) * portTICK_PERIOD_MS);
+  dbg += "ms";
+  broadcastIf(true, dbg);
+  calibration.lastDebugTick = nowTicks;
+}
+
+bool processCalibrationStep(PidCalibrationContext& calibration,
+                            PidTaskConfig* cfg,
+                            TickType_t nowTicks,
+                            float measuredDeg,
+                            bool limitLeftActive,
+                            bool limitRightActive) {
+  if (calibration.state != calibration.lastState) {
+    calibration.motionValid = false;
+    calibration.lastMoveTick = nowTicks;
+    calibration.lastState = calibration.state;
+  }
+
+  bool keepCalibrating = true;
+  switch (calibration.state) {
+    case CalibrationState::MoveLeft: {
+      if (measuredDeg < 0.0f) {
+        broadcastIf(true, "[PID] Calibracion abortada: lectura AS5600 invalida");
+        keepCalibrating = false;
+        break;
+      }
+      bridge_turn_left(kCalibrationDutyPercent);
+      if (calibrationStallDetected(calibration, nowTicks, measuredDeg)) {
+        calibration.leftAngleDeg = (measuredDeg >= 0.0f) ? measuredDeg : calibration.lastAngleDeg;
+        String msg = "[PID] Calibracion: limite izquierdo inferido por estancamiento (sin FC)";
+        msg += " ang=";
+        msg += String(calibration.leftAngleDeg, 2);
+        msg += "deg";
+        broadcastIf(true, msg);
+        bridge_stop();
+        calibration.state = CalibrationState::ReleaseLeft;
+        calibration.stateStartTick = nowTicks;
+        break;
+      }
+      if (limitLeftActive) {
+        calibration.leftAngleDeg = measuredDeg;
+        bridge_stop();
+        calibration.state = CalibrationState::ReleaseLeft;
+        calibration.stateStartTick = nowTicks;
+        String msg = "[PID] Calibracion: limite izquierdo registrado en ";
+        msg += String(calibration.leftAngleDeg, 2);
+        msg += "deg";
+        broadcastIf(true, msg);
+      } else if ((nowTicks - calibration.stateStartTick) >= kCalibrationTimeout) {
+        broadcastIf(true, "[PID] Calibracion abortada: timeout alcanzando limite izquierdo");
+        keepCalibrating = false;
+      }
+      break;
+    }
+    case CalibrationState::ReleaseLeft: {
+      if (!limitLeftActive && (nowTicks - calibration.stateStartTick) >= pdMS_TO_TICKS(50)) {
+        bridge_stop();
+        finishCalibrationAndReport(calibration.leftAngleDeg, calibration.rightAngleDeg, measuredDeg);
+        keepCalibrating = false;
+      } else if ((nowTicks - calibration.stateStartTick) >= kCalibrationReleaseDuration) {
+        broadcastIf(
+            true,
+            "[PID] Calibracion: forzando finalizacion tras liberar el limite izquierdo (timeout)");
+        bridge_stop();
+        finishCalibrationAndReport(calibration.leftAngleDeg, calibration.rightAngleDeg, measuredDeg);
+        keepCalibrating = false;
+      } else {
+        bridge_turn_right(kCalibrationReleaseDutyPercent);
+      }
+      break;
+    }
+    case CalibrationState::MoveRight: {
+      if (measuredDeg < 0.0f) {
+        broadcastIf(true, "[PID] Calibracion abortada: lectura AS5600 invalida");
+        keepCalibrating = false;
+        break;
+      }
+      bridge_turn_right(kCalibrationDutyPercent);
+      if (calibrationStallDetected(calibration, nowTicks, measuredDeg)) {
+        calibration.rightAngleDeg = (measuredDeg >= 0.0f) ? measuredDeg : calibration.lastAngleDeg;
+        bridge_stop();
+        calibration.state = CalibrationState::ReleaseRight;
+        calibration.stateStartTick = nowTicks;
+        String msg = "[PID] Calibracion: limite derecho inferido por estancamiento (sin FC)";
+        msg += " ang=";
+        msg += String(calibration.rightAngleDeg, 2);
+        msg += "deg";
+        broadcastIf(true, msg);
+        break;
+      }
+      if (limitRightActive) {
+        calibration.rightAngleDeg = measuredDeg;
+        bridge_stop();
+        calibration.state = CalibrationState::ReleaseRight;
+        calibration.stateStartTick = nowTicks;
+        String msg = "[PID] Calibracion: limite derecho registrado en ";
+        msg += String(calibration.rightAngleDeg, 2);
+        msg += "deg";
+        broadcastIf(true, msg);
+      } else if ((nowTicks - calibration.stateStartTick) >= kCalibrationTimeout) {
+        String msg = "[PID] Calibracion abortada: timeout alcanzando limite derecho (limL=";
+        msg += limitLeftActive ? "1" : "0";
+        msg += ", limR=";
+        msg += limitRightActive ? "1" : "0";
+        msg += ", ang=";
+        if (measuredDeg >= 0.0f) {
+          msg += String(measuredDeg, 2);
+          msg += "deg";
+        } else {
+          msg += "ERR";
+        }
+        msg += ")";
+        broadcastIf(true, msg);
+        keepCalibrating = false;
+      }
+      break;
+    }
+    case CalibrationState::ReleaseRight: {
+      if (!limitRightActive && (nowTicks - calibration.stateStartTick) >= pdMS_TO_TICKS(50)) {
+        bridge_stop();
+        calibration.state = CalibrationState::MoveLeft;
+        calibration.stateStartTick = nowTicks;
+        broadcastIf(true, "[PID] Calibracion: iniciando busqueda de limite izquierdo");
+      } else if ((nowTicks - calibration.stateStartTick) >= kCalibrationReleaseDuration) {
+        bridge_stop();
+        calibration.state = CalibrationState::MoveLeft;
+        calibration.stateStartTick = nowTicks;
+        broadcastIf(
+            true,
+            "[PID] Calibracion: forzando busqueda de limite izquierdo (timeout liberando derecho)");
+      } else {
+        bridge_turn_left(kCalibrationReleaseDutyPercent);
+      }
+      break;
+    }
+    case CalibrationState::Idle:
+    default:
+      keepCalibrating = false;
+      break;
+  }
+
+  if (!keepCalibrating) {
+    stopCalibrationSession(calibration, cfg->controller);
+  }
+  return calibration.active;
+}
+
+}  // namespace
+
 void taskPidControl(void* parameter) {
   PidTaskConfig* cfg = static_cast<PidTaskConfig*>(parameter);
   if (cfg == nullptr || cfg->sensor == nullptr || cfg->controller == nullptr) {
@@ -363,10 +638,8 @@ void taskPidControl(void* parameter) {
   const float dtOverrunThreshold = expectedPeriodSeconds + 0.010f;
   const TickType_t dtWarningCooldown = pdMS_TO_TICKS(500);
   const TickType_t runtimeWarningCooldown = pdMS_TO_TICKS(1000);
-  const TickType_t calibrationDebugInterval = pdMS_TO_TICKS(250);
   TickType_t lastDtWarningTick = 0;
   TickType_t lastRuntimeWarningTick = 0;
-  TickType_t lastCalibrationDebugTick = 0;
   int64_t lastIterationStartUs = esp_timer_get_time();
 
   portENTER_CRITICAL(&g_pidMux);
@@ -374,44 +647,13 @@ void taskPidControl(void* parameter) {
   g_pidRuntimeSnapshot.valid = true;
   portEXIT_CRITICAL(&g_pidMux);
 
-  enum class CalibrationState { Idle, MoveLeft, ReleaseLeft, MoveRight, ReleaseRight };
-  CalibrationState calibrationState = CalibrationState::Idle;
-  CalibrationState lastCalibrationState = CalibrationState::Idle;
-  TickType_t calibrationStateStart = 0;
-  float calibrationLeftAngleDeg = 0.0f;
-  float calibrationRightAngleDeg = 0.0f;
-  bool calibrationActive = false;
-  float calibrationLastAngleDeg = 0.0f;
-  TickType_t calibrationLastMoveTick = 0;
-  bool calibrationMotionValid = false;
+  PidCalibrationContext calibration{};
   bool rcWasFresh = false;
   bool rcNeutralCaptureActive = false;
   TickType_t rcNeutralCaptureStartTick = 0;
   int rcNeutralSampleSum = 0;
   int rcNeutralSampleCount = 0;
   int rcSteeringNeutralOffset = 0;
-
-  auto calibrationStateName = [](CalibrationState state) -> const char* {
-    switch (state) {
-      case CalibrationState::MoveLeft:
-        return "MoveLeft";
-      case CalibrationState::ReleaseLeft:
-        return "ReleaseLeft";
-      case CalibrationState::MoveRight:
-        return "MoveRight";
-      case CalibrationState::ReleaseRight:
-        return "ReleaseRight";
-      case CalibrationState::Idle:
-      default:
-        return "Idle";
-    }
-  };
-
-  auto publishRuntimeSnapshot = [](const PidRuntimeSnapshot& snapshot) {
-    portENTER_CRITICAL(&g_pidMux);
-    g_pidRuntimeSnapshot = snapshot;
-    portEXIT_CRITICAL(&g_pidMux);
-  };
 
   for (;;) {
     const int64_t iterationStartUs = esp_timer_get_time();
@@ -446,21 +688,8 @@ void taskPidControl(void* parameter) {
       }
     }
 
-    if (!calibrationActive && steeringCalibrationConsumeRequest()) {
-      calibrationActive = true;
-      calibrationState = CalibrationState::MoveRight;
-      lastCalibrationState = CalibrationState::Idle;
-      calibrationStateStart = nowTicks;
-      calibrationLeftAngleDeg = 0.0f;
-      calibrationRightAngleDeg = 0.0f;
-      calibrationMotionValid = false;
-      calibrationLastMoveTick = nowTicks;
-      cfg->controller->reset();
-      if (!bridgeEnabled) {
-        enable_bridge_h();
-        bridgeEnabled = true;
-      }
-      broadcastIf(true, "[PID] Iniciando calibracion de limites de direccion");
+    if (!calibration.active && steeringCalibrationConsumeRequest()) {
+      startCalibrationSession(calibration, nowTicks, cfg->controller, bridgeEnabled);
     }
 
     RcSharedState rcSnapshot{};
@@ -542,7 +771,7 @@ void taskPidControl(void* parameter) {
 
     PidRuntimeSnapshot runtimeSnapshot{};
     runtimeSnapshot.valid = true;
-    runtimeSnapshot.calibrationActive = calibrationActive;
+    runtimeSnapshot.calibrationActive = calibration.active;
     runtimeSnapshot.steeringFromPi = steeringFromPi;
     runtimeSnapshot.sensorValid = measuredDeg >= 0.0f;
     runtimeSnapshot.limitLeftActive = limitLeftActive;
@@ -556,214 +785,11 @@ void taskPidControl(void* parameter) {
 
     const bool shouldLog = cfg->log && (logInterval == 0 || (nowTicks - lastLog) >= logInterval);
 
-    if (calibrationActive && calibrationState != lastCalibrationState) {
-      calibrationMotionValid = false;
-      calibrationLastMoveTick = nowTicks;
-      lastCalibrationState = calibrationState;
-    }
-
-    if (calibrationActive) {
-      if ((nowTicks - lastCalibrationDebugTick) >= calibrationDebugInterval) {
-        String dbg = "[PID][CAL] estado=";
-        dbg += calibrationStateName(calibrationState);
-        dbg += " limL=";
-        dbg += limitLeftActive ? "1" : "0";
-        dbg += " limR=";
-        dbg += limitRightActive ? "1" : "0";
-        dbg += " ang=";
-        if (measuredDeg >= 0.0f) {
-          dbg += String(measuredDeg, 2);
-          dbg += "deg";
-        } else {
-          dbg += "ERR";
-        }
-        dbg += " t=";
-        dbg += static_cast<int>((nowTicks - calibrationStateStart) * portTICK_PERIOD_MS);
-        dbg += "ms";
-        broadcastIf(true, dbg);
-        lastCalibrationDebugTick = nowTicks;
-      }
-      bool keepCalibrating = true;
-      switch (calibrationState) {
-        case CalibrationState::MoveLeft: {
-          if (measuredDeg < 0.0f) {
-            broadcastIf(true, "[PID] Calibracion abortada: lectura AS5600 invalida");
-            keepCalibrating = false;
-            break;
-          }
-          bridge_turn_left(kCalibrationDutyPercent);
-          bool stallDetected = false;
-          if (measuredDeg >= 0.0f) {
-            if (!calibrationMotionValid) {
-              calibrationMotionValid = true;
-              calibrationLastAngleDeg = measuredDeg;
-              calibrationLastMoveTick = nowTicks;
-            } else if (fabsf(measuredDeg - calibrationLastAngleDeg) > kCalibrationStallThresholdDeg) {
-              calibrationLastAngleDeg = measuredDeg;
-              calibrationLastMoveTick = nowTicks;
-            } else if ((nowTicks - calibrationLastMoveTick) >= kCalibrationStallDuration) {
-              stallDetected = true;
-            }
-          }
-          if (stallDetected) {
-            calibrationLeftAngleDeg = (measuredDeg >= 0.0f) ? measuredDeg : calibrationLastAngleDeg;
-            String msg = "[PID] Calibracion: limite izquierdo inferido por estancamiento (sin FC)";
-            msg += " ang=";
-            msg += String(calibrationLeftAngleDeg, 2);
-            msg += "deg";
-            broadcastIf(true, msg);
-            bridge_stop();
-            calibrationState = CalibrationState::ReleaseLeft;
-            calibrationStateStart = nowTicks;
-            break;
-          }
-          if (limitLeftActive) {
-            calibrationLeftAngleDeg = measuredDeg;
-            bridge_stop();
-            calibrationState = CalibrationState::ReleaseLeft;
-            calibrationStateStart = nowTicks;
-            String msg = "[PID] Calibracion: limite izquierdo registrado en ";
-            msg += String(calibrationLeftAngleDeg, 2);
-            msg += "deg";
-            broadcastIf(true, msg);
-          } else if ((nowTicks - calibrationStateStart) >= kCalibrationTimeout) {
-            broadcastIf(true, "[PID] Calibracion abortada: timeout alcanzando limite izquierdo");
-            keepCalibrating = false;
-          }
-          break;
-        }
-        case CalibrationState::ReleaseLeft: {
-          if (!limitLeftActive && (nowTicks - calibrationStateStart) >= pdMS_TO_TICKS(50)) {
-            bridge_stop();
-            if (measuredDeg >= 0.0f) {
-              steeringCalibrationApply(calibrationLeftAngleDeg, calibrationRightAngleDeg);
-              String msg = "[PID] Calibracion completa. Izq=";
-              msg += String(calibrationLeftAngleDeg, 2);
-              msg += "deg, Der=";
-              msg += String(calibrationRightAngleDeg, 2);
-              msg += "deg";
-              broadcastIf(true, msg);
-            } else {
-              broadcastIf(true, "[PID] Calibracion completa pero sin lectura de angulo valida");
-            }
-            keepCalibrating = false;
-          } else if ((nowTicks - calibrationStateStart) >= kCalibrationReleaseDuration) {
-            broadcastIf(true,
-                        "[PID] Calibracion: forzando finalizacion tras liberar el limite izquierdo (timeout)");
-            bridge_stop();
-            if (measuredDeg >= 0.0f) {
-              steeringCalibrationApply(calibrationLeftAngleDeg, calibrationRightAngleDeg);
-              String msg = "[PID] Calibracion completa. Izq=";
-              msg += String(calibrationLeftAngleDeg, 2);
-              msg += "deg, Der=";
-              msg += String(calibrationRightAngleDeg, 2);
-              msg += "deg";
-              broadcastIf(true, msg);
-            } else {
-              broadcastIf(true, "[PID] Calibracion completa pero sin lectura de angulo valida");
-            }
-            keepCalibrating = false;
-          } else {
-            bridge_turn_right(kCalibrationReleaseDutyPercent);
-          }
-          break;
-        }
-        case CalibrationState::MoveRight: {
-          if (measuredDeg < 0.0f) {
-            broadcastIf(true, "[PID] Calibracion abortada: lectura AS5600 invalida");
-            keepCalibrating = false;
-            break;
-          }
-          bridge_turn_right(kCalibrationDutyPercent);
-          bool stallDetected = false;
-          if (measuredDeg >= 0.0f) {
-            if (!calibrationMotionValid) {
-              calibrationMotionValid = true;
-              calibrationLastAngleDeg = measuredDeg;
-              calibrationLastMoveTick = nowTicks;
-            } else if (fabsf(measuredDeg - calibrationLastAngleDeg) > kCalibrationStallThresholdDeg) {
-              calibrationLastAngleDeg = measuredDeg;
-              calibrationLastMoveTick = nowTicks;
-            } else if ((nowTicks - calibrationLastMoveTick) >= kCalibrationStallDuration) {
-              stallDetected = true;
-            }
-          }
-          if (stallDetected) {
-            calibrationRightAngleDeg = (measuredDeg >= 0.0f) ? measuredDeg : calibrationLastAngleDeg;
-            bridge_stop();
-            calibrationState = CalibrationState::ReleaseRight;
-            calibrationStateStart = nowTicks;
-            String msg = "[PID] Calibracion: limite derecho inferido por estancamiento (sin FC)";
-            msg += " ang=";
-            msg += String(calibrationRightAngleDeg, 2);
-            msg += "deg";
-            broadcastIf(true, msg);
-            break;
-          }
-          if (limitRightActive) {
-            calibrationRightAngleDeg = measuredDeg;
-            bridge_stop();
-            calibrationState = CalibrationState::ReleaseRight;
-            calibrationStateStart = nowTicks;
-            String msg = "[PID] Calibracion: limite derecho registrado en ";
-            msg += String(calibrationRightAngleDeg, 2);
-            msg += "deg";
-            broadcastIf(true, msg);
-          } else if ((nowTicks - calibrationStateStart) >= kCalibrationTimeout) {
-            String msg = "[PID] Calibracion abortada: timeout alcanzando limite derecho (limL=";
-            msg += limitLeftActive ? "1" : "0";
-            msg += ", limR=";
-            msg += limitRightActive ? "1" : "0";
-            msg += ", ang=";
-            if (measuredDeg >= 0.0f) {
-              msg += String(measuredDeg, 2);
-              msg += "deg";
-            } else {
-              msg += "ERR";
-            }
-            msg += ")";
-            broadcastIf(true, msg);
-            keepCalibrating = false;
-          }
-          break;
-        }
-        case CalibrationState::ReleaseRight: {
-          if (!limitRightActive && (nowTicks - calibrationStateStart) >= pdMS_TO_TICKS(50)) {
-            bridge_stop();
-            calibrationState = CalibrationState::MoveLeft;
-            calibrationStateStart = nowTicks;
-            String msg = "[PID] Calibracion: iniciando busqueda de limite izquierdo";
-            broadcastIf(true, msg);
-          } else if ((nowTicks - calibrationStateStart) >= kCalibrationReleaseDuration) {
-            bridge_stop();
-            calibrationState = CalibrationState::MoveLeft;
-            calibrationStateStart = nowTicks;
-            broadcastIf(
-                true,
-                "[PID] Calibracion: forzando busqueda de limite izquierdo (timeout liberando derecho)");
-          } else {
-            bridge_turn_left(kCalibrationReleaseDutyPercent);
-          }
-          break;
-        }
-        case CalibrationState::Idle:
-        default:
-          keepCalibrating = false;
-          break;
-      }
-
-      if (!keepCalibrating) {
-        bridge_stop();
-        calibrationActive = false;
-        calibrationState = CalibrationState::Idle;
-        calibrationStateStart = 0;
-        calibrationMotionValid = false;
-        lastCalibrationState = CalibrationState::Idle;
-        lastCalibrationDebugTick = 0;
-        cfg->controller->reset();
-      }
-      runtimeSnapshot.calibrationActive = calibrationActive;
-      publishRuntimeSnapshot(runtimeSnapshot);
+    if (calibration.active) {
+      emitCalibrationDebug(calibration, nowTicks, measuredDeg, limitLeftActive, limitRightActive);
+      runtimeSnapshot.calibrationActive =
+          processCalibrationStep(calibration, cfg, nowTicks, measuredDeg, limitLeftActive, limitRightActive);
+      publishPidRuntimeSnapshot(runtimeSnapshot);
       const bool overrun = cycleUs > expectedPeriodUs;
       systemDiagReportLoop(SystemDiagTaskId::kPid, cycleUs, expectedPeriodUs, overrun, notificationCount == 0);
       continue;
@@ -883,7 +909,7 @@ void taskPidControl(void* parameter) {
 
     runtimeSnapshot.errorDeg = errorDeg;
     runtimeSnapshot.outputPercent = outputPercent;
-    publishRuntimeSnapshot(runtimeSnapshot);
+    publishPidRuntimeSnapshot(runtimeSnapshot);
 
     const int64_t iterationDurationUs = esp_timer_get_time() - iterationStartUs;
     if (cfg->log && iterationDurationUs > 4000) {

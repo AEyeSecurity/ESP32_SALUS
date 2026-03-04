@@ -2,11 +2,13 @@
 
 Firmware para ESP32 centrado en el control de direccion de un quad con sensor magnetico AS5600. El proyecto combina OTA+Telnet, un lazo PID, control de acelerador LEDC y servos de freno. Este documento detalla la organizacion de las tareas FreeRTOS, sus prioridades, cadencias y condiciones de activacion.
 
+Nota operacional: la UI web de Telnet fue removida del repositorio para reducir complejidad y evitar cargas de sondeo/streaming desde host. El control y diagnóstico host se realiza por CLI Telnet y scripts HIL en `tools/tests`.
+
 ## Flujo de arranque (src/main.cpp)
 
 1. `setup()` inicializa WiFi/Telnet/OTA, configura PID/sensores y luego levanta las tareas, incluyendo UART con Raspberry Pi (`piCommsInit` + `taskPiCommsRx/Tx`).
 2. Se configuran los limites del controlador PID (`PidController::setTunings`, `setOutputLimits`, `setIntegralLimits`, `reset`).
-3. Se configuran pines de entrada para los canales RC (GPIO0, GPIO2, GPIO4, GPIO16) y se habilita el lector RMT que captura los pulsos del receptor FS-iA6.
+3. Se configuran pines de entrada para los canales RC (GPIO4, GPIO0, GPIO16, GPIO17) y se habilita el lector RMT que captura los pulsos del receptor FS-iA6.
 4. Se crean las tareas FreeRTOS usando `startTaskPinned` (`src/freertos_utils.cpp`), pasando los `*_TaskConfig` con parametros de periodo, logging y auto-inicializacion de hardware.
 5. Se ejecuta un autotest del AS5600 (`runAs5600SelfTest`) y se lanza `taskAs5600Monitor`.
 6. La tarea Arduino `loop()` queda como supervisor ligero y solo cede CPU con `vTaskDelay(50 ms)`.
@@ -69,7 +71,7 @@ Troubleshooting OTA rapido:
 
 ### `taskRcSampler` (src/fs_ia6.cpp)
 - Configuracion: `FsIa6SamplerConfig` define periodo de vigilancia (10 ms), umbral de datos frescos y timeout de recepcion RMT.
-- Bucle: inicializa cuatro canales RMT (GPIO0, GPIO2, GPIO4, GPIO16) a 1 us de resolucion, consume el ring buffer, normaliza a -100..100 y publica un `RcSharedState` protegido por `portMUX`.
+- Bucle: inicializa cuatro canales RMT (GPIO4, GPIO0, GPIO16, GPIO17) a 1 us de resolucion, consume el ring buffer, normaliza a -100..100 y publica un `RcSharedState` protegido por `portMUX`.
 - Prioridad: corre con prioridad 4 en el nucleo 1; cada pulso nuevo dispara `xTaskNotifyGive` a los consumidores registrados mediante `rcRegisterConsumer`.
 - Logging: con `debug::kLogRc` envia un resumen cada 500 ms solamente cuando hay lecturas recientes, evitando ruido cuando el receptor esta desconectado.
 - Consumo: otras tareas obtienen el snapshot con `rcGetStateCopy` y dependen de las notificaciones para reaccionar con latencia baja sin saturar la CPU.
@@ -140,7 +142,7 @@ Troubleshooting OTA rapido:
   - `speed.uart` responde `N/A source=hall` (ya no existe backend UART de velocidad).
   - `sys.rt`, `sys.stack`, `sys.jitter on [ms]|off`, `sys.reset [keep|full]` exponen métricas RT/stack y permiten resetear acumulados por etapa.
   - `pid.status`, `pid.deadband`, `pid.minactive`, `pid.stream on [ms]` / `pid.stream off` permiten debug/tuning del PID de direccion en vivo.
-  - `spid.status`, `spid.set`, `spid.kp/ki/kd`, `spid.ramp`, `spid.minthrottle`, `spid.thslewup`, `spid.thslewdown`, `spid.minth.spd`, `spid.launchwin`, `spid.iunwind`, `spid.dfilter`, `spid.max`, `spid.brakecap`, `spid.hys`, `spid.brakeslewup`, `spid.brakeslewdown`, `spid.brakehold`, `spid.brakedb`, `spid.target`, `spid.save`, `spid.reset` ajustan PID de velocidad (incluye `p/i/d`, salida saturada/no saturada, launch-assist controlado y persistencia NVS `speed_pid` `ver=3`).
+  - `spid.status`, `spid.set`, `spid.kp/ki/kd`, `spid.ramp`, `spid.minthrottle`, `spid.thslewup`, `spid.thslewdown`, `spid.minth.spd`, `spid.launchwin`, `spid.iunwind`, `spid.dfilter`, `spid.max`, `spid.brakecap`, `spid.hys`, `spid.brakeslewup`, `spid.brakeslewdown`, `spid.brakehold`, `spid.brakedb`, `spid.target`, `spid.save`, `spid.reset` ajustan PID de velocidad (incluye `p/i/d`, salida saturada/no saturada, launch-assist controlado y persistencia NVS `speed_pid` `ver=4`).
   - `spid.stream on [ms]` / `spid.stream off` permite monitoreo continuo de estado/tuning PID.
   - `drive.log on|off` habilita/deshabilita logs `[DRIVE]` base.
   - `drive.log pid on [ms] | drive.log pid off` habilita/deshabilita trace forense periódico `[DRIVE][PIDTRACE]` para analizar estabilidad de velocidad y autofrenado (`target`, `speed`, `PWM`, `P/I/D`, `throttleRaw/Filt`, `launchAssistActive`, `throttleSaturated`, `integratorClamped`, `brakeA_pct`, `brakeB_pct`, `failsafe/overspeed/inhibit`).

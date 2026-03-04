@@ -48,6 +48,7 @@
 
 namespace {
 constexpr uint16_t kTelnetPort = 23;
+// STREAM config por dominio (periodos en ms).
 constexpr TickType_t kSpeedStreamDefaultPeriod = pdMS_TO_TICKS(200);
 constexpr int kSpeedStreamMinPeriodMs = 20;
 constexpr int kSpeedStreamMaxPeriodMs = 5000;
@@ -93,6 +94,7 @@ String g_telnetCommandBuffer;
 NetworkMode g_networkMode = NetworkMode::kUnknown;
 String g_networkSsid;
 IPAddress g_networkIp;
+// Estado runtime de streams Telnet.
 bool g_speedStreamEnabled = false;
 TickType_t g_speedStreamPeriod = kSpeedStreamDefaultPeriod;
 TickType_t g_lastSpeedStreamTick = 0;
@@ -331,6 +333,83 @@ bool parseFloatTriplet(const String& text, float& a, float& b, float& c) {
     ++cursor;
   }
   return *cursor == '\0';
+}
+
+struct ParsedTelnetCommand {
+  String line;
+  String command;
+  String args;
+};
+
+bool parseCommandLine(String line, ParsedTelnetCommand& parsedOut) {
+  line.trim();
+  if (line.isEmpty()) {
+    return false;
+  }
+  const int spaceIndex = line.indexOf(' ');
+  parsedOut.line = line;
+  parsedOut.command = (spaceIndex < 0) ? line : line.substring(0, spaceIndex);
+  parsedOut.args = (spaceIndex < 0) ? "" : line.substring(spaceIndex + 1);
+  parsedOut.args.trim();
+  return true;
+}
+
+bool parseStreamToggleArgs(const String& args,
+                           int defaultPeriodMs,
+                           int minPeriodMs,
+                           int maxPeriodMs,
+                           const char* usageMessage,
+                           bool& enabledOut,
+                           TickType_t& periodTicksOut,
+                           int& periodMsOut) {
+  String normalized = args;
+  normalized.toLowerCase();
+  if (normalized == "off" || normalized == "0" || normalized == "stop") {
+    enabledOut = false;
+    periodMsOut = defaultPeriodMs;
+    periodTicksOut = pdMS_TO_TICKS(periodMsOut);
+    if (periodTicksOut == 0) {
+      periodTicksOut = 1;
+    }
+    return true;
+  }
+
+  int periodMs = defaultPeriodMs;
+  bool hasPeriodArg = false;
+  String periodText;
+
+  if (normalized.startsWith("on")) {
+    periodText = args.substring(2);
+    periodText.trim();
+    hasPeriodArg = !periodText.isEmpty();
+  } else {
+    periodText = args;
+    hasPeriodArg = true;
+  }
+
+  if (hasPeriodArg) {
+    int parsedPeriod = 0;
+    if (!parseIntArg(periodText, parsedPeriod)) {
+      sendTelnet(usageMessage);
+      return false;
+    }
+    if (parsedPeriod < minPeriodMs) {
+      parsedPeriod = minPeriodMs;
+    } else if (parsedPeriod > maxPeriodMs) {
+      parsedPeriod = maxPeriodMs;
+    }
+    periodMs = parsedPeriod;
+  }
+
+  TickType_t periodTicks = pdMS_TO_TICKS(periodMs);
+  if (periodTicks == 0) {
+    periodTicks = 1;
+  }
+
+  enabledOut = true;
+  periodMsOut = periodMs;
+  periodTicksOut = periodTicks;
+  return true;
 }
 
 void reportSteeringStatus() {
@@ -791,32 +870,22 @@ String buildSystemJitterSummary() {
   return msg;
 }
 
-void handleTelnetCommand(String line) {
-  line.trim();
-  if (line.isEmpty()) {
-    return;
-  }
-
-  int spaceIndex = line.indexOf(' ');
-  String command = (spaceIndex < 0) ? line : line.substring(0, spaceIndex);
-  String args = (spaceIndex < 0) ? "" : line.substring(spaceIndex + 1);
-  args.trim();
-
+bool handleSteerCommand(const String& command, const String& args) {
   if (command.equalsIgnoreCase("steer.calibrate")) {
     steeringCalibrationRequest();
     sendTelnet("[STEER] Calibracion solicitada");
-    return;
+    return true;
   }
 
   if (command.equalsIgnoreCase("steer.offset")) {
     if (args.isEmpty()) {
       reportSteeringStatus();
-      return;
+      return true;
     }
     float offset = 0.0f;
     if (!parseFloatArg(args, offset)) {
       sendTelnet("[STEER] Offset invalido, usa grados (ej: steer.offset -2.5)");
-      return;
+      return true;
     }
     steeringCalibrationSetOffset(offset);
     const SteeringCalibrationData data = steeringCalibrationSnapshot();
@@ -828,1093 +897,31 @@ void handleTelnetCommand(String line) {
     msg += String(data.maxOffsetRightDeg, 2);
     msg += ")";
     sendTelnet(msg);
-    return;
+    return true;
   }
 
   if (command.equalsIgnoreCase("steer.reset") || command.equalsIgnoreCase("steer.clear")) {
     steeringCalibrationReset(true);
     sendTelnet("[STEER] Calibracion reseteada a valores por defecto (NVS borrado)");
     reportSteeringStatus();
-    return;
+    return true;
   }
 
   if (command.equalsIgnoreCase("steer.status")) {
     reportSteeringStatus();
-    return;
+    return true;
   }
 
   if (command.equalsIgnoreCase("steer.help")) {
     sendTelnet("Comandos: steer.calibrate | steer.offset <deg> | steer.reset | steer.status");
-    return;
+    return true;
   }
 
-  if (command.equalsIgnoreCase("pid.set")) {
-    float kp = 0.0f;
-    float ki = 0.0f;
-    float kd = 0.0f;
-    if (!parseFloatTriplet(args, kp, ki, kd)) {
-      sendTelnet("[PID] Uso: pid.set <kp> <ki> <kd>");
-      return;
-    }
-    if (!pidSetTunings(kp, ki, kd)) {
-      sendTelnet("[PID] Controlador no registrado");
-      return;
-    }
-    reportPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("pid.kp")) {
-    if (args.isEmpty()) {
-      reportPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[PID] Kp invalido (ej: pid.kp 2.5)");
-      return;
-    }
-    float kp = 0.0f;
-    float ki = 0.0f;
-    float kd = 0.0f;
-    if (!pidGetTunings(kp, ki, kd)) {
-      sendTelnet("[PID] Controlador no registrado");
-      return;
-    }
-    if (!pidSetTunings(value, ki, kd)) {
-      sendTelnet("[PID] Controlador no registrado");
-      return;
-    }
-    reportPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("pid.ki")) {
-    if (args.isEmpty()) {
-      reportPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[PID] Ki invalido (ej: pid.ki 0.5)");
-      return;
-    }
-    float kp = 0.0f;
-    float ki = 0.0f;
-    float kd = 0.0f;
-    if (!pidGetTunings(kp, ki, kd)) {
-      sendTelnet("[PID] Controlador no registrado");
-      return;
-    }
-    if (!pidSetTunings(kp, value, kd)) {
-      sendTelnet("[PID] Controlador no registrado");
-      return;
-    }
-    reportPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("pid.kd")) {
-    if (args.isEmpty()) {
-      reportPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[PID] Kd invalido (ej: pid.kd 0.1)");
-      return;
-    }
-    float kp = 0.0f;
-    float ki = 0.0f;
-    float kd = 0.0f;
-    if (!pidGetTunings(kp, ki, kd)) {
-      sendTelnet("[PID] Controlador no registrado");
-      return;
-    }
-    if (!pidSetTunings(kp, ki, value)) {
-      sendTelnet("[PID] Controlador no registrado");
-      return;
-    }
-    reportPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("pid.status")) {
-    reportPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("pid.help")) {
-    sendTelnet(
-        "Comandos: pid.set <kp> <ki> <kd> | pid.kp <v> | pid.ki <v> | pid.kd <v> | pid.deadband <pct> | pid.minactive <pct> | pid.status | pid.stream on [ms] | pid.stream off");
-    return;
-  }
-
-  if (command.equalsIgnoreCase("pid.deadband")) {
-    if (args.isEmpty()) {
-      reportPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[PID] Deadband invalido (ej: pid.deadband 0.3)");
-      return;
-    }
-    if (!pidSetDeadband(value)) {
-      sendTelnet("[PID] Configuracion PID no registrada");
-      return;
-    }
-    reportPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("pid.minactive")) {
-    if (args.isEmpty()) {
-      reportPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[PID] MinActive invalido (ej: pid.minactive 10)");
-      return;
-    }
-    if (!pidSetMinActive(value)) {
-      sendTelnet("[PID] Configuracion PID no registrada");
-      return;
-    }
-    reportPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("pid.stream")) {
-    if (args.isEmpty()) {
-      const uint32_t periodMs = static_cast<uint32_t>(g_pidStreamPeriod * portTICK_PERIOD_MS);
-      String msg = "[PID][STREAM] ";
-      msg += g_pidStreamEnabled ? "ON" : "OFF";
-      msg += " periodo=";
-      msg += periodMs;
-      msg += "ms";
-      sendTelnet(msg);
-      return;
-    }
-
-    String normalized = args;
-    normalized.toLowerCase();
-    if (normalized == "off" || normalized == "0" || normalized == "stop") {
-      g_pidStreamEnabled = false;
-      sendTelnet("[PID][STREAM] OFF");
-      return;
-    }
-
-    int periodMs = static_cast<int>(g_pidStreamPeriod * portTICK_PERIOD_MS);
-    bool hasPeriodArg = false;
-    String periodText;
-
-    if (normalized.startsWith("on")) {
-      periodText = args.substring(2);
-      periodText.trim();
-      hasPeriodArg = !periodText.isEmpty();
-    } else {
-      periodText = args;
-      hasPeriodArg = true;
-    }
-
-    if (hasPeriodArg) {
-      int parsedPeriod = 0;
-      if (!parseIntArg(periodText, parsedPeriod)) {
-        sendTelnet("[PID][STREAM] Uso: pid.stream on [ms] | pid.stream off");
-        return;
-      }
-      if (parsedPeriod < kPidStreamMinPeriodMs) {
-        parsedPeriod = kPidStreamMinPeriodMs;
-      } else if (parsedPeriod > kPidStreamMaxPeriodMs) {
-        parsedPeriod = kPidStreamMaxPeriodMs;
-      }
-      periodMs = parsedPeriod;
-    }
-
-    TickType_t periodTicks = pdMS_TO_TICKS(periodMs);
-    if (periodTicks == 0) {
-      periodTicks = 1;
-    }
-
-    g_pidStreamPeriod = periodTicks;
-    g_pidStreamEnabled = true;
-    g_lastPidStreamTick = 0;
-
-    String msg = "[PID][STREAM] ON periodo=";
-    msg += periodMs;
-    msg += "ms";
-    sendTelnet(msg);
-    reportPidStatus();
-    reportPidRuntimeStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.set")) {
-    float kp = 0.0f;
-    float ki = 0.0f;
-    float kd = 0.0f;
-    if (!parseFloatTriplet(args, kp, ki, kd)) {
-      sendTelnet("[SPID] Uso: spid.set <kp> <ki> <kd>");
-      return;
-    }
-    SpeedPidTunings tunings{kp, ki, kd};
-    if (!speedPidSetTunings(tunings)) {
-      sendTelnet("[SPID] Tunings invalidos o controlador no inicializado");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.kp")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] Kp invalido (ej: spid.kp 10.0)");
-      return;
-    }
-    SpeedPidTunings tunings{};
-    if (!speedPidGetTunings(tunings)) {
-      sendTelnet("[SPID] Controlador no inicializado");
-      return;
-    }
-    tunings.kp = value;
-    if (!speedPidSetTunings(tunings)) {
-      sendTelnet("[SPID] Kp fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.ki")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] Ki invalido (ej: spid.ki 2.0)");
-      return;
-    }
-    SpeedPidTunings tunings{};
-    if (!speedPidGetTunings(tunings)) {
-      sendTelnet("[SPID] Controlador no inicializado");
-      return;
-    }
-    tunings.ki = value;
-    if (!speedPidSetTunings(tunings)) {
-      sendTelnet("[SPID] Ki fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.kd")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] Kd invalido (ej: spid.kd 0.1)");
-      return;
-    }
-    SpeedPidTunings tunings{};
-    if (!speedPidGetTunings(tunings)) {
-      sendTelnet("[SPID] Controlador no inicializado");
-      return;
-    }
-    tunings.kd = value;
-    if (!speedPidSetTunings(tunings)) {
-      sendTelnet("[SPID] Kd fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.ramp")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] Ramp invalido (ej: spid.ramp 2.0)");
-      return;
-    }
-    if (!speedPidSetRampRateMps2(value)) {
-      sendTelnet("[SPID] Ramp fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.minthrottle")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] MinThrottle invalido (ej: spid.minthrottle 90)");
-      return;
-    }
-    if (!speedPidSetMinThrottlePercent(value)) {
-      sendTelnet("[SPID] MinThrottle fuera de rango (0..100)");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.thslewup")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] ThrottleSlewUp invalido (ej: spid.thslewup 30)");
-      return;
-    }
-    if (!speedPidSetThrottleSlewUpPctPerSec(value)) {
-      sendTelnet("[SPID] ThrottleSlewUp fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.thslewdown")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] ThrottleSlewDown invalido (ej: spid.thslewdown 45)");
-      return;
-    }
-    if (!speedPidSetThrottleSlewDownPctPerSec(value)) {
-      sendTelnet("[SPID] ThrottleSlewDown fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.minth.spd")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] MinThrottleAssist speed invalido (ej: spid.minth.spd 0.35)");
-      return;
-    }
-    if (!speedPidSetMinThrottleAssistMaxSpeedMps(value)) {
-      sendTelnet("[SPID] MinThrottleAssist speed fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.launchwin")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    int value = 0;
-    if (!parseIntArg(args, value)) {
-      sendTelnet("[SPID] LaunchWindow invalido (ej: spid.launchwin 1200)");
-      return;
-    }
-    if (value < 0 || value > 65535) {
-      sendTelnet("[SPID] LaunchWindow fuera de rango");
-      return;
-    }
-    if (!speedPidSetLaunchAssistWindowMs(static_cast<uint16_t>(value))) {
-      sendTelnet("[SPID] LaunchWindow fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.ff") || command.equalsIgnoreCase("spid.ff.status")) {
-    if (command.equalsIgnoreCase("spid.ff.status") || args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    String normalized = args;
-    normalized.toLowerCase();
-    normalized.trim();
-    bool enable = false;
-    if (normalized == "on" || normalized == "1" || normalized == "true") {
-      enable = true;
-    } else if (normalized == "off" || normalized == "0" || normalized == "false") {
-      enable = false;
-    } else {
-      sendTelnet("[SPID] Uso: spid.ff on|off");
-      return;
-    }
-    if (!speedPidSetThrottleBaseEnable(enable)) {
-      sendTelnet("[SPID] Error aplicando ff on/off");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.ff.base0")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] FF base0 invalido (ej: spid.ff.base0 0)");
-      return;
-    }
-    if (!speedPidSetThrottleBaseAtZeroMpsPercent(value)) {
-      sendTelnet("[SPID] FF base0 fuera de rango (0..100)");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.ff.basemax")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] FF basemax invalido (ej: spid.ff.basemax 55)");
-      return;
-    }
-    if (!speedPidSetThrottleBaseAtMaxSpeedPercent(value)) {
-      sendTelnet("[SPID] FF basemax fuera de rango (0..100)");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.ff.du")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] FF delta up invalido (ej: spid.ff.du 35)");
-      return;
-    }
-    if (!speedPidSetThrottleBasePidDeltaUpMaxPercent(value)) {
-      sendTelnet("[SPID] FF delta up fuera de rango (0..100)");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.ff.dd")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] FF delta down invalido (ej: spid.ff.dd 45)");
-      return;
-    }
-    if (!speedPidSetThrottleBasePidDeltaDownMaxPercent(value)) {
-      sendTelnet("[SPID] FF delta down fuera de rango (0..100)");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.ff.minspd")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] FF minspd invalido (ej: spid.ff.minspd 0.10)");
-      return;
-    }
-    if (!speedPidSetThrottleBaseActivationMinMps(value)) {
-      sendTelnet("[SPID] FF minspd fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.ff.grace")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    int value = 0;
-    if (!parseIntArg(args, value)) {
-      sendTelnet("[SPID] FF grace invalido (ej: spid.ff.grace 1200)");
-      return;
-    }
-    if (value < 0 || value > 65535) {
-      sendTelnet("[SPID] FF grace fuera de rango");
-      return;
-    }
-    if (!speedPidSetFeedbackLaunchGraceMs(static_cast<uint16_t>(value))) {
-      sendTelnet("[SPID] FF grace fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.iunwind")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] IntegratorUnwind invalido (ej: spid.iunwind 0.35)");
-      return;
-    }
-    if (!speedPidSetIntegratorUnwindGain(value)) {
-      sendTelnet("[SPID] IntegratorUnwind fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.dfilter")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] DerivativeFilter invalido (ej: spid.dfilter 3.0)");
-      return;
-    }
-    if (!speedPidSetDerivativeFilterHz(value)) {
-      sendTelnet("[SPID] DerivativeFilter fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.max")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] Max invalido (ej: spid.max 4.17)");
-      return;
-    }
-    if (!speedPidSetMaxSpeedMps(value)) {
-      sendTelnet("[SPID] Max fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.brakecap")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] BrakeCap invalido (ej: spid.brakecap 30)");
-      return;
-    }
-    if (!speedPidSetOverspeedBrakeMaxPercent(value)) {
-      sendTelnet("[SPID] BrakeCap fuera de rango (0..100)");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.hys")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] Hysteresis invalido (ej: spid.hys 0.3)");
-      return;
-    }
-    if (!speedPidSetOverspeedReleaseHysteresisMps(value)) {
-      sendTelnet("[SPID] Hysteresis fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.brakeslewup")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] BrakeSlewUp invalido (ej: spid.brakeslewup 35)");
-      return;
-    }
-    if (!speedPidSetOverspeedBrakeSlewUpPctPerSec(value)) {
-      sendTelnet("[SPID] BrakeSlewUp fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.brakeslewdown")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] BrakeSlewDown invalido (ej: spid.brakeslewdown 55)");
-      return;
-    }
-    if (!speedPidSetOverspeedBrakeSlewDownPctPerSec(value)) {
-      sendTelnet("[SPID] BrakeSlewDown fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.brakehold")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    int value = 0;
-    if (!parseIntArg(args, value)) {
-      sendTelnet("[SPID] BrakeHold invalido (ej: spid.brakehold 200)");
-      return;
-    }
-    if (value < 0 || value > 65535) {
-      sendTelnet("[SPID] BrakeHold fuera de rango");
-      return;
-    }
-    if (!speedPidSetOverspeedBrakeHoldMs(static_cast<uint16_t>(value))) {
-      sendTelnet("[SPID] BrakeHold fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.brakedb")) {
-    if (args.isEmpty()) {
-      reportSpeedPidStatus();
-      return;
-    }
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID] BrakeDeadband invalido (ej: spid.brakedb 3)");
-      return;
-    }
-    if (!speedPidSetOverspeedBrakeDeadbandPercent(value)) {
-      sendTelnet("[SPID] BrakeDeadband fuera de rango");
-      return;
-    }
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.target")) {
-    if (args.isEmpty()) {
-      reportSpeedPidTargetStatus();
-      return;
-    }
-
-    String normalized = args;
-    normalized.toLowerCase();
-    if (normalized == "off" || normalized == "0" || normalized == "stop") {
-      if (!quadDriveSetSpeedTargetOverride(false, 0.0f)) {
-        sendTelnet("[SPID][TARGET] No se pudo desactivar override");
-        return;
-      }
-      reportSpeedPidTargetStatus();
-      return;
-    }
-
-    float value = 0.0f;
-    if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID][TARGET] Valor invalido (ej: spid.target 1.5 | spid.target off)");
-      return;
-    }
-    if (!quadDriveSetSpeedTargetOverride(true, value)) {
-      String msg = "[SPID][TARGET] Fuera de rango (0..";
-      msg += String(speedPidGetMaxSpeedMps(), 2);
-      msg += " m/s)";
-      sendTelnet(msg);
-      return;
-    }
-    reportSpeedPidTargetStatus();
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.save")) {
-    if (!speedPidSaveToNvs()) {
-      sendTelnet("[SPID] Error guardando en NVS");
-      return;
-    }
-    sendTelnet("[SPID] Configuracion guardada en NVS");
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.reset")) {
-    if (!speedPidResetToDefaults(true)) {
-      sendTelnet("[SPID] Error restaurando defaults");
-      return;
-    }
-    sendTelnet("[SPID] Defaults restaurados y persistidos");
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.status")) {
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.stream")) {
-    if (args.isEmpty()) {
-      const uint32_t periodMs = static_cast<uint32_t>(g_speedPidStreamPeriod * portTICK_PERIOD_MS);
-      String msg = "[SPID][STREAM] ";
-      msg += g_speedPidStreamEnabled ? "ON" : "OFF";
-      msg += " periodo=";
-      msg += periodMs;
-      msg += "ms";
-      sendTelnet(msg);
-      return;
-    }
-
-    String normalized = args;
-    normalized.toLowerCase();
-    if (normalized == "off" || normalized == "0" || normalized == "stop") {
-      g_speedPidStreamEnabled = false;
-      sendTelnet("[SPID][STREAM] OFF");
-      return;
-    }
-
-    int periodMs = static_cast<int>(g_speedPidStreamPeriod * portTICK_PERIOD_MS);
-    bool hasPeriodArg = false;
-    String periodText;
-
-    if (normalized.startsWith("on")) {
-      periodText = args.substring(2);
-      periodText.trim();
-      hasPeriodArg = !periodText.isEmpty();
-    } else {
-      periodText = args;
-      hasPeriodArg = true;
-    }
-
-    if (hasPeriodArg) {
-      int parsedPeriod = 0;
-      if (!parseIntArg(periodText, parsedPeriod)) {
-        sendTelnet("[SPID][STREAM] Uso: spid.stream on [ms] | spid.stream off");
-        return;
-      }
-      if (parsedPeriod < kSpeedPidStreamMinPeriodMs) {
-        parsedPeriod = kSpeedPidStreamMinPeriodMs;
-      } else if (parsedPeriod > kSpeedPidStreamMaxPeriodMs) {
-        parsedPeriod = kSpeedPidStreamMaxPeriodMs;
-      }
-      periodMs = parsedPeriod;
-    }
-
-    TickType_t periodTicks = pdMS_TO_TICKS(periodMs);
-    if (periodTicks == 0) {
-      periodTicks = 1;
-    }
-
-    g_speedPidStreamPeriod = periodTicks;
-    g_speedPidStreamEnabled = true;
-    g_lastSpeedPidStreamTick = 0;
-
-    String msg = "[SPID][STREAM] ON periodo=";
-    msg += periodMs;
-    msg += "ms";
-    sendTelnet(msg);
-    reportSpeedPidStatus();
-    return;
-  }
-
-  if (command.equalsIgnoreCase("spid.help")) {
-    sendTelnet(
-        "Comandos: spid.set <kp> <ki> <kd> | spid.kp <v> | spid.ki <v> | spid.kd <v> | spid.ramp <mps2> | spid.minthrottle <pct> | spid.thslewup <pctps> | spid.thslewdown <pctps> | spid.minth.spd <mps> | spid.launchwin <ms> | spid.ff on|off | spid.ff.base0 <pct> | spid.ff.basemax <pct> | spid.ff.du <pct> | spid.ff.dd <pct> | spid.ff.minspd <mps> | spid.ff.grace <ms> | spid.iunwind <gain> | spid.dfilter <hz> | spid.max <mps> | spid.brakecap <pct> | spid.hys <mps> | spid.brakeslewup <pctps> | spid.brakeslewdown <pctps> | spid.brakehold <ms> | spid.brakedb <pct> | spid.target <mps|off> | spid.save | spid.reset | spid.status | spid.stream on [ms] | spid.stream off");
-    return;
-  }
-
-  if (command.equalsIgnoreCase("drive.log")) {
-    if (args.isEmpty()) {
-      bool baseEnabled = false;
-      bool pidTraceEnabled = false;
-      TickType_t pidTracePeriodTicks = kDrivePidTraceDefaultPeriod;
-      quadDriveGetLogEnabled(baseEnabled);
-      quadDriveGetPidTraceConfig(pidTraceEnabled, pidTracePeriodTicks);
-      String msg = "[DRIVE][LOG] base=";
-      msg += baseEnabled ? "ON" : "OFF";
-      msg += " pid=";
-      msg += pidTraceEnabled ? "ON" : "OFF";
-      msg += " period=";
-      msg += static_cast<uint32_t>(pidTracePeriodTicks * portTICK_PERIOD_MS);
-      msg += "ms";
-      sendTelnet(msg);
-      return;
-    }
-
-    String normalized = args;
-    normalized.toLowerCase();
-    if (normalized == "on" || normalized == "1") {
-      quadDriveSetLogEnabled(true);
-      sendTelnet("[DRIVE][LOG] ON");
-      return;
-    }
-    if (normalized == "off" || normalized == "0") {
-      quadDriveSetLogEnabled(false);
-      sendTelnet("[DRIVE][LOG] OFF");
-      return;
-    }
-
-    if (normalized.startsWith("pid")) {
-      String subArgs = args.substring(3);
-      subArgs.trim();
-      if (subArgs.isEmpty()) {
-        bool pidTraceEnabled = false;
-        TickType_t pidTracePeriodTicks = kDrivePidTraceDefaultPeriod;
-        quadDriveGetPidTraceConfig(pidTraceEnabled, pidTracePeriodTicks);
-        String msg = "[DRIVE][LOG][PID] ";
-        msg += pidTraceEnabled ? "ON" : "OFF";
-        msg += " periodo=";
-        msg += static_cast<uint32_t>(pidTracePeriodTicks * portTICK_PERIOD_MS);
-        msg += "ms";
-        sendTelnet(msg);
-        return;
-      }
-
-      String subNormalized = subArgs;
-      subNormalized.toLowerCase();
-      if (subNormalized == "off" || subNormalized == "0" || subNormalized == "stop") {
-        quadDriveSetPidTraceEnabled(false, kDrivePidTraceDefaultPeriod);
-        sendTelnet("[DRIVE][LOG][PID] OFF");
-        return;
-      }
-
-      int periodMs = static_cast<int>(kDrivePidTraceDefaultPeriod * portTICK_PERIOD_MS);
-      bool hasPeriodArg = false;
-      String periodText;
-
-      if (subNormalized.startsWith("on")) {
-        periodText = subArgs.substring(2);
-        periodText.trim();
-        hasPeriodArg = !periodText.isEmpty();
-      } else {
-        periodText = subArgs;
-        hasPeriodArg = true;
-      }
-
-      if (hasPeriodArg) {
-        int parsedPeriod = 0;
-        if (!parseIntArg(periodText, parsedPeriod)) {
-          sendTelnet("[DRIVE][LOG][PID] Uso: drive.log pid on [ms] | drive.log pid off");
-          return;
-        }
-        if (parsedPeriod < kDrivePidTraceMinPeriodMs) {
-          parsedPeriod = kDrivePidTraceMinPeriodMs;
-        } else if (parsedPeriod > kDrivePidTraceMaxPeriodMs) {
-          parsedPeriod = kDrivePidTraceMaxPeriodMs;
-        }
-        periodMs = parsedPeriod;
-      }
-
-      TickType_t periodTicks = pdMS_TO_TICKS(periodMs);
-      if (periodTicks == 0) {
-        periodTicks = 1;
-      }
-      quadDriveSetPidTraceEnabled(true, periodTicks);
-      String msg = "[DRIVE][LOG][PID] ON periodo=";
-      msg += periodMs;
-      msg += "ms";
-      sendTelnet(msg);
-      return;
-    }
-
-    sendTelnet(
-        "[DRIVE][LOG] Uso: drive.log | drive.log on | drive.log off | drive.log pid on [ms] | drive.log pid off");
-    return;
-  }
-
-  if (command.equalsIgnoreCase("drive.pwm")) {
-    if (args.isEmpty()) {
-      reportDrivePwmOverrideStatus();
-      return;
-    }
-
-    String normalized = args;
-    normalized.toLowerCase();
-    if (normalized == "off" || normalized == "0" || normalized == "stop") {
-      quadDriveSetPwmOverride(false, 0);
-      sendTelnet("[DRIVE][PWM] OFF");
-      return;
-    }
-
-    int dutyPercent = -1;
-    String dutyText = args;
-    if (normalized.startsWith("on")) {
-      dutyText = args.substring(2);
-      dutyText.trim();
-    }
-    if (!parseIntArg(dutyText, dutyPercent)) {
-      sendTelnet("[DRIVE][PWM] Uso: drive.pwm <0-100> | drive.pwm off");
-      return;
-    }
-    if (dutyPercent < 0 || dutyPercent > 100) {
-      sendTelnet("[DRIVE][PWM] Valor fuera de rango (0..100)");
-      return;
-    }
-
-    // Evitar un objetivo SPID latente al salir del modo PWM directo.
-    quadDriveSetSpeedTargetOverride(false, 0.0f);
-    if (!quadDriveSetPwmOverride(true, dutyPercent)) {
-      sendTelnet("[DRIVE][PWM] No se pudo activar");
-      return;
-    }
-
-    String msg = "[DRIVE][PWM] ON duty=";
-    msg += dutyPercent;
-    msg += "%";
-    sendTelnet(msg);
-    return;
-  }
-
-  if (command.equalsIgnoreCase("drive.rc.status")) {
-    sendTelnet(buildDriveRcStatusMessage());
-    return;
-  }
-
-  if (command.equalsIgnoreCase("drive.rc.cal")) {
-    if (args.isEmpty()) {
-      bool enabled = true;
-      quadDriveGetRcNeutralCalEnabled(enabled);
-      String msg = "[DRIVE][RC][CAL] ";
-      msg += enabled ? "ON" : "OFF";
-      sendTelnet(msg);
-      return;
-    }
-    String normalized = args;
-    normalized.toLowerCase();
-    if (normalized == "on" || normalized == "1") {
-      quadDriveSetRcNeutralCalEnabled(true);
-      sendTelnet("[DRIVE][RC][CAL] ON");
-      return;
-    }
-    if (normalized == "off" || normalized == "0") {
-      quadDriveSetRcNeutralCalEnabled(false);
-      sendTelnet("[DRIVE][RC][CAL] OFF");
-      return;
-    }
-    sendTelnet("[DRIVE][RC][CAL] Uso: drive.rc.cal on|off");
-    return;
-  }
-
-  if (command.equalsIgnoreCase("drive.rc.stream")) {
-    if (args.isEmpty()) {
-      String msg = "[DRIVE][RC][STREAM] ";
-      msg += g_driveRcStreamEnabled ? "ON" : "OFF";
-      msg += " periodo=";
-      msg += static_cast<uint32_t>(g_driveRcStreamPeriod * portTICK_PERIOD_MS);
-      msg += "ms";
-      sendTelnet(msg);
-      return;
-    }
-
-    String normalized = args;
-    normalized.toLowerCase();
-    if (normalized == "off" || normalized == "0" || normalized == "stop") {
-      g_driveRcStreamEnabled = false;
-      sendTelnet("[DRIVE][RC][STREAM] OFF");
-      return;
-    }
-
-    int periodMs = static_cast<int>(kDriveRcStreamDefaultPeriod * portTICK_PERIOD_MS);
-    bool hasPeriodArg = false;
-    String periodText;
-
-    if (normalized.startsWith("on")) {
-      periodText = args.substring(2);
-      periodText.trim();
-      hasPeriodArg = !periodText.isEmpty();
-    } else {
-      periodText = args;
-      hasPeriodArg = true;
-    }
-
-    if (hasPeriodArg) {
-      int parsedPeriod = 0;
-      if (!parseIntArg(periodText, parsedPeriod)) {
-        sendTelnet("[DRIVE][RC][STREAM] Uso: drive.rc.stream on [ms] | drive.rc.stream off");
-        return;
-      }
-      if (parsedPeriod < kDriveRcStreamMinPeriodMs) {
-        parsedPeriod = kDriveRcStreamMinPeriodMs;
-      } else if (parsedPeriod > kDriveRcStreamMaxPeriodMs) {
-        parsedPeriod = kDriveRcStreamMaxPeriodMs;
-      }
-      periodMs = parsedPeriod;
-    }
-
-    g_driveRcStreamPeriod = pdMS_TO_TICKS(periodMs);
-    if (g_driveRcStreamPeriod == 0) {
-      g_driveRcStreamPeriod = 1;
-    }
-    g_driveRcStreamEnabled = true;
-    String msg = "[DRIVE][RC][STREAM] ON periodo=";
-    msg += periodMs;
-    msg += "ms";
-    sendTelnet(msg);
-    sendTelnet(buildDriveRcStatusMessage());
-    return;
-  }
-
+  return false;
+}
+
+bool handleCommsCommand(const String& command, const String& args) {
+  (void)args;
   if (command.equalsIgnoreCase("comms.status")) {
     PiCommsRxSnapshot snapshot{};
     piCommsGetRxSnapshot(snapshot);
@@ -1951,25 +958,29 @@ void handleTelnetCommand(String line) {
     msg += " verErr=";
     msg += snapshot.framesVersionError;
     sendTelnet(msg);
-    return;
+    return true;
   }
 
   if (command.equalsIgnoreCase("comms.reset")) {
     piCommsResetStats();
     sendTelnet("[PI][STATUS] Contadores reseteados");
-    return;
+    return true;
   }
 
+  return false;
+}
+
+bool handleSpeedCommand(const String& command, const String& args) {
   if (command.equalsIgnoreCase("speed.status")) {
     sendTelnet(buildSpeedStatusMessage());
-    return;
+    return true;
   }
 
   if (command.equalsIgnoreCase("speed.reset")) {
     hallSpeedResetStats();
     sendTelnet("[SPD][STATUS] Contadores Hall reseteados");
     sendTelnet(buildSpeedStatusMessage());
-    return;
+    return true;
   }
 
   if (command.equalsIgnoreCase("speed.stream")) {
@@ -1981,47 +992,27 @@ void handleTelnetCommand(String line) {
       msg += periodMs;
       msg += "ms";
       sendTelnet(msg);
-      return;
+      return true;
     }
 
-    String normalized = args;
-    normalized.toLowerCase();
-    if (normalized == "off" || normalized == "0" || normalized == "stop") {
+    bool enabled = false;
+    TickType_t periodTicks = g_speedStreamPeriod;
+    int periodMs = static_cast<int>(g_speedStreamPeriod * portTICK_PERIOD_MS);
+    if (!parseStreamToggleArgs(args,
+                               periodMs,
+                               kSpeedStreamMinPeriodMs,
+                               kSpeedStreamMaxPeriodMs,
+                               "[SPD][STREAM] Uso: speed.stream on [ms] | speed.stream off",
+                               enabled,
+                               periodTicks,
+                               periodMs)) {
+      return true;
+    }
+
+    if (!enabled) {
       g_speedStreamEnabled = false;
       sendTelnet("[SPD][STREAM] OFF");
-      return;
-    }
-
-    int periodMs = static_cast<int>(g_speedStreamPeriod * portTICK_PERIOD_MS);
-    bool hasPeriodArg = false;
-    String periodText;
-
-    if (normalized.startsWith("on")) {
-      periodText = args.substring(2);
-      periodText.trim();
-      hasPeriodArg = !periodText.isEmpty();
-    } else {
-      periodText = args;
-      hasPeriodArg = true;
-    }
-
-    if (hasPeriodArg) {
-      int parsedPeriod = 0;
-      if (!parseIntArg(periodText, parsedPeriod)) {
-        sendTelnet("[SPD][STREAM] Uso: speed.stream on [ms] | speed.stream off");
-        return;
-      }
-      if (parsedPeriod < kSpeedStreamMinPeriodMs) {
-        parsedPeriod = kSpeedStreamMinPeriodMs;
-      } else if (parsedPeriod > kSpeedStreamMaxPeriodMs) {
-        parsedPeriod = kSpeedStreamMaxPeriodMs;
-      }
-      periodMs = parsedPeriod;
-    }
-
-    TickType_t periodTicks = pdMS_TO_TICKS(periodMs);
-    if (periodTicks == 0) {
-      periodTicks = 1;
+      return true;
     }
 
     g_speedStreamPeriod = periodTicks;
@@ -2033,23 +1024,26 @@ void handleTelnetCommand(String line) {
     msg += "ms";
     sendTelnet(msg);
     sendTelnet(buildSpeedStatusMessage());
-    return;
+    return true;
   }
 
   if (command.equalsIgnoreCase("speed.uart")) {
-    (void)args;
     sendTelnet("[SPD][UART] N/A source=hall");
-    return;
+    return true;
   }
 
+  return false;
+}
+
+bool handleSysCommand(const String& command, const String& args) {
   if (command.equalsIgnoreCase("sys.rt")) {
     reportSystemRtStatus();
-    return;
+    return true;
   }
 
   if (command.equalsIgnoreCase("sys.stack")) {
     reportSystemStackStatus();
-    return;
+    return true;
   }
 
   if (command.equalsIgnoreCase("sys.reset")) {
@@ -2063,17 +1057,17 @@ void handleTelnetCommand(String line) {
         keepRegistration = true;
       } else {
         sendTelnet("[SYS][RESET] Uso: sys.reset [keep|full]");
-        return;
+        return true;
       }
     }
     if (!systemDiagResetStats(keepRegistration)) {
       sendTelnet("[SYS][RESET] ERROR");
-      return;
+      return true;
     }
     String msg = "[SYS][RESET] OK keepRegistration=";
     msg += keepRegistration ? "1" : "0";
     sendTelnet(msg);
-    return;
+    return true;
   }
 
   if (command.equalsIgnoreCase("sys.jitter")) {
@@ -2088,69 +1082,1073 @@ void handleTelnetCommand(String line) {
       msg += "ms";
       sendTelnet(msg);
       sendTelnet(buildSystemJitterSummary());
-      return;
+      return true;
     }
 
-    String normalized = args;
-    normalized.toLowerCase();
-    if (normalized == "off" || normalized == "0" || normalized == "stop") {
+    bool enabled = false;
+    TickType_t periodTicks = kSystemJitterDefaultPeriod;
+    int periodMs = static_cast<int>(kSystemJitterDefaultPeriod * portTICK_PERIOD_MS);
+    if (!parseStreamToggleArgs(args,
+                               periodMs,
+                               kSystemJitterMinPeriodMs,
+                               kSystemJitterMaxPeriodMs,
+                               "[SYS][JITTER] Uso: sys.jitter on [ms] | sys.jitter off",
+                               enabled,
+                               periodTicks,
+                               periodMs)) {
+      return true;
+    }
+
+    if (!enabled) {
       if (!systemDiagSetJitterStream(false, 1)) {
         sendTelnet("[SYS][JITTER] Error desactivando stream");
-        return;
+        return true;
       }
       sendTelnet("[SYS][JITTER] OFF");
-      return;
+      return true;
     }
 
-    int periodMs = static_cast<int>(kSystemJitterDefaultPeriod * portTICK_PERIOD_MS);
-    bool hasPeriodArg = false;
-    String periodText;
-
-    if (normalized.startsWith("on")) {
-      periodText = args.substring(2);
-      periodText.trim();
-      hasPeriodArg = !periodText.isEmpty();
-    } else {
-      periodText = args;
-      hasPeriodArg = true;
-    }
-
-    if (hasPeriodArg) {
-      int parsedPeriod = 0;
-      if (!parseIntArg(periodText, parsedPeriod)) {
-        sendTelnet("[SYS][JITTER] Uso: sys.jitter on [ms] | sys.jitter off");
-        return;
-      }
-      if (parsedPeriod < kSystemJitterMinPeriodMs) {
-        parsedPeriod = kSystemJitterMinPeriodMs;
-      } else if (parsedPeriod > kSystemJitterMaxPeriodMs) {
-        parsedPeriod = kSystemJitterMaxPeriodMs;
-      }
-      periodMs = parsedPeriod;
-    }
-
-    TickType_t periodTicks = pdMS_TO_TICKS(periodMs);
-    if (periodTicks == 0) {
-      periodTicks = 1;
-    }
     if (!systemDiagSetJitterStream(true, periodTicks)) {
       sendTelnet("[SYS][JITTER] Error activando stream");
-      return;
+      return true;
     }
     String msg = "[SYS][JITTER] ON periodo=";
     msg += periodMs;
     msg += "ms";
     sendTelnet(msg);
     sendTelnet(buildSystemJitterSummary());
-    return;
+    return true;
   }
 
+  return false;
+}
+
+bool handleNetCommand(const String& command, const String& args) {
+  (void)args;
   if (command.equalsIgnoreCase("net.status")) {
     reportNetworkStatus();
+    return true;
+  }
+  return false;
+}
+
+bool handlePidCommand(const String& command, const String& args) {
+  if (command.equalsIgnoreCase("pid.set")) {
+    float kp = 0.0f;
+    float ki = 0.0f;
+    float kd = 0.0f;
+    if (!parseFloatTriplet(args, kp, ki, kd)) {
+      sendTelnet("[PID] Uso: pid.set <kp> <ki> <kd>");
+      return true;
+    }
+    if (!pidSetTunings(kp, ki, kd)) {
+      sendTelnet("[PID] Controlador no registrado");
+      return true;
+    }
+    reportPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("pid.kp")) {
+    if (args.isEmpty()) {
+      reportPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[PID] Kp invalido (ej: pid.kp 2.5)");
+      return true;
+    }
+    float kp = 0.0f;
+    float ki = 0.0f;
+    float kd = 0.0f;
+    if (!pidGetTunings(kp, ki, kd)) {
+      sendTelnet("[PID] Controlador no registrado");
+      return true;
+    }
+    if (!pidSetTunings(value, ki, kd)) {
+      sendTelnet("[PID] Controlador no registrado");
+      return true;
+    }
+    reportPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("pid.ki")) {
+    if (args.isEmpty()) {
+      reportPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[PID] Ki invalido (ej: pid.ki 0.5)");
+      return true;
+    }
+    float kp = 0.0f;
+    float ki = 0.0f;
+    float kd = 0.0f;
+    if (!pidGetTunings(kp, ki, kd)) {
+      sendTelnet("[PID] Controlador no registrado");
+      return true;
+    }
+    if (!pidSetTunings(kp, value, kd)) {
+      sendTelnet("[PID] Controlador no registrado");
+      return true;
+    }
+    reportPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("pid.kd")) {
+    if (args.isEmpty()) {
+      reportPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[PID] Kd invalido (ej: pid.kd 0.1)");
+      return true;
+    }
+    float kp = 0.0f;
+    float ki = 0.0f;
+    float kd = 0.0f;
+    if (!pidGetTunings(kp, ki, kd)) {
+      sendTelnet("[PID] Controlador no registrado");
+      return true;
+    }
+    if (!pidSetTunings(kp, ki, value)) {
+      sendTelnet("[PID] Controlador no registrado");
+      return true;
+    }
+    reportPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("pid.status")) {
+    reportPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("pid.help")) {
+    sendTelnet(
+        "Comandos: pid.set <kp> <ki> <kd> | pid.kp <v> | pid.ki <v> | pid.kd <v> | pid.deadband <pct> | pid.minactive <pct> | pid.status | pid.stream on [ms] | pid.stream off");
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("pid.deadband")) {
+    if (args.isEmpty()) {
+      reportPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[PID] Deadband invalido (ej: pid.deadband 0.3)");
+      return true;
+    }
+    if (!pidSetDeadband(value)) {
+      sendTelnet("[PID] Configuracion PID no registrada");
+      return true;
+    }
+    reportPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("pid.minactive")) {
+    if (args.isEmpty()) {
+      reportPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[PID] MinActive invalido (ej: pid.minactive 10)");
+      return true;
+    }
+    if (!pidSetMinActive(value)) {
+      sendTelnet("[PID] Configuracion PID no registrada");
+      return true;
+    }
+    reportPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("pid.stream")) {
+    if (args.isEmpty()) {
+      const uint32_t periodMs = static_cast<uint32_t>(g_pidStreamPeriod * portTICK_PERIOD_MS);
+      String msg = "[PID][STREAM] ";
+      msg += g_pidStreamEnabled ? "ON" : "OFF";
+      msg += " periodo=";
+      msg += periodMs;
+      msg += "ms";
+      sendTelnet(msg);
+      return true;
+    }
+
+    bool enabled = false;
+    TickType_t periodTicks = g_pidStreamPeriod;
+    int periodMs = static_cast<int>(g_pidStreamPeriod * portTICK_PERIOD_MS);
+    if (!parseStreamToggleArgs(args,
+                               periodMs,
+                               kPidStreamMinPeriodMs,
+                               kPidStreamMaxPeriodMs,
+                               "[PID][STREAM] Uso: pid.stream on [ms] | pid.stream off",
+                               enabled,
+                               periodTicks,
+                               periodMs)) {
+      return true;
+    }
+
+    if (!enabled) {
+      g_pidStreamEnabled = false;
+      sendTelnet("[PID][STREAM] OFF");
+      return true;
+    }
+
+    g_pidStreamPeriod = periodTicks;
+    g_pidStreamEnabled = true;
+    g_lastPidStreamTick = 0;
+
+    String msg = "[PID][STREAM] ON periodo=";
+    msg += periodMs;
+    msg += "ms";
+    sendTelnet(msg);
+    reportPidStatus();
+    reportPidRuntimeStatus();
+    return true;
+  }
+
+  return false;
+}
+
+bool handleSpidCommand(const String& command, const String& args) {
+  if (command.equalsIgnoreCase("spid.set")) {
+    float kp = 0.0f;
+    float ki = 0.0f;
+    float kd = 0.0f;
+    if (!parseFloatTriplet(args, kp, ki, kd)) {
+      sendTelnet("[SPID] Uso: spid.set <kp> <ki> <kd>");
+      return true;
+    }
+    SpeedPidTunings tunings{kp, ki, kd};
+    if (!speedPidSetTunings(tunings)) {
+      sendTelnet("[SPID] Tunings invalidos o controlador no inicializado");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.kp")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] Kp invalido (ej: spid.kp 10.0)");
+      return true;
+    }
+    SpeedPidTunings tunings{};
+    if (!speedPidGetTunings(tunings)) {
+      sendTelnet("[SPID] Controlador no inicializado");
+      return true;
+    }
+    tunings.kp = value;
+    if (!speedPidSetTunings(tunings)) {
+      sendTelnet("[SPID] Kp fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.ki")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] Ki invalido (ej: spid.ki 2.0)");
+      return true;
+    }
+    SpeedPidTunings tunings{};
+    if (!speedPidGetTunings(tunings)) {
+      sendTelnet("[SPID] Controlador no inicializado");
+      return true;
+    }
+    tunings.ki = value;
+    if (!speedPidSetTunings(tunings)) {
+      sendTelnet("[SPID] Ki fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.kd")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] Kd invalido (ej: spid.kd 0.1)");
+      return true;
+    }
+    SpeedPidTunings tunings{};
+    if (!speedPidGetTunings(tunings)) {
+      sendTelnet("[SPID] Controlador no inicializado");
+      return true;
+    }
+    tunings.kd = value;
+    if (!speedPidSetTunings(tunings)) {
+      sendTelnet("[SPID] Kd fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.ramp")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] Ramp invalido (ej: spid.ramp 2.0)");
+      return true;
+    }
+    if (!speedPidSetRampRateMps2(value)) {
+      sendTelnet("[SPID] Ramp fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.minthrottle")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] MinThrottle invalido (ej: spid.minthrottle 90)");
+      return true;
+    }
+    if (!speedPidSetMinThrottlePercent(value)) {
+      sendTelnet("[SPID] MinThrottle fuera de rango (0..100)");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.thslewup")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] ThrottleSlewUp invalido (ej: spid.thslewup 30)");
+      return true;
+    }
+    if (!speedPidSetThrottleSlewUpPctPerSec(value)) {
+      sendTelnet("[SPID] ThrottleSlewUp fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.thslewdown")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] ThrottleSlewDown invalido (ej: spid.thslewdown 45)");
+      return true;
+    }
+    if (!speedPidSetThrottleSlewDownPctPerSec(value)) {
+      sendTelnet("[SPID] ThrottleSlewDown fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.minth.spd")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] MinThrottleAssist speed invalido (ej: spid.minth.spd 0.35)");
+      return true;
+    }
+    if (!speedPidSetMinThrottleAssistMaxSpeedMps(value)) {
+      sendTelnet("[SPID] MinThrottleAssist speed fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.launchwin")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    int value = 0;
+    if (!parseIntArg(args, value)) {
+      sendTelnet("[SPID] LaunchWindow invalido (ej: spid.launchwin 1200)");
+      return true;
+    }
+    if (value < 0 || value > 65535) {
+      sendTelnet("[SPID] LaunchWindow fuera de rango");
+      return true;
+    }
+    if (!speedPidSetLaunchAssistWindowMs(static_cast<uint16_t>(value))) {
+      sendTelnet("[SPID] LaunchWindow fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.ff") || command.equalsIgnoreCase("spid.ff.status")) {
+    if (command.equalsIgnoreCase("spid.ff.status") || args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    String normalized = args;
+    normalized.toLowerCase();
+    normalized.trim();
+    bool enable = false;
+    if (normalized == "on" || normalized == "1" || normalized == "true") {
+      enable = true;
+    } else if (normalized == "off" || normalized == "0" || normalized == "false") {
+      enable = false;
+    } else {
+      sendTelnet("[SPID] Uso: spid.ff on|off");
+      return true;
+    }
+    if (!speedPidSetThrottleBaseEnable(enable)) {
+      sendTelnet("[SPID] Error aplicando ff on/off");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.ff.base0")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] FF base0 invalido (ej: spid.ff.base0 0)");
+      return true;
+    }
+    if (!speedPidSetThrottleBaseAtZeroMpsPercent(value)) {
+      sendTelnet("[SPID] FF base0 fuera de rango (0..100)");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.ff.basemax")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] FF basemax invalido (ej: spid.ff.basemax 55)");
+      return true;
+    }
+    if (!speedPidSetThrottleBaseAtMaxSpeedPercent(value)) {
+      sendTelnet("[SPID] FF basemax fuera de rango (0..100)");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.ff.du")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] FF delta up invalido (ej: spid.ff.du 35)");
+      return true;
+    }
+    if (!speedPidSetThrottleBasePidDeltaUpMaxPercent(value)) {
+      sendTelnet("[SPID] FF delta up fuera de rango (0..100)");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.ff.dd")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] FF delta down invalido (ej: spid.ff.dd 45)");
+      return true;
+    }
+    if (!speedPidSetThrottleBasePidDeltaDownMaxPercent(value)) {
+      sendTelnet("[SPID] FF delta down fuera de rango (0..100)");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.ff.minspd")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] FF minspd invalido (ej: spid.ff.minspd 0.10)");
+      return true;
+    }
+    if (!speedPidSetThrottleBaseActivationMinMps(value)) {
+      sendTelnet("[SPID] FF minspd fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.ff.grace")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    int value = 0;
+    if (!parseIntArg(args, value)) {
+      sendTelnet("[SPID] FF grace invalido (ej: spid.ff.grace 1200)");
+      return true;
+    }
+    if (value < 0 || value > 65535) {
+      sendTelnet("[SPID] FF grace fuera de rango");
+      return true;
+    }
+    if (!speedPidSetFeedbackLaunchGraceMs(static_cast<uint16_t>(value))) {
+      sendTelnet("[SPID] FF grace fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.iunwind")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] IntegratorUnwind invalido (ej: spid.iunwind 0.35)");
+      return true;
+    }
+    if (!speedPidSetIntegratorUnwindGain(value)) {
+      sendTelnet("[SPID] IntegratorUnwind fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.dfilter")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] DerivativeFilter invalido (ej: spid.dfilter 3.0)");
+      return true;
+    }
+    if (!speedPidSetDerivativeFilterHz(value)) {
+      sendTelnet("[SPID] DerivativeFilter fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.max")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] Max invalido (ej: spid.max 4.17)");
+      return true;
+    }
+    if (!speedPidSetMaxSpeedMps(value)) {
+      sendTelnet("[SPID] Max fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.brakecap")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] BrakeCap invalido (ej: spid.brakecap 30)");
+      return true;
+    }
+    if (!speedPidSetOverspeedBrakeMaxPercent(value)) {
+      sendTelnet("[SPID] BrakeCap fuera de rango (0..100)");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.hys")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] Hysteresis invalido (ej: spid.hys 0.3)");
+      return true;
+    }
+    if (!speedPidSetOverspeedReleaseHysteresisMps(value)) {
+      sendTelnet("[SPID] Hysteresis fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.brakeslewup")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] BrakeSlewUp invalido (ej: spid.brakeslewup 35)");
+      return true;
+    }
+    if (!speedPidSetOverspeedBrakeSlewUpPctPerSec(value)) {
+      sendTelnet("[SPID] BrakeSlewUp fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.brakeslewdown")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] BrakeSlewDown invalido (ej: spid.brakeslewdown 55)");
+      return true;
+    }
+    if (!speedPidSetOverspeedBrakeSlewDownPctPerSec(value)) {
+      sendTelnet("[SPID] BrakeSlewDown fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.brakehold")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    int value = 0;
+    if (!parseIntArg(args, value)) {
+      sendTelnet("[SPID] BrakeHold invalido (ej: spid.brakehold 200)");
+      return true;
+    }
+    if (value < 0 || value > 65535) {
+      sendTelnet("[SPID] BrakeHold fuera de rango");
+      return true;
+    }
+    if (!speedPidSetOverspeedBrakeHoldMs(static_cast<uint16_t>(value))) {
+      sendTelnet("[SPID] BrakeHold fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.brakedb")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] BrakeDeadband invalido (ej: spid.brakedb 3)");
+      return true;
+    }
+    if (!speedPidSetOverspeedBrakeDeadbandPercent(value)) {
+      sendTelnet("[SPID] BrakeDeadband fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.target")) {
+    if (args.isEmpty()) {
+      reportSpeedPidTargetStatus();
+      return true;
+    }
+
+    String normalized = args;
+    normalized.toLowerCase();
+    if (normalized == "off" || normalized == "0" || normalized == "stop") {
+      if (!quadDriveSetSpeedTargetOverride(false, 0.0f)) {
+        sendTelnet("[SPID][TARGET] No se pudo desactivar override");
+        return true;
+      }
+      reportSpeedPidTargetStatus();
+      return true;
+    }
+
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID][TARGET] Valor invalido (ej: spid.target 1.5 | spid.target off)");
+      return true;
+    }
+    if (!quadDriveSetSpeedTargetOverride(true, value)) {
+      String msg = "[SPID][TARGET] Fuera de rango (0..";
+      msg += String(speedPidGetMaxSpeedMps(), 2);
+      msg += " m/s)";
+      sendTelnet(msg);
+      return true;
+    }
+    reportSpeedPidTargetStatus();
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.save")) {
+    if (!speedPidSaveToNvs()) {
+      sendTelnet("[SPID] Error guardando en NVS");
+      return true;
+    }
+    sendTelnet("[SPID] Configuracion guardada en NVS");
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.reset")) {
+    if (!speedPidResetToDefaults(true)) {
+      sendTelnet("[SPID] Error restaurando defaults");
+      return true;
+    }
+    sendTelnet("[SPID] Defaults restaurados y persistidos");
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.status")) {
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.stream")) {
+    if (args.isEmpty()) {
+      const uint32_t periodMs = static_cast<uint32_t>(g_speedPidStreamPeriod * portTICK_PERIOD_MS);
+      String msg = "[SPID][STREAM] ";
+      msg += g_speedPidStreamEnabled ? "ON" : "OFF";
+      msg += " periodo=";
+      msg += periodMs;
+      msg += "ms";
+      sendTelnet(msg);
+      return true;
+    }
+
+    bool enabled = false;
+    TickType_t periodTicks = g_speedPidStreamPeriod;
+    int periodMs = static_cast<int>(g_speedPidStreamPeriod * portTICK_PERIOD_MS);
+    if (!parseStreamToggleArgs(args,
+                               periodMs,
+                               kSpeedPidStreamMinPeriodMs,
+                               kSpeedPidStreamMaxPeriodMs,
+                               "[SPID][STREAM] Uso: spid.stream on [ms] | spid.stream off",
+                               enabled,
+                               periodTicks,
+                               periodMs)) {
+      return true;
+    }
+
+    if (!enabled) {
+      g_speedPidStreamEnabled = false;
+      sendTelnet("[SPID][STREAM] OFF");
+      return true;
+    }
+
+    g_speedPidStreamPeriod = periodTicks;
+    g_speedPidStreamEnabled = true;
+    g_lastSpeedPidStreamTick = 0;
+
+    String msg = "[SPID][STREAM] ON periodo=";
+    msg += periodMs;
+    msg += "ms";
+    sendTelnet(msg);
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.help")) {
+    sendTelnet(
+        "Comandos: spid.set <kp> <ki> <kd> | spid.kp <v> | spid.ki <v> | spid.kd <v> | spid.ramp <mps2> | spid.minthrottle <pct> | spid.thslewup <pctps> | spid.thslewdown <pctps> | spid.minth.spd <mps> | spid.launchwin <ms> | spid.ff on|off | spid.ff.base0 <pct> | spid.ff.basemax <pct> | spid.ff.du <pct> | spid.ff.dd <pct> | spid.ff.minspd <mps> | spid.ff.grace <ms> | spid.iunwind <gain> | spid.dfilter <hz> | spid.max <mps> | spid.brakecap <pct> | spid.hys <mps> | spid.brakeslewup <pctps> | spid.brakeslewdown <pctps> | spid.brakehold <ms> | spid.brakedb <pct> | spid.target <mps|off> | spid.save | spid.reset | spid.status | spid.stream on [ms] | spid.stream off");
+    return true;
+  }
+
+  return false;
+}
+
+bool handleDriveCommand(const String& command, const String& args) {
+  if (command.equalsIgnoreCase("drive.log")) {
+    if (args.isEmpty()) {
+      bool baseEnabled = false;
+      bool pidTraceEnabled = false;
+      TickType_t pidTracePeriodTicks = kDrivePidTraceDefaultPeriod;
+      quadDriveGetLogEnabled(baseEnabled);
+      quadDriveGetPidTraceConfig(pidTraceEnabled, pidTracePeriodTicks);
+      String msg = "[DRIVE][LOG] base=";
+      msg += baseEnabled ? "ON" : "OFF";
+      msg += " pid=";
+      msg += pidTraceEnabled ? "ON" : "OFF";
+      msg += " period=";
+      msg += static_cast<uint32_t>(pidTracePeriodTicks * portTICK_PERIOD_MS);
+      msg += "ms";
+      sendTelnet(msg);
+      return true;
+    }
+
+    String normalized = args;
+    normalized.toLowerCase();
+    if (normalized == "on" || normalized == "1") {
+      quadDriveSetLogEnabled(true);
+      sendTelnet("[DRIVE][LOG] ON");
+      return true;
+    }
+    if (normalized == "off" || normalized == "0") {
+      quadDriveSetLogEnabled(false);
+      sendTelnet("[DRIVE][LOG] OFF");
+      return true;
+    }
+
+    if (normalized.startsWith("pid")) {
+      String subArgs = args.substring(3);
+      subArgs.trim();
+      if (subArgs.isEmpty()) {
+        bool pidTraceEnabled = false;
+        TickType_t pidTracePeriodTicks = kDrivePidTraceDefaultPeriod;
+        quadDriveGetPidTraceConfig(pidTraceEnabled, pidTracePeriodTicks);
+        String msg = "[DRIVE][LOG][PID] ";
+        msg += pidTraceEnabled ? "ON" : "OFF";
+        msg += " periodo=";
+        msg += static_cast<uint32_t>(pidTracePeriodTicks * portTICK_PERIOD_MS);
+        msg += "ms";
+        sendTelnet(msg);
+        return true;
+      }
+
+      bool enabled = false;
+      TickType_t periodTicks = kDrivePidTraceDefaultPeriod;
+      int periodMs = static_cast<int>(kDrivePidTraceDefaultPeriod * portTICK_PERIOD_MS);
+      if (!parseStreamToggleArgs(subArgs,
+                                 periodMs,
+                                 kDrivePidTraceMinPeriodMs,
+                                 kDrivePidTraceMaxPeriodMs,
+                                 "[DRIVE][LOG][PID] Uso: drive.log pid on [ms] | drive.log pid off",
+                                 enabled,
+                                 periodTicks,
+                                 periodMs)) {
+        return true;
+      }
+
+      if (!enabled) {
+        quadDriveSetPidTraceEnabled(false, kDrivePidTraceDefaultPeriod);
+        sendTelnet("[DRIVE][LOG][PID] OFF");
+        return true;
+      }
+
+      quadDriveSetPidTraceEnabled(true, periodTicks);
+      String msg = "[DRIVE][LOG][PID] ON periodo=";
+      msg += periodMs;
+      msg += "ms";
+      sendTelnet(msg);
+      return true;
+    }
+
+    sendTelnet(
+        "[DRIVE][LOG] Uso: drive.log | drive.log on | drive.log off | drive.log pid on [ms] | drive.log pid off");
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("drive.pwm")) {
+    if (args.isEmpty()) {
+      reportDrivePwmOverrideStatus();
+      return true;
+    }
+
+    String normalized = args;
+    normalized.toLowerCase();
+    if (normalized == "off" || normalized == "0" || normalized == "stop") {
+      quadDriveSetPwmOverride(false, 0);
+      sendTelnet("[DRIVE][PWM] OFF");
+      return true;
+    }
+
+    int dutyPercent = -1;
+    String dutyText = args;
+    if (normalized.startsWith("on")) {
+      dutyText = args.substring(2);
+      dutyText.trim();
+    }
+    if (!parseIntArg(dutyText, dutyPercent)) {
+      sendTelnet("[DRIVE][PWM] Uso: drive.pwm <0-100> | drive.pwm off");
+      return true;
+    }
+    if (dutyPercent < 0 || dutyPercent > 100) {
+      sendTelnet("[DRIVE][PWM] Valor fuera de rango (0..100)");
+      return true;
+    }
+
+    // Evitar un objetivo SPID latente al salir del modo PWM directo.
+    quadDriveSetSpeedTargetOverride(false, 0.0f);
+    if (!quadDriveSetPwmOverride(true, dutyPercent)) {
+      sendTelnet("[DRIVE][PWM] No se pudo activar");
+      return true;
+    }
+
+    String msg = "[DRIVE][PWM] ON duty=";
+    msg += dutyPercent;
+    msg += "%";
+    sendTelnet(msg);
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("drive.rc.status")) {
+    sendTelnet(buildDriveRcStatusMessage());
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("drive.rc.cal")) {
+    if (args.isEmpty()) {
+      bool enabled = true;
+      quadDriveGetRcNeutralCalEnabled(enabled);
+      String msg = "[DRIVE][RC][CAL] ";
+      msg += enabled ? "ON" : "OFF";
+      sendTelnet(msg);
+      return true;
+    }
+    String normalized = args;
+    normalized.toLowerCase();
+    if (normalized == "on" || normalized == "1") {
+      quadDriveSetRcNeutralCalEnabled(true);
+      sendTelnet("[DRIVE][RC][CAL] ON");
+      return true;
+    }
+    if (normalized == "off" || normalized == "0") {
+      quadDriveSetRcNeutralCalEnabled(false);
+      sendTelnet("[DRIVE][RC][CAL] OFF");
+      return true;
+    }
+    sendTelnet("[DRIVE][RC][CAL] Uso: drive.rc.cal on|off");
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("drive.rc.stream")) {
+    if (args.isEmpty()) {
+      String msg = "[DRIVE][RC][STREAM] ";
+      msg += g_driveRcStreamEnabled ? "ON" : "OFF";
+      msg += " periodo=";
+      msg += static_cast<uint32_t>(g_driveRcStreamPeriod * portTICK_PERIOD_MS);
+      msg += "ms";
+      sendTelnet(msg);
+      return true;
+    }
+
+    bool enabled = false;
+    TickType_t periodTicks = g_driveRcStreamPeriod;
+    int periodMs = static_cast<int>(kDriveRcStreamDefaultPeriod * portTICK_PERIOD_MS);
+    if (!parseStreamToggleArgs(args,
+                               periodMs,
+                               kDriveRcStreamMinPeriodMs,
+                               kDriveRcStreamMaxPeriodMs,
+                               "[DRIVE][RC][STREAM] Uso: drive.rc.stream on [ms] | drive.rc.stream off",
+                               enabled,
+                               periodTicks,
+                               periodMs)) {
+      return true;
+    }
+
+    if (!enabled) {
+      g_driveRcStreamEnabled = false;
+      sendTelnet("[DRIVE][RC][STREAM] OFF");
+      return true;
+    }
+
+    g_driveRcStreamPeriod = periodTicks;
+    g_driveRcStreamEnabled = true;
+    String msg = "[DRIVE][RC][STREAM] ON periodo=";
+    msg += periodMs;
+    msg += "ms";
+    sendTelnet(msg);
+    sendTelnet(buildDriveRcStatusMessage());
+    return true;
+  }
+
+  return false;
+}
+
+void handleTelnetCommand(String line) {
+  ParsedTelnetCommand parsed{};
+  if (!parseCommandLine(line, parsed)) {
     return;
   }
 
-  sendTelnet("[STEER] Comando desconocido: " + line);
+  // Orden fijo de dispatch para preservar compatibilidad de comandos.
+  if (handleSteerCommand(parsed.command, parsed.args) || handlePidCommand(parsed.command, parsed.args) ||
+      handleSpidCommand(parsed.command, parsed.args) || handleDriveCommand(parsed.command, parsed.args) ||
+      handleCommsCommand(parsed.command, parsed.args) || handleSpeedCommand(parsed.command, parsed.args) ||
+      handleSysCommand(parsed.command, parsed.args) || handleNetCommand(parsed.command, parsed.args)) {
+    return;
+  }
+
+  sendTelnet("[STEER] Comando desconocido: " + parsed.line);
 }
 
 void handleTelnetClient() {

@@ -261,7 +261,7 @@ void setup() {
 
   if (debug::kEnableBridgeTask) {
     init_h_bridge();
-    broadcastIf(debug::kLogBridge, "Inicializado H-bridge (pins 21 enable, 19 left PWM, 18 right PWM)");
+    broadcastIf(debug::kLogBridge, "Inicializado H-bridge (pins 21 enable, 22 left PWM, 23 right PWM)");
   }
 
   if (startTaskPinned(taskOtaTelnet, "OTA", STACK_OTA, &g_otaConfig, 3, &g_taskOtaHandle, 0)) {

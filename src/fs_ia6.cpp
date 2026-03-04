@@ -1,4 +1,4 @@
-#include "../include/fs_ia6.h"
+#include "fs_ia6.h"
 
 #include <algorithm>
 

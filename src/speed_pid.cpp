@@ -1002,295 +1002,178 @@ void speedPidReset() {
   portEXIT_CRITICAL(&g_speedPidMux);
 }
 
-bool speedPidGetTunings(SpeedPidTunings& tunings) {
+template <typename Reader>
+bool readInitializedState(Reader&& reader) {
   portENTER_CRITICAL(&g_speedPidMux);
   if (!g_state.initialized) {
     portEXIT_CRITICAL(&g_speedPidMux);
     return false;
   }
-  tunings = g_state.tunings;
+  reader();
   portEXIT_CRITICAL(&g_speedPidMux);
   return true;
+}
+
+template <typename Mutator>
+bool mutateInitializedState(Mutator&& mutator) {
+  portENTER_CRITICAL(&g_speedPidMux);
+  if (!g_state.initialized) {
+    portEXIT_CRITICAL(&g_speedPidMux);
+    return false;
+  }
+  mutator();
+  portEXIT_CRITICAL(&g_speedPidMux);
+  return true;
+}
+
+bool speedPidGetTunings(SpeedPidTunings& tunings) {
+  return readInitializedState([&]() { tunings = g_state.tunings; });
 }
 
 bool speedPidSetTunings(const SpeedPidTunings& tunings) {
   if (!validateTunings(tunings)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.tunings = tunings;
-  resetControlTermsLocked();
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() {
+    g_state.tunings = tunings;
+    resetControlTermsLocked();
+  });
 }
 
 bool speedPidGetConfig(SpeedPidConfig& config) {
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  config = g_state.config;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return readInitializedState([&]() { config = g_state.config; });
 }
 
 bool speedPidSetMaxSpeedMps(float maxSpeedMps) {
   if (!isFiniteInRange(maxSpeedMps, kMinMaxSpeedMps, kMaxMaxSpeedMps)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.maxSpeedMps = maxSpeedMps;
-  g_state.targetRawMps = clampf(g_state.targetRawMps, 0.0f, maxSpeedMps);
-  g_state.targetRampedMps = clampf(g_state.targetRampedMps, 0.0f, maxSpeedMps);
-  g_state.measuredMps = clampf(g_state.measuredMps, 0.0f, maxSpeedMps);
-  resetControlTermsLocked();
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() {
+    g_state.config.maxSpeedMps = maxSpeedMps;
+    g_state.targetRawMps = clampf(g_state.targetRawMps, 0.0f, maxSpeedMps);
+    g_state.targetRampedMps = clampf(g_state.targetRampedMps, 0.0f, maxSpeedMps);
+    g_state.measuredMps = clampf(g_state.measuredMps, 0.0f, maxSpeedMps);
+    resetControlTermsLocked();
+  });
 }
 
 bool speedPidSetRampRateMps2(float rampRateMps2) {
   if (!isFiniteInRange(rampRateMps2, kMinRampMps2, kMaxRampMps2)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.maxSetpointRateMps2 = rampRateMps2;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.maxSetpointRateMps2 = rampRateMps2; });
 }
 
 bool speedPidSetMinThrottlePercent(float minThrottlePercent) {
   if (!isFiniteInRange(minThrottlePercent, kMinMinThrottlePercent, kMaxMinThrottlePercent)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.minThrottlePercent = minThrottlePercent;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.minThrottlePercent = minThrottlePercent; });
 }
 
 bool speedPidSetThrottleSlewUpPctPerSec(float slewUpPctPerSec) {
   if (!isFiniteInRange(slewUpPctPerSec, kMinThrottleSlewPctPerSec, kMaxThrottleSlewPctPerSec)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.throttleSlewUpPctPerSec = slewUpPctPerSec;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.throttleSlewUpPctPerSec = slewUpPctPerSec; });
 }
 
 bool speedPidSetThrottleSlewDownPctPerSec(float slewDownPctPerSec) {
   if (!isFiniteInRange(slewDownPctPerSec, kMinThrottleSlewPctPerSec, kMaxThrottleSlewPctPerSec)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.throttleSlewDownPctPerSec = slewDownPctPerSec;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.throttleSlewDownPctPerSec = slewDownPctPerSec; });
 }
 
 bool speedPidSetMinThrottleAssistMaxSpeedMps(float maxSpeedMps) {
   if (!isFiniteInRange(maxSpeedMps, kMinLaunchAssistMaxSpeedMps, kMaxLaunchAssistMaxSpeedMps)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.minThrottleAssistMaxSpeedMps = maxSpeedMps;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.minThrottleAssistMaxSpeedMps = maxSpeedMps; });
 }
 
 bool speedPidSetLaunchAssistWindowMs(uint16_t windowMs) {
   if (windowMs < kMinLaunchAssistWindowMs || windowMs > kMaxLaunchAssistWindowMs) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.launchAssistWindowMs = windowMs;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.launchAssistWindowMs = windowMs; });
 }
 
 bool speedPidSetThrottleBaseEnable(bool enabled) {
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.throttleBaseEnable = enabled;
-  resetControlTermsLocked();
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() {
+    g_state.config.throttleBaseEnable = enabled;
+    resetControlTermsLocked();
+  });
 }
 
 bool speedPidSetThrottleBaseAtZeroMpsPercent(float percent) {
   if (!isFiniteInRange(percent, kMinThrottleBasePercent, kMaxThrottleBasePercent)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.throttleBaseAtZeroMpsPercent = percent;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.throttleBaseAtZeroMpsPercent = percent; });
 }
 
 bool speedPidSetThrottleBaseAtMaxSpeedPercent(float percent) {
   if (!isFiniteInRange(percent, kMinThrottleBasePercent, kMaxThrottleBasePercent)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.throttleBaseAtMaxSpeedPercent = percent;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.throttleBaseAtMaxSpeedPercent = percent; });
 }
 
 bool speedPidSetThrottleBasePidDeltaUpMaxPercent(float percent) {
   if (!isFiniteInRange(percent, kMinThrottleBaseDeltaMaxPercent, kMaxThrottleBaseDeltaMaxPercent)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.throttleBasePidDeltaUpMaxPercent = percent;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.throttleBasePidDeltaUpMaxPercent = percent; });
 }
 
 bool speedPidSetThrottleBasePidDeltaDownMaxPercent(float percent) {
   if (!isFiniteInRange(percent, kMinThrottleBaseDeltaMaxPercent, kMaxThrottleBaseDeltaMaxPercent)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.throttleBasePidDeltaDownMaxPercent = percent;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.throttleBasePidDeltaDownMaxPercent = percent; });
 }
 
 bool speedPidSetThrottleBaseActivationMinMps(float mps) {
   if (!isFiniteInRange(mps, kMinThrottleBaseActivationMps, kMaxThrottleBaseActivationMps)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.throttleBaseActivationMinMps = mps;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.throttleBaseActivationMinMps = mps; });
 }
 
 bool speedPidSetFeedbackLaunchGraceMs(uint16_t graceMs) {
   if (graceMs < kMinFeedbackLaunchGraceMs || graceMs > kMaxFeedbackLaunchGraceMs) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.feedbackLaunchGraceMs = graceMs;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.feedbackLaunchGraceMs = graceMs; });
 }
 
 bool speedPidSetIntegratorUnwindGain(float unwindGain) {
   if (!isFiniteInRange(unwindGain, kMinIntegratorUnwindGain, kMaxIntegratorUnwindGain)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.integratorUnwindGain = unwindGain;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.integratorUnwindGain = unwindGain; });
 }
 
 bool speedPidSetDerivativeFilterHz(float cutoffHz) {
   if (!isFiniteInRange(cutoffHz, kMinDerivativeFilterHz, kMaxDerivativeFilterHz)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.derivativeFilterHz = cutoffHz;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.derivativeFilterHz = cutoffHz; });
 }
 
 bool speedPidSetOverspeedBrakeMaxPercent(float brakeCapPercent) {
   if (!isFiniteInRange(brakeCapPercent, kMinOverspeedBrakeCapPercent, kMaxOverspeedBrakeCapPercent)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.overspeedBrakeMaxPercent = brakeCapPercent;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.overspeedBrakeMaxPercent = brakeCapPercent; });
 }
 
 bool speedPidSetOverspeedReleaseHysteresisMps(float hysteresisMps) {
   if (!isFiniteInRange(hysteresisMps, kMinOverspeedHysteresisMps, kMaxOverspeedHysteresisMps)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.overspeedReleaseHysteresisMps = hysteresisMps;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.overspeedReleaseHysteresisMps = hysteresisMps; });
 }
 
 bool speedPidSetOverspeedBrakeSlewUpPctPerSec(float slewUpPctPerSec) {
@@ -1299,14 +1182,7 @@ bool speedPidSetOverspeedBrakeSlewUpPctPerSec(float slewUpPctPerSec) {
                        kMaxOverspeedBrakeSlewPctPerSec)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.overspeedBrakeSlewUpPctPerSec = slewUpPctPerSec;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.overspeedBrakeSlewUpPctPerSec = slewUpPctPerSec; });
 }
 
 bool speedPidSetOverspeedBrakeSlewDownPctPerSec(float slewDownPctPerSec) {
@@ -1315,28 +1191,14 @@ bool speedPidSetOverspeedBrakeSlewDownPctPerSec(float slewDownPctPerSec) {
                        kMaxOverspeedBrakeSlewPctPerSec)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.overspeedBrakeSlewDownPctPerSec = slewDownPctPerSec;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.overspeedBrakeSlewDownPctPerSec = slewDownPctPerSec; });
 }
 
 bool speedPidSetOverspeedBrakeHoldMs(uint16_t holdMs) {
   if (holdMs < kMinOverspeedBrakeHoldMs || holdMs > kMaxOverspeedBrakeHoldMs) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.overspeedBrakeHoldMs = holdMs;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.overspeedBrakeHoldMs = holdMs; });
 }
 
 bool speedPidSetOverspeedBrakeDeadbandPercent(float deadbandPercent) {
@@ -1345,14 +1207,7 @@ bool speedPidSetOverspeedBrakeDeadbandPercent(float deadbandPercent) {
                        kMaxOverspeedBrakeDeadbandPercent)) {
     return false;
   }
-  portENTER_CRITICAL(&g_speedPidMux);
-  if (!g_state.initialized) {
-    portEXIT_CRITICAL(&g_speedPidMux);
-    return false;
-  }
-  g_state.config.overspeedBrakeDeadbandPercent = deadbandPercent;
-  portEXIT_CRITICAL(&g_speedPidMux);
-  return true;
+  return mutateInitializedState([&]() { g_state.config.overspeedBrakeDeadbandPercent = deadbandPercent; });
 }
 
 bool speedPidSaveToNvs() {

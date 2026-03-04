@@ -1,7 +1,7 @@
 // h_bridge.cpp
 // Implementacion simple del control de un puente H en ESP32 usando LEDC
 
-#include "../include/h_bridge.h"
+#include "h_bridge.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
