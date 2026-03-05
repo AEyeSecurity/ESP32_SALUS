@@ -4,6 +4,11 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 
 Nota operacional: la UI web de Telnet fue removida del repositorio para reducir complejidad y evitar cargas de sondeo/streaming desde host. El control y diagnóstico host se realiza por CLI Telnet y scripts HIL en `tools/tests`.
 
+## Guias recomendadas
+
+- [OTA_TELNET.md](OTA_TELNET.md): comandos operativos por Telnet/OTA y debugging.
+- [SPID_ACCEL_PID.md](SPID_ACCEL_PID.md): explicacion tecnica completa del PID de aceleracion (`spid`), parametros y escenarios de validacion.
+
 ## Flujo de arranque (src/main.cpp)
 
 1. `setup()` inicializa WiFi/Telnet/OTA, configura PID/sensores y luego levanta las tareas, incluyendo UART con Raspberry Pi (`piCommsInit` + `taskPiCommsRx/Tx`).

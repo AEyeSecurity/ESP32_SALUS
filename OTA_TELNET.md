@@ -129,6 +129,7 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low).
 
 ## PID de velocidad (`spid.*`)
 
+- Guia tecnica detallada del lazo y tuning: [SPID_ACCEL_PID.md](SPID_ACCEL_PID.md).
 - `spid.status`: muestra snapshot runtime del PID de velocidad (`target raw/ramped`, `speed`, `error`, `p/i/d`, `unsat/sat`, feedforward `ffBase/ffDelta/ffPre`, `mode`, `overspeed`, `throttle`, `brake`, `brakeRaw`, `brakeFilt`, `hold`, `failsafe`) y configuración (incluye `ff{en,b0,bmax,du,dd,min}` y `flgr`).
 - `spid.set <kp> <ki> <kd>`: actualiza ganancias.
 - `spid.kp <v> | spid.ki <v> | spid.kd <v>`: ajusta cada ganancia en vivo.
