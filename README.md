@@ -147,6 +147,7 @@ Troubleshooting OTA rapido:
   - `drive.log on|off` habilita/deshabilita logs `[DRIVE]` base.
   - `drive.log pid on [ms] | drive.log pid off` habilita/deshabilita trace forense periódico `[DRIVE][PIDTRACE]` para analizar estabilidad de velocidad y autofrenado (`target`, `speed`, `PWM`, `P/I/D`, `throttleRaw/Filt`, `launchAssistActive`, `throttleSaturated`, `integratorClamped`, `brakeA_pct`, `brakeB_pct`, `failsafe/overspeed/inhibit`).
     Operación normal recomendada: mantener `drive.log pid off` (el trace se reinicia a OFF al cerrar sesión Telnet).
+  - `exit` (alias `quit`, `logout`) cierra la sesion Telnet actual.
   - `python3 tools/tests/speed_pid_hil.py --mode interactive` ejecuta pruebas HIL guiadas del PID de velocidad (evidencia en `artifacts/speed_pid_test_report.json` y `.md`).
   - `python3 tools/tests/system_rt_hil.py --host <esp32-host>` ejecuta captura estructurada de `TC-RT-01/TC-RT-02` usando `sys.rt/sys.stack/sys.jitter` y `sys.reset`.
     El runner valida por defecto `PiUartRx` con umbral realista `p95<=800us`, `p99<=2000us` (ajustable con `--pi-rx-p95-max-us` y `--pi-rx-p99-max-us`).

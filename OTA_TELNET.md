@@ -101,12 +101,14 @@ sys.rt
 sys.stack
 sys.jitter
 sys.reset
+exit
 ```
 
 Notas de sesion:
 - Solo se mantiene un cliente Telnet a la vez.
 - Si entra un cliente nuevo, reemplaza al anterior automaticamente.
 - Una sesion inactiva se cierra sola (timeout) para evitar bloqueos por clientes colgados.
+- `exit` (alias: `quit`, `logout`) cierra la sesion actual inmediatamente.
 
 ## Velocidad Hall (`speed.*`)
 

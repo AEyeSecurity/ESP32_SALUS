@@ -193,6 +193,34 @@ def run(args: argparse.Namespace) -> int:
         if c2 is not None:
             c2.close()
 
+    # T5: explicit session close command
+    tn = None
+    try:
+        tn, _ = connect_telnet(args.host, args.port, args.timeout)
+        out = send_cmd(tn, "exit", 0.35)
+        bye_ok = any("[TELNET] Cerrando sesion" in ln for ln in out)
+        disconnected = False
+        try:
+            tn.write(b"net.status\n")
+            time.sleep(0.2)
+            disconnected = len(recv_lines(tn, 0.05)) == 0
+        except Exception:
+            disconnected = True
+        add(
+            "T5_exit_command",
+            bye_ok and disconnected,
+            "Comando exit cierra la sesion en firmware",
+            out[:6],
+        )
+    except Exception as exc:  # pragma: no cover
+        add("T5_exit_command", False, f"Exception: {exc}", [])
+    finally:
+        if tn is not None:
+            try:
+                tn.close()
+            except Exception:
+                pass
+
     ended = now_utc_iso()
     passed = sum(1 for r in results if r.passed)
     failed = len(results) - passed

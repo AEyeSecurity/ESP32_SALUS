@@ -253,7 +253,7 @@ void openTelnetSession(WiFiClient& incoming) {
   g_telnetClient.println("=== Servidor Telnet ESP32 ===");
   g_telnetClient.println("Conexion establecida correctamente");
   g_telnetClient.println(
-      "Comandos: steer.help | pid.help | spid.help | comms.status | speed.status | speed.reset | speed.stream | speed.uart | pid.stream | spid.stream | spid.target | drive.log | drive.pwm | drive.rc.status | drive.rc.stream | sys.rt | sys.stack | sys.jitter | sys.reset | net.status");
+      "Comandos: steer.help | pid.help | spid.help | comms.status | speed.status | speed.reset | speed.stream | speed.uart | pid.stream | spid.stream | spid.target | drive.log | drive.pwm | drive.rc.status | drive.rc.stream | sys.rt | sys.stack | sys.jitter | sys.reset | net.status | exit");
   reportNetworkStatus();
 }
 
@@ -911,6 +911,18 @@ bool handleSteerCommand(const String& command, const String& args) {
 
   if (command.equalsIgnoreCase("steer.help")) {
     sendTelnet("Comandos: steer.calibrate | steer.offset <deg> | steer.reset | steer.status");
+    return true;
+  }
+
+  return false;
+}
+
+bool handleSessionCommand(const String& command, const String& args) {
+  (void)args;
+
+  if (command.equalsIgnoreCase("exit") || command.equalsIgnoreCase("quit") || command.equalsIgnoreCase("logout")) {
+    sendTelnet("[TELNET] Cerrando sesion");
+    resetTelnetSession();
     return true;
   }
 
@@ -2138,7 +2150,8 @@ void handleTelnetCommand(String line) {
   }
 
   // Orden fijo de dispatch para preservar compatibilidad de comandos.
-  if (handleSteerCommand(parsed.command, parsed.args) || handlePidCommand(parsed.command, parsed.args) ||
+  if (handleSessionCommand(parsed.command, parsed.args) || handleSteerCommand(parsed.command, parsed.args) ||
+      handlePidCommand(parsed.command, parsed.args) ||
       handleSpidCommand(parsed.command, parsed.args) || handleDriveCommand(parsed.command, parsed.args) ||
       handleCommsCommand(parsed.command, parsed.args) || handleSpeedCommand(parsed.command, parsed.args) ||
       handleSysCommand(parsed.command, parsed.args) || handleNetCommand(parsed.command, parsed.args)) {
