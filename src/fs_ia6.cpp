@@ -1,6 +1,7 @@
 #include "fs_ia6.h"
 
 #include <algorithm>
+#include <array>
 
 #include <driver/gpio.h>
 #include <driver/rmt.h>
@@ -14,30 +15,42 @@ namespace {
 constexpr uint32_t kMinPulseUs = 950;
 constexpr uint32_t kMaxPulseUs = 2050;
 constexpr size_t kMaxRcConsumers = 6;
-constexpr size_t kRcChannelCount = 4;
+
+constexpr rmt_channel_t kRcRmtChannel = RMT_CHANNEL_0;
+constexpr uint8_t kPpmMaxChannels = 12;
+constexpr uint8_t kPpmSteeringIdx = 0;   // CH1
+constexpr uint8_t kPpmThrottleIdx = 1;   // CH2
+constexpr uint8_t kPpmAux1Idx = 4;       // CH5
+constexpr uint8_t kPpmAux2Idx = 5;       // CH6
+constexpr uint8_t kPpmDebugChannels = 8; // Mostrar siempre CH1..CH8 en logs
+constexpr uint16_t kPpmDefaultPulseUs = 1500;
+constexpr uint16_t kPpmMarkerMinUs = 100;
+constexpr uint16_t kPpmMarkerMaxUs = 500;
+constexpr uint16_t kPpmChannelMinUs = 900;
+constexpr uint16_t kPpmChannelMaxUs = 2100;
+constexpr uint16_t kPpmSyncGapUs = 2700;
+constexpr uint8_t kPpmMinValidChannels = 4;
+constexpr uint8_t kPpmDefaultMarkerLevel = 0;
 
 struct RcConsumerRegistry {
   TaskHandle_t handle = nullptr;
 };
 
-struct RcChannelRuntime {
-  uint8_t pin;
-  rmt_channel_t channel;
-  RingbufHandle_t ring;
-  uint32_t lastPulseUs;
-  TickType_t lastUpdateTick;
-  const char* label;
+struct ParsedPpmFrame {
+  bool valid = false;
+  uint8_t channelCount = 0;
+  std::array<uint16_t, kPpmMaxChannels> channels{};
+};
 
-  RcChannelRuntime()
-      : pin(0), channel(RMT_CHANNEL_0), ring(nullptr), lastPulseUs(1500), lastUpdateTick(0), label(nullptr) {}
-
-  RcChannelRuntime(uint8_t pin_, rmt_channel_t channel_, const char* label_, uint32_t initialPulse = 1500)
-      : pin(pin_),
-        channel(channel_),
-        ring(nullptr),
-        lastPulseUs(initialPulse),
-        lastUpdateTick(0),
-        label(label_) {}
+struct PpmRuntime {
+  uint8_t pin = kRcPpmPin;
+  rmt_channel_t channel = kRcRmtChannel;
+  RingbufHandle_t ring = nullptr;
+  std::array<uint16_t, kPpmMaxChannels> lastChannels{};
+  uint8_t lastChannelCount = 0;
+  TickType_t lastFrameTick = 0;
+  bool polarityLocked = false;
+  uint8_t markerLevel = kPpmDefaultMarkerLevel;
 };
 
 portMUX_TYPE g_rcStateMux = portMUX_INITIALIZER_UNLOCKED;
@@ -46,15 +59,9 @@ portMUX_TYPE g_consumerMux = portMUX_INITIALIZER_UNLOCKED;
 RcSharedState g_rcState = {0, 0, 0, 0, 0, false};
 TickType_t g_lastRcLogTick = 0;
 bool g_rmtInitialized = false;
+PpmRuntime g_ppmRuntime;
 
 RcConsumerRegistry g_consumerRegistry[kMaxRcConsumers];
-
-RcChannelRuntime g_rcChannels[kRcChannelCount] = {
-    RcChannelRuntime{kRcAux1Pin, RMT_CHANNEL_0, "AUX1"},
-    RcChannelRuntime{kRcAux2Pin, RMT_CHANNEL_1, "AUX2"},
-    RcChannelRuntime{kRcThrottlePin, RMT_CHANNEL_2, "THROTTLE"},
-    RcChannelRuntime{kRcSteeringPin, RMT_CHANNEL_3, "STEERING"},
-};
 
 int clampToRange(int value, int minValue, int maxValue) {
   if (minValue < maxValue) {
@@ -69,7 +76,140 @@ int pulseWidthToRange(uint32_t pulseUs, int minLimit, int maxLimit) {
   return clampToRange(static_cast<int>(mapped), minLimit, maxLimit);
 }
 
-bool configureRmtChannel(RcChannelRuntime& runtime, bool logErrors) {
+bool isMarkerSegment(uint8_t level, uint16_t durationUs, uint8_t markerLevel) {
+  return level == markerLevel && durationUs >= kPpmMarkerMinUs && durationUs <= kPpmMarkerMaxUs;
+}
+
+ParsedPpmFrame parsePpmWithMarkerLevel(const rmt_item32_t* items, size_t itemCount, uint8_t markerLevel) {
+  ParsedPpmFrame bestFrame;
+  std::array<uint16_t, kPpmMaxChannels> currentChannels{};
+  uint8_t currentCount = 0;
+  bool haveMarker = false;
+  uint32_t markerToMarkerUs = 0;
+
+  for (size_t i = 0; i < itemCount; ++i) {
+    const rmt_item32_t& item = items[i];
+    const uint8_t levels[2] = {
+        static_cast<uint8_t>(item.level0),
+        static_cast<uint8_t>(item.level1),
+    };
+    const uint16_t durations[2] = {
+        static_cast<uint16_t>(item.duration0),
+        static_cast<uint16_t>(item.duration1),
+    };
+
+    for (uint8_t part = 0; part < 2; ++part) {
+      const uint16_t durationUs = durations[part];
+      if (durationUs == 0) {
+        continue;
+      }
+
+      const uint8_t level = levels[part];
+      if (isMarkerSegment(level, durationUs, markerLevel)) {
+        if (haveMarker) {
+          const uint32_t intervalUs = markerToMarkerUs;
+          if (intervalUs >= kPpmSyncGapUs) {
+            if (currentCount >= kPpmMinValidChannels && currentCount > bestFrame.channelCount) {
+              bestFrame.valid = true;
+              bestFrame.channelCount = currentCount;
+              bestFrame.channels = currentChannels;
+            }
+            currentCount = 0;
+          } else if (intervalUs >= kPpmChannelMinUs && intervalUs <= kPpmChannelMaxUs) {
+            if (currentCount < kPpmMaxChannels) {
+              currentChannels[currentCount++] = static_cast<uint16_t>(intervalUs);
+            }
+          } else {
+            currentCount = 0;
+          }
+        }
+
+        markerToMarkerUs = durationUs;
+        haveMarker = true;
+      } else if (haveMarker) {
+        markerToMarkerUs += durationUs;
+      }
+    }
+  }
+
+  if (currentCount >= kPpmMinValidChannels && currentCount > bestFrame.channelCount) {
+    bestFrame.valid = true;
+    bestFrame.channelCount = currentCount;
+    bestFrame.channels = currentChannels;
+  }
+
+  return bestFrame;
+}
+
+bool decodePpmFrame(const rmt_item32_t* items,
+                    size_t itemCount,
+                    bool log,
+                    uint8_t& inOutMarkerLevel,
+                    bool& inOutPolarityLocked,
+                    ParsedPpmFrame& outFrame) {
+  if (itemCount == 0) {
+    return false;
+  }
+
+  const ParsedPpmFrame frameLevel0 = parsePpmWithMarkerLevel(items, itemCount, 0);
+  const ParsedPpmFrame frameLevel1 = parsePpmWithMarkerLevel(items, itemCount, 1);
+
+  const bool valid0 = frameLevel0.valid;
+  const bool valid1 = frameLevel1.valid;
+  if (!valid0 && !valid1) {
+    return false;
+  }
+
+  uint8_t chosenLevel = inOutMarkerLevel;
+  ParsedPpmFrame chosenFrame{};
+
+  if (inOutPolarityLocked) {
+    const bool lockLevelIs0 = (inOutMarkerLevel == 0);
+    const ParsedPpmFrame& lockedFrame = lockLevelIs0 ? frameLevel0 : frameLevel1;
+    const ParsedPpmFrame& otherFrame = lockLevelIs0 ? frameLevel1 : frameLevel0;
+    if (lockedFrame.valid) {
+      outFrame = lockedFrame;
+      return true;
+    }
+    if (otherFrame.valid) {
+      chosenLevel = lockLevelIs0 ? 1 : 0;
+      chosenFrame = otherFrame;
+    } else {
+      return false;
+    }
+  } else if (valid0 && valid1) {
+    if (frameLevel0.channelCount >= frameLevel1.channelCount) {
+      chosenLevel = 0;
+      chosenFrame = frameLevel0;
+    } else {
+      chosenLevel = 1;
+      chosenFrame = frameLevel1;
+    }
+  } else if (valid0) {
+    chosenLevel = 0;
+    chosenFrame = frameLevel0;
+  } else {
+    chosenLevel = 1;
+    chosenFrame = frameLevel1;
+  }
+
+  if (!inOutPolarityLocked || inOutMarkerLevel != chosenLevel) {
+    inOutPolarityLocked = true;
+    inOutMarkerLevel = chosenLevel;
+    if (log) {
+      String msg = "[RC][PPM] Polaridad bloqueada markerLevel=";
+      msg += chosenLevel;
+      msg += " canales=";
+      msg += chosenFrame.channelCount;
+      broadcastIf(true, msg);
+    }
+  }
+
+  outFrame = chosenFrame;
+  return true;
+}
+
+bool configurePpmRmt(PpmRuntime& runtime, bool logErrors) {
   rmt_config_t config{};
   config.rmt_mode = RMT_MODE_RX;
   config.channel = runtime.channel;
@@ -77,13 +217,13 @@ bool configureRmtChannel(RcChannelRuntime& runtime, bool logErrors) {
   config.gpio_num = static_cast<gpio_num_t>(runtime.pin);
   config.mem_block_num = 1;
   config.rx_config.filter_en = true;
-  config.rx_config.filter_ticks_thresh = 100;     // Ignore glitches <100us
-  config.rx_config.idle_threshold = 12000;        // 12ms -> end of frame
+  config.rx_config.filter_ticks_thresh = 80;
+  config.rx_config.idle_threshold = 3000;
 
   esp_err_t err = rmt_config(&config);
   if (err != ESP_OK) {
     if (logErrors) {
-      broadcastIf(true, String("[RC][RMT] Error configurando canal ") + runtime.label + " err=" + err);
+      broadcastIf(true, String("[RC][RMT] Error configurando RX PPM err=") + err);
     }
     return false;
   }
@@ -91,7 +231,7 @@ bool configureRmtChannel(RcChannelRuntime& runtime, bool logErrors) {
   err = rmt_driver_install(runtime.channel, 2048, 0);
   if (err != ESP_OK) {
     if (logErrors) {
-      broadcastIf(true, String("[RC][RMT] Error instalando driver canal ") + runtime.label + " err=" + err);
+      broadcastIf(true, String("[RC][RMT] Error instalando driver PPM err=") + err);
     }
     return false;
   }
@@ -99,7 +239,7 @@ bool configureRmtChannel(RcChannelRuntime& runtime, bool logErrors) {
   err = rmt_get_ringbuf_handle(runtime.channel, &runtime.ring);
   if (err != ESP_OK || runtime.ring == nullptr) {
     if (logErrors) {
-      broadcastIf(true, String("[RC][RMT] Error obteniendo ringbuffer canal ") + runtime.label);
+      broadcastIf(true, "[RC][RMT] Error obteniendo ringbuffer PPM");
     }
     return false;
   }
@@ -107,13 +247,16 @@ bool configureRmtChannel(RcChannelRuntime& runtime, bool logErrors) {
   err = rmt_rx_start(runtime.channel, true);
   if (err != ESP_OK) {
     if (logErrors) {
-      broadcastIf(true, String("[RC][RMT] Error iniciando recepcion canal ") + runtime.label + " err=" + err);
+      broadcastIf(true, String("[RC][RMT] Error iniciando RX PPM err=") + err);
     }
     return false;
   }
 
-  runtime.lastPulseUs = 1500;
-  runtime.lastUpdateTick = xTaskGetTickCount();
+  runtime.lastChannels.fill(kPpmDefaultPulseUs);
+  runtime.lastChannelCount = 0;
+  runtime.lastFrameTick = 0;
+  runtime.markerLevel = kPpmDefaultMarkerLevel;
+  runtime.polarityLocked = false;
   return true;
 }
 
@@ -122,48 +265,52 @@ bool ensureRmtInitialized(bool logErrors) {
     return true;
   }
 
-  bool ok = true;
-  for (RcChannelRuntime& runtime : g_rcChannels) {
-    if (!configureRmtChannel(runtime, logErrors)) {
-      ok = false;
-    }
-  }
-
-  g_rmtInitialized = ok;
-  return ok;
+  g_rmtInitialized = configurePpmRmt(g_ppmRuntime, logErrors);
+  return g_rmtInitialized;
 }
 
-bool readRmtPulseUs(RcChannelRuntime& runtime, TickType_t timeoutTicks, uint32_t& outPulseUs) {
+bool readRmtItems(PpmRuntime& runtime, TickType_t timeoutTicks, rmt_item32_t*& outItems, size_t& outItemCount) {
+  outItems = nullptr;
+  outItemCount = 0;
   if (runtime.ring == nullptr) {
     return false;
   }
 
   size_t rxSize = 0;
-  rmt_item32_t* items =
-      static_cast<rmt_item32_t*>(xRingbufferReceive(runtime.ring, &rxSize, timeoutTicks));
-  if (items == nullptr) {
+  rmt_item32_t* items = static_cast<rmt_item32_t*>(xRingbufferReceive(runtime.ring, &rxSize, timeoutTicks));
+  if (items == nullptr || rxSize == 0) {
     return false;
   }
 
-  const size_t itemCount = rxSize / sizeof(rmt_item32_t);
-  bool found = false;
-  for (size_t i = 0; i < itemCount; ++i) {
-    const rmt_item32_t& item = items[i];
-    if (item.level0 == 1) {
-      outPulseUs = item.duration0;
-      found = true;
-      break;
+  outItems = items;
+  outItemCount = rxSize / sizeof(rmt_item32_t);
+  return outItemCount > 0;
+}
+
+int ppmChannelToRange(const PpmRuntime& runtime, uint8_t channelIndex, int minLimit, int maxLimit, int defaultValue) {
+  if (channelIndex >= runtime.lastChannelCount || channelIndex >= runtime.lastChannels.size()) {
+    return defaultValue;
+  }
+  return pulseWidthToRange(runtime.lastChannels[channelIndex], minLimit, maxLimit);
+}
+
+String buildPpmChannelsSummary(const PpmRuntime& runtime) {
+  String msg;
+  msg.reserve(120);
+  for (uint8_t idx = 0; idx < kPpmDebugChannels; ++idx) {
+    if (idx > 0) {
+      msg += " ";
     }
-    if (item.level1 == 1) {
-      outPulseUs = item.duration1;
-      found = true;
-      break;
+    msg += "CH";
+    msg += String(static_cast<int>(idx) + 1);
+    msg += "=";
+    if (idx < runtime.lastChannelCount && idx < runtime.lastChannels.size()) {
+      msg += String(pulseWidthToRange(runtime.lastChannels[idx], -100, 100));
+    } else {
+      msg += "0";
     }
   }
-
-  vRingbufferReturnItem(runtime.ring, items);
-  rmt_rx_start(runtime.channel, false);
-  return found;
+  return msg;
 }
 
 void notifyConsumers() {
@@ -266,11 +413,10 @@ void taskRcSampler(void* parameter) {
   const TickType_t period = (cfg != nullptr && cfg->period > 0) ? cfg->period : pdMS_TO_TICKS(10);
   const TickType_t staleThreshold =
       (cfg != nullptr && cfg->staleThreshold > 0) ? cfg->staleThreshold : pdMS_TO_TICKS(60);
-  // A timeout of 0 is valid: non-blocking read for each channel.
   const TickType_t receiveTimeout = (cfg != nullptr) ? cfg->rmtReceiveTimeout : pdMS_TO_TICKS(5);
 
   if (!ensureRmtInitialized(log)) {
-    broadcastIf(true, "[RC][RMT] No se pudo inicializar RMT para FS-iA6, finalizando tarea");
+    broadcastIf(true, "[RC][RMT] No se pudo inicializar RMT para PPM, finalizando tarea");
     vTaskDelete(nullptr);
     return;
   }
@@ -286,29 +432,47 @@ void taskRcSampler(void* parameter) {
       cycleUs = static_cast<uint32_t>(iterationStartUs - lastIterationStartUs);
     }
     lastIterationStartUs = iterationStartUs;
+
     const TickType_t now = xTaskGetTickCount();
     bool anyUpdated = false;
 
-    for (RcChannelRuntime& runtime : g_rcChannels) {
-      uint32_t pulseUs = 0;
-      if (readRmtPulseUs(runtime, receiveTimeout, pulseUs)) {
-        runtime.lastPulseUs = pulseUs;
-        runtime.lastUpdateTick = now;
+    rmt_item32_t* items = nullptr;
+    size_t itemCount = 0;
+    if (readRmtItems(g_ppmRuntime, receiveTimeout, items, itemCount)) {
+      ParsedPpmFrame decodedFrame;
+      if (decodePpmFrame(items,
+                         itemCount,
+                         log,
+                         g_ppmRuntime.markerLevel,
+                         g_ppmRuntime.polarityLocked,
+                         decodedFrame)) {
+        g_ppmRuntime.lastChannels = decodedFrame.channels;
+        g_ppmRuntime.lastChannelCount = decodedFrame.channelCount;
+        g_ppmRuntime.lastFrameTick = now;
         anyUpdated = true;
       }
+
+      vRingbufferReturnItem(g_ppmRuntime.ring, items);
+      rmt_rx_start(g_ppmRuntime.channel, false);
     }
 
     RcSharedState snapshot{};
-    snapshot.ch0 = pulseWidthToRange(g_rcChannels[0].lastPulseUs, -100, 100);
-    snapshot.ch2 = pulseWidthToRange(g_rcChannels[1].lastPulseUs, -100, 100);
-
-    const bool throttleFresh = (now - g_rcChannels[2].lastUpdateTick) <= staleThreshold;
-    const bool steeringFresh = (now - g_rcChannels[3].lastUpdateTick) <= staleThreshold;
-
-    snapshot.throttle = throttleFresh ? pulseWidthToRange(g_rcChannels[2].lastPulseUs, -100, 100) : 0;
-    snapshot.steering = steeringFresh ? pulseWidthToRange(g_rcChannels[3].lastPulseUs, -100, 100) : 0;
-    snapshot.lastUpdateTick = std::max(g_rcChannels[2].lastUpdateTick, g_rcChannels[3].lastUpdateTick);
-    snapshot.valid = throttleFresh || steeringFresh;
+    const bool fresh = g_ppmRuntime.lastFrameTick != 0 && (now - g_ppmRuntime.lastFrameTick) <= staleThreshold;
+    if (fresh) {
+      snapshot.steering = ppmChannelToRange(g_ppmRuntime, kPpmSteeringIdx, -100, 100, 0);
+      snapshot.throttle = ppmChannelToRange(g_ppmRuntime, kPpmThrottleIdx, -100, 100, 0);
+      snapshot.ch0 = ppmChannelToRange(g_ppmRuntime, kPpmAux1Idx, -100, 100, 0);
+      snapshot.ch2 = ppmChannelToRange(g_ppmRuntime, kPpmAux2Idx, -100, 100, 0);
+      snapshot.lastUpdateTick = g_ppmRuntime.lastFrameTick;
+      snapshot.valid = true;
+    } else {
+      snapshot.ch0 = 0;
+      snapshot.ch2 = 0;
+      snapshot.throttle = 0;
+      snapshot.steering = 0;
+      snapshot.lastUpdateTick = g_ppmRuntime.lastFrameTick;
+      snapshot.valid = false;
+    }
 
     portENTER_CRITICAL(&g_rcStateMux);
     g_rcState = snapshot;
@@ -317,10 +481,7 @@ void taskRcSampler(void* parameter) {
     if (log && anyUpdated) {
       const TickType_t lastLogDelta = now - g_lastRcLogTick;
       if (lastLogDelta >= pdMS_TO_TICKS(500)) {
-        String rcMsg = "RC sampler -> AUX1 GPIO" + String(kRcAux1Pin) + ": " + String(snapshot.ch0) +
-                       " | AUX2 GPIO" + String(kRcAux2Pin) + ": " + String(snapshot.ch2) +
-                       " | acelerador GPIO" + String(kRcThrottlePin) + ": " + String(snapshot.throttle) +
-                       " | direccion GPIO" + String(kRcSteeringPin) + ": " + String(snapshot.steering);
+        String rcMsg = "[RC] " + buildPpmChannelsSummary(g_ppmRuntime);
         broadcastIf(true, rcMsg);
         g_lastRcLogTick = now;
       }
@@ -361,10 +522,9 @@ void taskRcMonitor(void* parameter) {
 
     if (ch0 != lastCh0 || ch2 != lastCh2 || throttle != lastThrottle || steering != lastSteering) {
       if (log) {
-        String rcMsg = "FS-iA6 -> AUX1 GPIO" + String(kRcAux1Pin) + ": " + String(ch0) +
-                       " | AUX2 GPIO" + String(kRcAux2Pin) + ": " + String(ch2) +
-                       " | acelerador GPIO" + String(kRcThrottlePin) + ": " + String(throttle) +
-                       " | direccion GPIO" + String(kRcSteeringPin) + ": " + String(steering);
+        String rcMsg = "[RC][PPM] monitor GPIO" + String(kRcPpmPin) + " -> CH1 steer: " + String(steering) +
+                       " | CH2 throttle: " + String(throttle) + " | CH5 aux1: " + String(ch0) +
+                       " | CH6 aux2: " + String(ch2);
         broadcastIf(true, rcMsg);
       }
       lastCh0 = ch0;

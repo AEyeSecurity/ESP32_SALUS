@@ -109,7 +109,7 @@ constexpr bool kLogSystem = false;
 constexpr bool kLogOta = false;
 constexpr bool kLogBridge = false;
 constexpr bool kLogLoop = false;
-constexpr bool kLogRc = false;
+constexpr bool kLogRc = true;
 constexpr bool kLogAs5600 = false;
 constexpr bool kLogPid = false;
 constexpr bool kLogDrive = false;
@@ -134,7 +134,7 @@ static FsIa6TaskConfig g_rcConfig = {debug::kLogRc, RC_MONITOR_PERIOD};
 static AS5600MonitorConfig g_as5600TaskConfig = {&g_as5600, debug::kLogAs5600, AS5600_PERIOD, AS5600_LOG_INTERVAL};
 static PidTaskConfig g_pidTaskConfig = {
     &g_as5600,
-    kRcSteeringPin,
+    kRcPpmPin,
     PID_CENTER_DEG,
     PID_SPAN_DEG,
     PID_DEADBAND_PERCENT,
@@ -249,15 +249,11 @@ void setup() {
     broadcastIf(true, "[SPD][PID] Configuracion por defecto invalida");
   }
 
-  String rcInitMsg = "Iniciando pruebas FS-iA6 (AUX1 GPIO" + String(kRcAux1Pin) + ", AUX2 GPIO" +
-                     String(kRcAux2Pin) + ", acelerador GPIO" + String(kRcThrottlePin) +
-                     ", direccion izquierda/derecha GPIO" + String(kRcSteeringPin) + ")";
+  String rcInitMsg = "Iniciando lectura RC por PPM en GPIO" + String(kRcPpmPin) +
+                     " (CH1 steering, CH2 throttle, CH5/CH6 AUX)";
   broadcastIf(debug::kLogRc, rcInitMsg);
 
-  pinMode(kRcAux1Pin, INPUT);
-  pinMode(kRcAux2Pin, INPUT);
-  pinMode(kRcThrottlePin, INPUT);
-  pinMode(kRcSteeringPin, INPUT);
+  pinMode(kRcPpmPin, INPUT);
 
   if (debug::kEnableBridgeTask) {
     init_h_bridge();

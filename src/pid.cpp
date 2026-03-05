@@ -891,7 +891,7 @@ void taskPidControl(void* parameter) {
           msg += static_cast<int>(piAgeTicks * portTICK_PERIOD_MS);
         }
         msg += ")";
-        msg += " rcGPIO16=";
+        msg += " rcSteer=";
         msg += rcValue;
         msg += " target=";
         msg += String(targetDeg, 2);

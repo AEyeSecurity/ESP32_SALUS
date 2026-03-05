@@ -8,7 +8,7 @@ Nota operacional: la UI web de Telnet fue removida del repositorio para reducir 
 
 1. `setup()` inicializa WiFi/Telnet/OTA, configura PID/sensores y luego levanta las tareas, incluyendo UART con Raspberry Pi (`piCommsInit` + `taskPiCommsRx/Tx`).
 2. Se configuran los limites del controlador PID (`PidController::setTunings`, `setOutputLimits`, `setIntegralLimits`, `reset`).
-3. Se configuran pines de entrada para los canales RC (GPIO4, GPIO0, GPIO16, GPIO17) y se habilita el lector RMT que captura los pulsos del receptor FS-iA6.
+3. Se configura la entrada RC PPM en GPIO17 y se habilita el lector RMT que captura el frame completo del receptor.
 4. Se crean las tareas FreeRTOS usando `startTaskPinned` (`src/freertos_utils.cpp`), pasando los `*_TaskConfig` con parametros de periodo, logging y auto-inicializacion de hardware.
 5. Se ejecuta un autotest del AS5600 (`runAs5600SelfTest`) y se lanza `taskAs5600Monitor`.
 6. La tarea Arduino `loop()` queda como supervisor ligero y solo cede CPU con `vTaskDelay(50 ms)`.
@@ -48,7 +48,7 @@ Troubleshooting OTA rapido:
 | Tarea                     | Archivo/funcion          | Stack (palabras ~KB) | Prio | Nucleo | Cadencia / disparador                       | Habilitacion por defecto | Comentario principal |
 |---------------------------|--------------------------|----------------------|------|--------|---------------------------------------------|--------------------------|----------------------|
 | `taskOtaTelnet`          | `src/ota_telnet.cpp`     | 4096 (~16 KB)        | 3    | 0      | 20 ms periodica (`vTaskDelayUntil`)         | Siempre                  | Ejecuta `ArduinoOTA.handle()` y heartbeat Telnet cada 5 s si se habilita. |
-| `taskRcSampler`          | `src/fs_ia6.cpp`         | 2048 (~8 KB)         | 4    | 1      | Notificacin RMT (timeout 10 ms)            | Siempre                  | Usa RMT para medir pulsos del FS-iA6, actualiza `RcSharedState` y despierta consumidores. |
+| `taskRcSampler`          | `src/fs_ia6.cpp`         | 2048 (~8 KB)         | 4    | 1      | Notificacin RMT (timeout 10 ms)            | Siempre                  | Usa RMT para decodificar PPM en GPIO17, actualiza `RcSharedState` y despierta consumidores. |
 | `taskAs5600Monitor`      | `src/AS5600.cpp`         | 3072 (~12 KB)        | 1    | 1      | 30 ms periodica, log cada 500 ms            | Siempre                  | Mide estado del AS5600 y opcionalmente reporta estado de iman y angulo. |
 | `taskPidControl`         | `src/pid.cpp`            | 4096 (~16 KB)        | 4    | 0      | Notificacin RC (timeout 30 ms)             | `debug::kEnablePidTask` (true) | Cierra el lazo PID, incluye estado de calibracion y protege limites via finales de carrera. |
 | `taskQuadDriveControl`   | `src/quad_functions.cpp` | 4096 (~16 KB)        | 4    | 1      | Notificacin RC (timeout 30 ms)             | `debug::kEnableDriveTask` (true) | Lazo de velocidad (m/s) con Hall, actualiza LEDC y mezcla freno Pi/overspeed. |
@@ -71,7 +71,7 @@ Troubleshooting OTA rapido:
 
 ### `taskRcSampler` (src/fs_ia6.cpp)
 - Configuracion: `FsIa6SamplerConfig` define periodo de vigilancia (10 ms), umbral de datos frescos y timeout de recepcion RMT.
-- Bucle: inicializa cuatro canales RMT (GPIO4, GPIO0, GPIO16, GPIO17) a 1 us de resolucion, consume el ring buffer, normaliza a -100..100 y publica un `RcSharedState` protegido por `portMUX`.
+- Bucle: inicializa un canal RMT RX en GPIO17 a 1 us de resolucion, decodifica frame PPM (CH1 steering, CH2 throttle, CH5/CH6 AUX), normaliza a -100..100 y publica un `RcSharedState` protegido por `portMUX`.
 - Prioridad: corre con prioridad 4 en el nucleo 1; cada pulso nuevo dispara `xTaskNotifyGive` a los consumidores registrados mediante `rcRegisterConsumer`.
 - Logging: con `debug::kLogRc` envia un resumen cada 500 ms solamente cuando hay lecturas recientes, evitando ruido cuando el receptor esta desconectado.
 - Consumo: otras tareas obtienen el snapshot con `rcGetStateCopy` y dependen de las notificaciones para reaccionar con latencia baja sin saturar la CPU.
@@ -104,7 +104,7 @@ Troubleshooting OTA rapido:
 
 ### `taskRcMonitor` (src/fs_ia6.cpp)
 - Activacion: controlada por `debug::kEnableRcTask`. Reutiliza el `RcSharedState` mediante `rcGetStateCopy`, sin tocar el hardware.
-- Funcion: detecta cambios respecto al ultimo estado y los difunde con `broadcastIf`. Util para calibrar pulsos del receptor FS-iA6.
+- Funcion: detecta cambios respecto al ultimo estado y los difunde con `broadcastIf`. Util para calibrar y verificar el mapeo del frame PPM.
 - Cadencia: 100 ms mediante `vTaskDelay`. Si no hay cambios, la tarea solo duerme.
 
 ### `taskBridgeTest` (src/h_bridge.cpp)
@@ -199,9 +199,7 @@ Estos valores se inyectan en los `*_TaskConfig` y definen la cadencia con la que
 |--------------------------|------------|------------------------------------------------------------------------|
 | AS5600 SDA / SCL         | 25 / 33    | Bus I2C del sensor magnetico.                                          |
 | AS5600 VCC / GND         | 3V3 / GND  | Alimentacion del AS5600.                                               |
-| FS-iA6 AUX1 / AUX2       | 4 / 0      | Canales auxiliares del receptor RC.                                    |
-| FS-iA6 acelerador        | 16         | PWM -100..100; >15 acelera, <-15 activa freno.                         |
-| FS-iA6 direccion         | 17         | PWM -100..100 para el setpoint PID.                                    |
+| FS-iA6 PPM              | 17         | Entrada PPM unica (CH1 steering, CH2 throttle, CH5/CH6 AUX).           |
 | Hall BLDC (activo)       | 26 / 27 / 14 | Medición de velocidad por ISR en IRAM (sensores active-low).            |
 | Salida PWM acelerador    | 13         | LEDC 20 kHz, 8 bits hacia ESC o controlador de motor.                  |
 | Servo freno A / B        | 18 / 5     | LEDC 50 Hz, 16 bits para actuacion de freno.                           |
