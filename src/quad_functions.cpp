@@ -751,6 +751,13 @@ void taskQuadDriveControl(void* parameter) {
   int lastDutyReported = -1;
   int lastBrakeReportedA = -1;
   int lastBrakeReportedB = -1;
+  bool lastDriveLogEnabled = false;
+  SpeedControlSource lastDriveLogSource = SpeedControlSource::kNone;
+  SpeedPidMode lastDriveLogMode = SpeedPidMode::kNormal;
+  DriveThrottleInhibitReason lastDriveLogInhibitReason = DriveThrottleInhibitReason::kNone;
+  bool lastDriveLogFeedbackOk = false;
+  bool lastDriveLogFailsafe = false;
+  bool lastDriveLogOverspeed = false;
   TickType_t speedFeedbackMissingTick = 0;
   bool speedPidSeenTransition = false;
   bool speedTransitionCounterPrimed = false;
@@ -812,6 +819,7 @@ void taskQuadDriveControl(void* parameter) {
     }
     bool driveLogEnabled = false;
     quadDriveGetLogEnabled(driveLogEnabled);
+    const bool driveLogJustEnabled = driveLogEnabled && !lastDriveLogEnabled;
     bool drivePidTraceEnabled = false;
     TickType_t drivePidTracePeriodTicks = kDrivePidTraceDefaultPeriod;
     quadDriveGetPidTraceConfig(drivePidTraceEnabled, drivePidTracePeriodTicks);
@@ -1267,15 +1275,26 @@ void taskQuadDriveControl(void* parameter) {
                             rcTargetShapedMpsDebug);
     setRcDebugSnapshot(rcDebug);
 
-    if (driveLogEnabled && (commandValue != lastThrottleCmdValue || duty != lastDutyReported ||
-                     g_brakeCurrentAngles.servoA != lastBrakeReportedA ||
-                     g_brakeCurrentAngles.servoB != lastBrakeReportedB)) {
+    const bool driveBaseLogChanged = commandValue != lastThrottleCmdValue || duty != lastDutyReported ||
+                                     g_brakeCurrentAngles.servoA != lastBrakeReportedA ||
+                                     g_brakeCurrentAngles.servoB != lastBrakeReportedB ||
+                                     speedControlSource != lastDriveLogSource ||
+                                     speedPidMode != lastDriveLogMode ||
+                                     inhibitReason != lastDriveLogInhibitReason ||
+                                     speedPidFeedbackOk != lastDriveLogFeedbackOk ||
+                                     speedPidFailsafe != lastDriveLogFailsafe ||
+                                     speedPidOverspeed != lastDriveLogOverspeed;
+    if (driveLogEnabled && (driveLogJustEnabled || driveBaseLogChanged)) {
       String msg;
       msg.reserve(196);
       msg += "[DRIVE] cmd=";
       msg += commandValue;
       if (commandFromPwmOverride) {
         msg += " (PWM)";
+      } else if (speedControlSource != SpeedControlSource::kNone) {
+        msg += " (";
+        msg += speedControlSourceText(speedControlSource);
+        msg += ")";
       } else {
         msg += commandFromPi ? " (PI)" : " (RC)";
       }
@@ -1352,7 +1371,14 @@ void taskQuadDriveControl(void* parameter) {
       lastDutyReported = duty;
       lastBrakeReportedA = g_brakeCurrentAngles.servoA;
       lastBrakeReportedB = g_brakeCurrentAngles.servoB;
+      lastDriveLogSource = speedControlSource;
+      lastDriveLogMode = speedPidMode;
+      lastDriveLogInhibitReason = inhibitReason;
+      lastDriveLogFeedbackOk = speedPidFeedbackOk;
+      lastDriveLogFailsafe = speedPidFailsafe;
+      lastDriveLogOverspeed = speedPidOverspeed;
     }
+    lastDriveLogEnabled = driveLogEnabled;
 
     if (drivePidTraceEnabled) {
       if ((!brakeServoAValid || !brakeServoBValid) &&

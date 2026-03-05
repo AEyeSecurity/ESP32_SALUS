@@ -69,10 +69,10 @@ constexpr int kSystemJitterMinPeriodMs = 50;
 constexpr int kSystemJitterMaxPeriodMs = 5000;
 constexpr TickType_t kTelnetIdleTimeout = pdMS_TO_TICKS(300000);
 constexpr bool kFocusedControlLogsOnly = true;
-constexpr size_t kTelnetLogQueueLength = 64;
+constexpr size_t kTelnetLogQueueLength = 256;
 constexpr size_t kTelnetLogMessageMaxLen = 256;
-constexpr size_t kTelnetDrainMaxMessagesPerCycle = 4;
-constexpr uint32_t kTelnetDrainTimeBudgetUs = 800;
+constexpr size_t kTelnetDrainMaxMessagesPerCycle = 32;
+constexpr uint32_t kTelnetDrainTimeBudgetUs = 5000;
 
 enum class NetworkMode {
   kUnknown,
@@ -197,9 +197,6 @@ void drainTelnetLogQueue(size_t maxMessages) {
   const int64_t startUs = esp_timer_get_time();
   while (drained < maxMessages) {
     if ((esp_timer_get_time() - startUs) >= kTelnetDrainTimeBudgetUs) {
-      break;
-    }
-    if (g_telnetClient.availableForWrite() <= 0) {
       break;
     }
     if (xQueueReceive(g_telnetLogQueue, &msg, 0) != pdTRUE) {

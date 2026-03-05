@@ -587,20 +587,31 @@ def run(args: argparse.Namespace) -> int:
                 t1.status = "pass"
                 t1.summary = "Arbitraje principal validado (RC en Pi stale) y subcasos opcionales evaluados/omitidos."
         elif quick_auto and has_target_cmd:
+            tn.send("drive.log on", wait_s=0.4)
+            tn.send("drive.log pid on 200", wait_s=0.4)
             tn.send("spid.target 1.00", wait_s=0.5)
             cap_t1 = tn.collect(2.2)
             all_captured_lines.extend(cap_t1)
             tn.send("spid.target off", wait_s=0.4)
+            tn.send("drive.log pid off", wait_s=0.4)
             drive_t1 = collect_drive(cap_t1)
+            saw_drive_telemetry = len(drive_t1) > 0
             saw_src_tel = any(d.get("src") == "TEL" for d in drive_t1)
+            t1.checks.append({
+                "name": "drive.log emits telemetry",
+                "status": "pass" if saw_drive_telemetry else "fail",
+            })
             t1.checks.append({"name": "spid.target forces src=TEL", "status": "pass" if saw_src_tel else "fail"})
             t1.evidence.extend([d["raw_line"] for d in drive_t1[-5:]])
-            t1.status = "pass" if saw_src_tel else "fail"
-            t1.summary = (
-                "Override por Telnet toma control del speed PID."
-                if saw_src_tel
-                else "No se observó src=TEL tras inyectar setpoint por Telnet."
-            )
+            if saw_drive_telemetry and saw_src_tel:
+                t1.status = "pass"
+                t1.summary = "Override por Telnet toma control del speed PID."
+            elif not saw_drive_telemetry:
+                t1.status = "fail"
+                t1.summary = "No se observó telemetría [DRIVE]/[DRIVE][PIDTRACE] con drive.log habilitado."
+            else:
+                t1.status = "fail"
+                t1.summary = "No se observó src=TEL tras inyectar setpoint por Telnet."
         elif quick_auto and not has_target_cmd:
             t1.status = "skip"
             t1.summary = "Firmware sin `spid.target`; no se puede automatizar este caso."
@@ -896,6 +907,7 @@ def run(args: argparse.Namespace) -> int:
         try:
             tn.send("spid.target off", wait_s=0.2)
             tn.send("spid.stream off", wait_s=0.2)
+            tn.send("drive.log pid off", wait_s=0.2)
             tn.send("drive.log off", wait_s=0.2)
         except Exception:
             pass
