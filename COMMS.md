@@ -38,8 +38,14 @@ Flags en `ver_flags` (nibble bajo):
 
 - Bit 0: `ESTOP`
 - Bit 1: `DRIVE_EN`
-- Bit 2: reservado
+- Bit 2: `REV_REQ`
 - Bit 3: reservado
+
+Semántica de velocidad firmada:
+
+- `speed_cmd_u16` se mantiene como magnitud (`m/s x100`).
+- Comando efectivo: `signed_speed_cmd = (REV_REQ ? -1 : +1) * speed_cmd_u16`.
+- El lazo PID usa magnitud (`abs`) y la dirección la resuelve el relé de reversa.
 
 Versión esperada en firmware: `2`.
 
@@ -56,7 +62,7 @@ Versión esperada en firmware: `2`.
 
 Campos:
 
-- `speed_meas_u16` (LE): `m/s x100` (Hall)
+- `speed_meas_u16` (LE): `m/s x100` (Hall, magnitud absoluta)
   - `0xFFFF`: N/A (backend Hall no válido)
 - `steer_meas_i16` (LE): ángulo real centrado (`deg x100`)
   - `-32768`: N/A (sensor/datos de dirección inválidos)
@@ -88,6 +94,8 @@ Snapshot RX expuesto (`PiCommsRxSnapshot`):
 
 - `steer`
 - `speedCmdCentiMps`
+- `speedCmdSignedCentiMps`
+- `speedReverseRequest`
 - `brake`
 - `driveEnabled`
 - `estop`
@@ -109,7 +117,9 @@ Cada 10 ms envía frame `[0x55 ... crc]` con:
 Un frame de Pi es fresco si edad `<= 120 ms`.
 
 - Con Pi fresca y `ESTOP=1`: throttle inhibido + freno `100%`.
-- Con Pi fresca y `DRIVE_EN=1`: setpoint PI de velocidad vía `speed_cmd_u16` (`m/s x100`) clamped a `spid.max`.
+- Con Pi fresca y `DRIVE_EN=1`: setpoint PI firmado vía `speed_cmd_u16 + REV_REQ`, clamp asimétrico `[-rev.max, +spid.max]` (default `rev.max=1.35 m/s`).
+- Si el pedido REV queda clamped y persiste error positivo, se aplica anti-windup reforzado (`iunwind` escalado) para descargar integrador más rápido.
+- Dirección automática: `target< -0.05 m/s => REV`; sin solicitud efectiva (`target=0`, `DRIVE_EN=0` o stale) => `FWD`.
 - Si falla feedback Hall en speed PID: modo failsafe (`throttle=0`).
 - Freno aplicado:
   - Pi fresca: `max(brake_u8_pi, brake_overspeed_auto)`
@@ -136,7 +146,7 @@ Al perder frescura de trama Pi, el firmware deja de usar comandos Pi y vuelve a 
 
 Telnet (`src/ota_telnet.cpp`):
 
-- `comms.status`: snapshot RX actual (edad frame, flags, `speedCmd`, contadores)
+- `comms.status`: snapshot RX actual (edad frame, flags, `speedCmd`, `speedCmdSigned`, `revReq`, contadores)
 - `comms.reset`: resetea contadores RX
 
 ---

@@ -38,6 +38,8 @@ struct PiRxState {
   uint8_t verFlags = 0;
   int8_t steer = 0;
   uint16_t speedCmdCentiMps = 0;
+  int16_t speedCmdSignedCentiMps = 0;
+  bool speedReverseRequest = false;
   bool driveEnabled = false;
   bool estop = false;
   uint8_t brake = 0;
@@ -56,7 +58,7 @@ hw_timer_t* g_piRxWakeTimer = nullptr;
 
 constexpr uint8_t kCmdFlagEstop = 1 << 0;
 constexpr uint8_t kCmdFlagDriveEnable = 1 << 1;
-constexpr uint8_t kCmdFlagReserved2 = 1 << 2;
+constexpr uint8_t kCmdFlagReverseRequest = 1 << 2;
 
 constexpr uint8_t kStatusReady = 1 << 0;
 constexpr uint8_t kStatusEstopActive = 1 << 1;
@@ -137,10 +139,20 @@ String describeCommandFlags(uint8_t verFlags) {
   String flags;
   appendFlag(flags, (verFlags & kCmdFlagEstop) != 0, "ESTOP");
   appendFlag(flags, (verFlags & kCmdFlagDriveEnable) != 0, "DRIVE_EN");
-  appendFlag(flags, (verFlags & kCmdFlagReserved2) != 0, "RESV2");
+  appendFlag(flags, (verFlags & kCmdFlagReverseRequest) != 0, "REV_REQ");
   appendFlag(flags, (verFlags & 0x08) != 0, "RESV3");
   msg += (flags.length() > 0) ? flags : "none";
   return msg;
+}
+
+int16_t clampSignedCentiMps(int32_t value) {
+  if (value < static_cast<int32_t>(std::numeric_limits<int16_t>::min())) {
+    return std::numeric_limits<int16_t>::min();
+  }
+  if (value > static_cast<int32_t>(std::numeric_limits<int16_t>::max())) {
+    return std::numeric_limits<int16_t>::max();
+  }
+  return static_cast<int16_t>(value);
 }
 
 const char* statusSourceText(uint8_t sourceCode) {
@@ -204,10 +216,7 @@ uint16_t encodeSpeedTelemetryFromHall() {
     return kSpeedTelemetryNotAvailable;
   }
 
-  float speedMps = speed.speedMps;
-  if (speedMps < 0.0f) {
-    speedMps = 0.0f;
-  }
+  const float speedMps = fabsf(speed.speedMps);
 
   long speedCenti = lroundf(speedMps * 100.0f);
   if (speedCenti < 0) {
@@ -319,6 +328,11 @@ void logRxFrame(const PiCommsConfig& cfg, const PiRxState& state, TickType_t now
   msg += " speedCmd=";
   msg += String(static_cast<float>(state.speedCmdCentiMps) / 100.0f, 2);
   msg += "m/s";
+  msg += " speedCmdSigned=";
+  msg += String(static_cast<float>(state.speedCmdSignedCentiMps) / 100.0f, 2);
+  msg += "m/s";
+  msg += " revReq=";
+  msg += state.speedReverseRequest ? "Y" : "N";
   msg += " brake=";
   msg += state.brake;
   msg += "%";
@@ -459,6 +473,8 @@ bool piCommsGetRxSnapshot(PiCommsRxSnapshot& snapshot) {
   snapshot.verFlags = g_rxState.verFlags;
   snapshot.steer = g_rxState.steer;
   snapshot.speedCmdCentiMps = g_rxState.speedCmdCentiMps;
+  snapshot.speedCmdSignedCentiMps = g_rxState.speedCmdSignedCentiMps;
+  snapshot.speedReverseRequest = g_rxState.speedReverseRequest;
   snapshot.brake = g_rxState.brake;
   snapshot.driveEnabled = g_rxState.driveEnabled;
   snapshot.estop = g_rxState.estop;
@@ -580,6 +596,10 @@ void taskPiCommsRx(void* parameter) {
         newState.steer = static_cast<int8_t>(frame[2]);
         newState.speedCmdCentiMps =
             static_cast<uint16_t>(frame[3]) | static_cast<uint16_t>(frame[4]) << 8;
+        newState.speedReverseRequest = (newState.verFlags & kCmdFlagReverseRequest) != 0;
+        const int32_t speedMagnitude = static_cast<int32_t>(newState.speedCmdCentiMps);
+        const int32_t speedSigned = newState.speedReverseRequest ? -speedMagnitude : speedMagnitude;
+        newState.speedCmdSignedCentiMps = clampSignedCentiMps(speedSigned);
         newState.brake = frame[5];
         newState.estop = (newState.verFlags & kCmdFlagEstop) != 0;
         newState.driveEnabled = (newState.verFlags & kCmdFlagDriveEnable) != 0;
@@ -590,6 +610,8 @@ void taskPiCommsRx(void* parameter) {
         g_rxState.verFlags = newState.verFlags;
         g_rxState.steer = newState.steer;
         g_rxState.speedCmdCentiMps = newState.speedCmdCentiMps;
+        g_rxState.speedCmdSignedCentiMps = newState.speedCmdSignedCentiMps;
+        g_rxState.speedReverseRequest = newState.speedReverseRequest;
         g_rxState.estop = newState.estop;
         g_rxState.driveEnabled = newState.driveEnabled;
         g_rxState.brake = newState.brake;

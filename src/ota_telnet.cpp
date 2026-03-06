@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 
 #include <freertos/queue.h>
 
@@ -232,6 +233,7 @@ void resetTelnetSession() {
   quadDriveSetLogEnabled(false);
   quadDriveSetPidTraceEnabled(false, kDrivePidTraceDefaultPeriod);
   quadDriveSetPwmOverride(false, 0);
+  quadDriveSetDirectionOverride(QuadDriveDirection::kForward);
   g_telnetCommandBuffer = "";
   g_speedStreamEnabled = false;
   g_lastSpeedStreamTick = 0;
@@ -253,7 +255,7 @@ void openTelnetSession(WiFiClient& incoming) {
   g_telnetClient.println("=== Servidor Telnet ESP32 ===");
   g_telnetClient.println("Conexion establecida correctamente");
   g_telnetClient.println(
-      "Comandos: steer.help | pid.help | spid.help | comms.status | speed.status | speed.reset | speed.stream | speed.uart | pid.stream | spid.stream | spid.target | drive.log | drive.pwm | drive.rc.status | drive.rc.stream | sys.rt | sys.stack | sys.jitter | sys.reset | net.status | exit");
+      "Comandos: steer.help | pid.help | spid.help | comms.status | speed.status | speed.reset | speed.stream | speed.uart | pid.stream | spid.stream | spid.target | drive.log | drive.pwm | drive.dir | drive.rc.status | drive.rc.stream | sys.rt | sys.stack | sys.jitter | sys.reset | net.status | exit");
   reportNetworkStatus();
 }
 
@@ -506,6 +508,12 @@ void reportSpeedPidStatus() {
     sendTelnet("[SPID] Controlador no inicializado");
     return;
   }
+  float reverseMaxMps = snapshot.config.maxSpeedMps;
+  float reverseAwx = 1.0f;
+  float reverseErrThMps = 0.10f;
+  quadDriveGetReverseSpeedLimitMps(reverseMaxMps);
+  quadDriveGetReverseAntiWindupScale(reverseAwx);
+  quadDriveGetReverseAntiWindupErrorThresholdMps(reverseErrThMps);
 
   String msg = "[SPID] state{init=";
   msg += snapshot.initialized ? "Y" : "N";
@@ -627,7 +635,13 @@ void reportSpeedPidStatus() {
   msg += snapshot.config.overspeedBrakeHoldMs;
   msg += "ms brdb=";
   msg += String(snapshot.config.overspeedBrakeDeadbandPercent, 1);
-  msg += "%}";
+  msg += "%} rev{max=";
+  msg += String(reverseMaxMps, 2);
+  msg += "m/s awx=";
+  msg += String(reverseAwx, 2);
+  msg += " eth=";
+  msg += String(reverseErrThMps, 2);
+  msg += "m/s}";
   sendTelnet(msg);
 }
 
@@ -647,6 +661,24 @@ void reportSpeedPidTargetStatus() {
   sendTelnet(msg);
 }
 
+void reportSpeedPidReverseStatus() {
+  float reverseMaxMps = speedPidGetMaxSpeedMps();
+  float reverseAwx = 1.0f;
+  float reverseErrThMps = 0.10f;
+  quadDriveGetReverseSpeedLimitMps(reverseMaxMps);
+  quadDriveGetReverseAntiWindupScale(reverseAwx);
+  quadDriveGetReverseAntiWindupErrorThresholdMps(reverseErrThMps);
+
+  String msg = "[SPID][REV] max=";
+  msg += String(reverseMaxMps, 2);
+  msg += "m/s awx=";
+  msg += String(reverseAwx, 2);
+  msg += " errTh=";
+  msg += String(reverseErrThMps, 2);
+  msg += "m/s";
+  sendTelnet(msg);
+}
+
 void reportDrivePwmOverrideStatus() {
   bool enabled = false;
   int percent = 0;
@@ -659,6 +691,57 @@ void reportDrivePwmOverrideStatus() {
   msg += " duty=";
   msg += percent;
   msg += "%";
+  sendTelnet(msg);
+}
+
+const char* driveDirectionText(QuadDriveDirection dir) {
+  return (dir == QuadDriveDirection::kReverse) ? "REV" : "FWD";
+}
+
+const char* hallDirectionText(HallDirection direction) {
+  switch (direction) {
+    case HallDirection::kForward:
+      return "FWD";
+    case HallDirection::kReverse:
+      return "REV";
+    case HallDirection::kUnknown:
+    default:
+      return "UNK";
+  }
+}
+
+void reportDriveDirectionStatus() {
+  QuadDriveDirection direction = QuadDriveDirection::kForward;
+  bool switching = false;
+  bool relayEnergized = false;
+  if (!quadDriveGetDirectionStatus(direction, switching, relayEnergized)) {
+    sendTelnet("[DRIVE][DIR] N/A");
+    return;
+  }
+
+  uint8_t relayPin = 0;
+  bool activeLow = true;
+  quadDriveGetDirectionConfig(relayPin, activeLow);
+
+  bool pwmEnabled = false;
+  int pwmPercent = 0;
+  quadDriveGetPwmOverride(pwmEnabled, pwmPercent);
+
+  String msg = "[DRIVE][DIR] ";
+  msg += driveDirectionText(direction);
+  msg += " switching=";
+  msg += switching ? "Y" : "N";
+  msg += " relay=";
+  msg += relayEnergized ? "ON" : "OFF";
+  msg += " pin=";
+  msg += relayPin;
+  msg += " activeLow=";
+  msg += activeLow ? "Y" : "N";
+  msg += " pwm=";
+  msg += pwmEnabled ? "ON" : "OFF";
+  msg += "(";
+  msg += pwmPercent;
+  msg += "%)";
   sendTelnet(msg);
 }
 
@@ -724,12 +807,17 @@ String buildSpeedStatusMessage() {
 
   String msg = "[SPD][STATUS] source=hall driver=";
   msg += (ok && snapshot.driverReady) ? "READY" : "NOT_READY";
+  msg += " dir=";
+  msg += hallDirectionText(snapshot.direction);
   msg += " speed=";
   msg += String(snapshot.speedKmh, 2);
   msg += "km/h ";
   msg += String(snapshot.speedMps, 2);
   msg += "m/s rpm=";
   msg += String(snapshot.motorRpm, 1);
+  msg += " speedAbs=";
+  msg += String(fabsf(snapshot.speedMps), 2);
+  msg += "m/s";
   msg += " hall=0b";
   msg += (snapshot.hallMask & (1U << 2)) ? '1' : '0';
   msg += (snapshot.hallMask & (1U << 1)) ? '1' : '0';
@@ -754,6 +842,8 @@ String buildSpeedStatusMessage() {
   msg += cfg.pinC;
   msg += " low=";
   msg += cfg.activeLow ? "Y" : "N";
+  msg += " dirInv=";
+  msg += cfg.directionInverted ? "Y" : "N";
   msg += " poles=";
   msg += cfg.motorPoles;
   msg += " red=";
@@ -952,6 +1042,11 @@ bool handleCommsCommand(const String& command, const String& args) {
     msg += " speedCmd=";
     msg += String(static_cast<float>(snapshot.speedCmdCentiMps) / 100.0f, 2);
     msg += "m/s";
+    msg += " speedCmdSigned=";
+    msg += String(static_cast<float>(snapshot.speedCmdSignedCentiMps) / 100.0f, 2);
+    msg += "m/s";
+    msg += " revReq=";
+    msg += snapshot.speedReverseRequest ? "Y" : "N";
     msg += " brake=";
     msg += snapshot.brake;
     msg += " estop=";
@@ -1721,6 +1816,47 @@ bool handleSpidCommand(const String& command, const String& args) {
     return true;
   }
 
+  if (command.equalsIgnoreCase("spid.maxrev")) {
+    if (args.isEmpty()) {
+      reportSpeedPidReverseStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] MaxRev invalido (ej: spid.maxrev 1.35)");
+      return true;
+    }
+    if (!quadDriveSetReverseSpeedLimitMps(value)) {
+      String msg = "[SPID] MaxRev fuera de rango (0.05..";
+      msg += String(speedPidGetMaxSpeedMps(), 2);
+      msg += " m/s)";
+      sendTelnet(msg);
+      return true;
+    }
+    reportSpeedPidReverseStatus();
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.awx")) {
+    if (args.isEmpty()) {
+      reportSpeedPidReverseStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] Awx invalido (ej: spid.awx 3.0)");
+      return true;
+    }
+    if (!quadDriveSetReverseAntiWindupScale(value)) {
+      sendTelnet("[SPID] Awx fuera de rango (1.0..10.0)");
+      return true;
+    }
+    reportSpeedPidReverseStatus();
+    reportSpeedPidStatus();
+    return true;
+  }
+
   if (command.equalsIgnoreCase("spid.brakecap")) {
     if (args.isEmpty()) {
       reportSpeedPidStatus();
@@ -1852,11 +1988,15 @@ bool handleSpidCommand(const String& command, const String& args) {
 
     float value = 0.0f;
     if (!parseFloatArg(args, value)) {
-      sendTelnet("[SPID][TARGET] Valor invalido (ej: spid.target 1.5 | spid.target off)");
+      sendTelnet("[SPID][TARGET] Valor invalido (ej: spid.target -1.5 | spid.target off)");
       return true;
     }
     if (!quadDriveSetSpeedTargetOverride(true, value)) {
-      String msg = "[SPID][TARGET] Fuera de rango (0..";
+      float reverseMaxMps = speedPidGetMaxSpeedMps();
+      quadDriveGetReverseSpeedLimitMps(reverseMaxMps);
+      String msg = "[SPID][TARGET] Fuera de rango (-";
+      msg += String(reverseMaxMps, 2);
+      msg += "..";
       msg += String(speedPidGetMaxSpeedMps(), 2);
       msg += " m/s)";
       sendTelnet(msg);
@@ -1938,7 +2078,7 @@ bool handleSpidCommand(const String& command, const String& args) {
 
   if (command.equalsIgnoreCase("spid.help")) {
     sendTelnet(
-        "Comandos: spid.set <kp> <ki> <kd> | spid.kp <v> | spid.ki <v> | spid.kd <v> | spid.ramp <mps2> | spid.minthrottle <pct> | spid.thslewup <pctps> | spid.thslewdown <pctps> | spid.minth.spd <mps> | spid.launchwin <ms> | spid.ff on|off | spid.ff.base0 <pct> | spid.ff.basemax <pct> | spid.ff.du <pct> | spid.ff.dd <pct> | spid.ff.minspd <mps> | spid.ff.grace <ms> | spid.iunwind <gain> | spid.dfilter <hz> | spid.max <mps> | spid.brakecap <pct> | spid.hys <mps> | spid.brakeslewup <pctps> | spid.brakeslewdown <pctps> | spid.brakehold <ms> | spid.brakedb <pct> | spid.target <mps|off> | spid.save | spid.reset | spid.status | spid.stream on [ms] | spid.stream off");
+        "Comandos: spid.set <kp> <ki> <kd> | spid.kp <v> | spid.ki <v> | spid.kd <v> | spid.ramp <mps2> | spid.minthrottle <pct> | spid.thslewup <pctps> | spid.thslewdown <pctps> | spid.minth.spd <mps> | spid.launchwin <ms> | spid.ff on|off | spid.ff.base0 <pct> | spid.ff.basemax <pct> | spid.ff.du <pct> | spid.ff.dd <pct> | spid.ff.minspd <mps> | spid.ff.grace <ms> | spid.iunwind <gain> | spid.dfilter <hz> | spid.max <mps> | spid.maxrev <mps> | spid.awx <scale> | spid.brakecap <pct> | spid.hys <mps> | spid.brakeslewup <pctps> | spid.brakeslewdown <pctps> | spid.brakehold <ms> | spid.brakedb <pct> | spid.target <signed_mps|off> | spid.save | spid.reset | spid.status | spid.stream on [ms] | spid.stream off");
     return true;
   }
 
@@ -2055,6 +2195,15 @@ bool handleDriveCommand(const String& command, const String& args) {
       return true;
     }
 
+    QuadDriveDirection currentDirection = QuadDriveDirection::kForward;
+    bool directionSwitching = false;
+    bool relayEnergized = false;
+    if (quadDriveGetDirectionStatus(currentDirection, directionSwitching, relayEnergized) &&
+        directionSwitching && dutyPercent > 0) {
+      sendTelnet("[DRIVE][PWM] Cambio de direccion en progreso; espera y reintenta");
+      return true;
+    }
+
     // Evitar un objetivo SPID latente al salir del modo PWM directo.
     quadDriveSetSpeedTargetOverride(false, 0.0f);
     if (!quadDriveSetPwmOverride(true, dutyPercent)) {
@@ -2066,6 +2215,47 @@ bool handleDriveCommand(const String& command, const String& args) {
     msg += dutyPercent;
     msg += "%";
     sendTelnet(msg);
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("drive.dir")) {
+    if (args.isEmpty()) {
+      reportDriveDirectionStatus();
+      return true;
+    }
+
+    String normalized = args;
+    normalized.toLowerCase();
+    normalized.trim();
+
+    QuadDriveDirection requested = QuadDriveDirection::kForward;
+    if (normalized == "fwd" || normalized == "forward") {
+      requested = QuadDriveDirection::kForward;
+    } else if (normalized == "rev" || normalized == "reverse") {
+      requested = QuadDriveDirection::kReverse;
+    } else {
+      sendTelnet("[DRIVE][DIR] Uso: drive.dir <fwd|rev>");
+      return true;
+    }
+
+    bool pwmEnabled = false;
+    int pwmPercent = 0;
+    quadDriveGetPwmOverride(pwmEnabled, pwmPercent);
+    if (!pwmEnabled) {
+      sendTelnet("[DRIVE][DIR] Reversa disponible solo en modo drive.pwm");
+      return true;
+    }
+
+    if (!quadDriveSetDirectionOverride(requested)) {
+      sendTelnet("[DRIVE][DIR] No se pudo aplicar solicitud");
+      return true;
+    }
+
+    String msg = "[DRIVE][DIR] Solicitud ";
+    msg += driveDirectionText(requested);
+    msg += " aceptada";
+    sendTelnet(msg);
+    reportDriveDirectionStatus();
     return true;
   }
 

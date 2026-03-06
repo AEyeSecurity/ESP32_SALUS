@@ -518,7 +518,8 @@ bool speedPidCompute(float targetRawMps,
                      float measuredMps,
                      bool feedbackOk,
                      float dtSeconds,
-                     SpeedPidControlOutput& output) {
+                     SpeedPidControlOutput& output,
+                     float antiWindupUnwindScale) {
   output = {};
   output.mode = SpeedPidMode::kFailsafe;
 
@@ -568,6 +569,11 @@ bool speedPidCompute(float targetRawMps,
 
   if (!isfinite(dtSeconds) || dtSeconds <= 0.0f || dtSeconds > 1.0f) {
     dtSeconds = 0.03f;
+  }
+  if (!isfinite(antiWindupUnwindScale) || antiWindupUnwindScale < 1.0f) {
+    antiWindupUnwindScale = 1.0f;
+  } else if (antiWindupUnwindScale > 10.0f) {
+    antiWindupUnwindScale = 10.0f;
   }
 
   const float maxSpeed = config.maxSpeedMps;
@@ -811,7 +817,8 @@ bool speedPidCompute(float targetRawMps,
       if (!(saturatedHigh || saturatedLow) || !pushingFurtherIntoSaturation) {
         integral += tunings.ki * errorMps * dtSeconds;
       } else {
-        integral -= (config.integratorUnwindGain * integral * dtSeconds);
+        const float unwindGain = config.integratorUnwindGain * antiWindupUnwindScale;
+        integral -= (unwindGain * integral * dtSeconds);
       }
 
       const float unclampedIntegral = integral;

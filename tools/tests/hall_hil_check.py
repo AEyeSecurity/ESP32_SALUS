@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 RE_SPLIT = re.compile(r"(?<!\n)(?<!\])(?=\[[A-Z])")
 RE_SPD = re.compile(
-    r"driver=(?P<driver>[A-Z_]+).*?speed=(?P<kmh>[0-9.]+)km/h\s+(?P<mps>[0-9.]+)m/s"
+    r"driver=(?P<driver>[A-Z_]+).*?speed=(?P<kmh>[-+]?[0-9.]+)km/h\s+(?P<mps>[-+]?[0-9.]+)m/s"
     r".*?ageUs=(?P<ageUs>\d+).*?ok=(?P<ok>\d+).*?invState=(?P<invState>\d+).*?invJump=(?P<invJump>\d+).*?isr=(?P<isr>\d+)"
 )
 RE_SPID = re.compile(

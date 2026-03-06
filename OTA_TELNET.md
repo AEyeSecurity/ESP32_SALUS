@@ -94,6 +94,8 @@ pid.stream
 spid.stream
 spid.target
 drive.log
+drive.pwm
+drive.dir
 drive.rc.status
 drive.rc.stream
 drive.rc.cal
@@ -112,12 +114,14 @@ Notas de sesion:
 
 ## Velocidad Hall (`speed.*`)
 
-Backend activo por ISR Hall en `GPIO26/27/14` (active-low).
+Backend activo por ISR Hall en `GPIO26/27/14` (active-low), con dirección por secuencia Hall.
 
-- `speed.status`: muestra snapshot Hall (`km/h`, `m/s`, `rpm`, máscara Hall, edad/período y contadores).
+- `speed.status`: muestra snapshot Hall con signo (`dir=FWD/REV/UNK`, `km/h`, `m/s`, `rpm`, `speedAbs`) y contadores.
 - `speed.reset`: reinicia contadores Hall y devuelve estado actualizado.
 - `speed.stream on [ms] | speed.stream off`: stream periódico de `speed.status` (rango `20..5000 ms`).
 - `speed.uart`: responde `N/A source=hall` (sin backend UART de velocidad).
+- En `stale` (sin transiciones frescas), `speed=0` y `dir=UNK`.
+- La telemetría UART a Pi sigue enviando magnitud (`speed_meas_u16` absoluto) en esta fase.
 
 ## Diagnóstico de sistema (`sys.*`)
 
@@ -149,16 +153,21 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low).
 - `spid.iunwind <gain>`: descarga del integrador en saturación (`anti-windup`, default `0.35`).
 - `spid.dfilter <hz>`: filtro del derivativo sobre medición Hall (default `3.0`).
 - `spid.max <mps>`: ajusta velocidad máxima usada para clamp de setpoints remotos/RC (default `4.17`, equivalente a `15 km/h`).
+- `spid.maxrev <mps>`: ajusta clamp máximo de magnitud en reversa (default `1.35`).
+- `spid.awx <scale>`: ajusta multiplicador de anti-windup en reversa clamped (default `3.0`).
 - `spid.brakecap <pct>`: tope de freno automático por overspeed (`0..100`, default `30`).
 - `spid.hys <mps>`: histéresis de salida de overspeed (default `0.3`).
 - `spid.brakeslewup <pctps>`: limita subida del freno automático (`%/s`, default `35`).
 - `spid.brakeslewdown <pctps>`: limita bajada del freno automático (`%/s`, default `55`).
 - `spid.brakehold <ms>`: tiempo mínimo en overspeed antes de liberar (`ms`, default `200`).
 - `spid.brakedb <pct>`: banda muerta del freno automático (no mueve servo por debajo de este valor, default `3`).
-- `spid.target <mps|off>`: override de setpoint de velocidad por Telnet para pruebas HIL (`0..max_speed_mps`). `off` devuelve el control a PI/RC.
+- `spid.target <mps|off>`: override de setpoint de velocidad firmado por Telnet para pruebas HIL (`+` limitado por `spid.max`, `-` limitado por `rev.max` default `1.35 m/s`). `off` devuelve el control a PI/RC.
 - `drive.rc.status`: snapshot del camino RC hacia `speed_pid` (`raw/filt/norm`, `fresh`, `elig`, `latched`, estado de auto-calibración neutral y `targetRaw/targetShaped`).
 - `drive.rc.stream on [ms] | drive.rc.stream off`: stream periódico de `drive.rc.status` (`50..1000 ms`, default `100 ms`).
 - `drive.rc.cal on|off`: habilita o congela la auto-calibración del offset neutral del filtro RC.
+- `drive.pwm <0..100> | drive.pwm off`: override directo de PWM para pruebas de banco.
+- `drive.dir`: muestra estado de dirección del relé (`FWD/REV`, switching, relay, pin, activeLow).
+- `drive.dir fwd|rev`: solicita cambio de dirección (solo disponible con `drive.pwm` activo).
 - `spid.save`: persiste configuración en NVS (`speed_pid`, incluyendo `thsup`, `thsdown`, `minspd`, `lwin`, `ffen`, `ffb0`, `ffbmx`, `ffdu`, `ffdd`, `ffmin`, `flgr`, `iunw`, `dfhz`, `brkcap`, `hys`, `brsu`, `brsd`, `brhms`, `brdb`).
 - NVS `speed_pid` versión actual: `ver=4` (migración automática desde `ver=3` preservando tunings y aplicando defaults nuevos).
 - `spid.reset`: restaura defaults y persiste en NVS.
@@ -183,11 +192,29 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low).
 - recomendación operacional: mantener `drive.log pid off` fuera de diagnósticos (al cerrar sesión Telnet se restablece OFF).
 - cuando `src=RC`, agrega campos de diagnóstico: `rcRaw`, `rcFilt`, `rcNorm`, `rcFresh`, `rcElig`, `rcBrake`, `rcLatched`, `rcState`, `rcTargetRawMps`, `rcTargetShapedMps`.
 - formato forense:  
-  `[DRIVE][PIDTRACE] tMs=... src=PI|RC|TEL mode=... targetRawMps=... targetMps=... speedMps=... errMps=... p=... i=... d=... pidUnsat=... pidOutPct=... pidSatPct=... ffBasePct=... ffDeltaPct=... cmdPreSlewPct=... ffActive=Y/N throttleRawPct=... throttleFiltPct=... pwmCmdPct=... pwmDuty=x/y pwmDutyPct=... autoBrakeRawPct=... autoBrakeFiltPct=... brakeAppliedPct=... brakeA_pct=... brakeB_pct=... launchAssistActive=Y/N launchMs=... throttleSaturated=Y/N integratorClamped=Y/N fb=Y/N fs=Y/N ovs=Y/N estop=Y/N inhibit=...`
+  `[DRIVE][PIDTRACE] tMs=... src=PI|RC|TEL mode=... targetRawMps=... targetSignedMps=... targetAbsMps=... targetMps=... speedMps=... errMps=... p=... i=... d=... pidUnsat=... pidOutPct=... pidSatPct=... ffBasePct=... ffDeltaPct=... cmdPreSlewPct=... ffActive=Y/N throttleRawPct=... throttleFiltPct=... pwmCmdPct=... pwmDuty=x/y pwmDutyPct=... autoBrakeRawPct=... autoBrakeFiltPct=... brakeAppliedPct=... brakeA_pct=... brakeB_pct=... launchAssistActive=Y/N launchMs=... throttleSaturated=Y/N integratorClamped=Y/N fb=Y/N fs=Y/N ovs=Y/N estop=Y/N inhibit=...`
 - eventos críticos con cooldown:
   - `[DRIVE][EVENT] FAILSAFE_ENTER/EXIT`
   - `[DRIVE][EVENT] OVERSPEED_ENTER/EXIT`
   - `[DRIVE][EVENT] THROTTLE_INHIBIT reason=...`
+
+## Reversa (`PI` firmado + Telnet)
+
+- Pi (`comms`): `ver_flags bit2 = REV_REQ` define el signo del setpoint (`speed_cmd_u16` sigue siendo magnitud).
+- Telnet (`spid.target`): acepta setpoints firmados (`+` FWD, `-` REV) para simular pedidos Pi sin Raspy.
+- Hardware: relé en `GPIO4`, activo en `HIGH` (`ON=FWD`, `OFF=REV`).
+- Seguridad:
+  - Cambio de dirección con secuencia `pre=300ms`, conmutación relé, `post=300ms`.
+  - Durante `switching` se inhibe tracción.
+  - Sin solicitud efectiva de reversa (`target=0`, `DRIVE_EN=0` o stale) se fuerza `FWD`.
+- Clamp/anti-windup REV:
+  - Objetivo firmado clamp asimétrico: `+` hasta `spid.max`, `-` hasta `rev.max` (default `1.35 m/s`).
+  - Si REV queda clamped y persiste error positivo, el controlador usa `iunwind` escalado (default `x3`) para descargar integrador más rápido.
+- Flujo recomendado de simulación HIL:
+  1. `spid.target 1.0` (FWD)
+  2. `spid.target -1.0` (REV)
+  3. `spid.target 0` (vuelve a FWD)
+  4. `spid.target off`
 
 ## Test HIL Speed PID (RC)
 
@@ -236,6 +263,18 @@ Regresión segura del parser Telnet (sin aceleración):
 
 ```bash
 python3 tools/tests/telnet_command_regression.py --host esp32-salus.local
+```
+
+Validación HIL de setpoint firmado (simulación Pi por Telnet):
+
+```bash
+python3 tools/tests/reverse_signed_telnet_hil.py --host esp32-salus.local --require-motion
+```
+
+Autotuning HIL de reversa (`spid.maxrev` + `spid.awx`, aplica mejor combinación):
+
+```bash
+python3 tools/tests/reverse_pid_autotune_hil.py --host esp32-salus.local
 ```
 
 ## Autocalibracion PID velocidad (Telnet)

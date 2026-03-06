@@ -95,6 +95,15 @@ constexpr int BRAKE_RELEASE_ANGLE_SERVO_B = 120;
 constexpr int BRAKE_APPLY_ANGLE_SERVO_B = 90;
 constexpr int BRAKE_THRESHOLD = -15;
 
+constexpr uint8_t REVERSE_RELAY_PIN = 4;
+constexpr bool REVERSE_RELAY_ACTIVE_LOW = false;
+constexpr TickType_t REVERSE_PRE_DELAY = pdMS_TO_TICKS(300);
+constexpr TickType_t REVERSE_POST_DELAY = pdMS_TO_TICKS(300);
+constexpr bool REVERSE_FORCE_FORWARD_WHEN_PWM_OFF = true;
+constexpr float REVERSE_MAX_SPEED_MPS = 1.30f;
+constexpr float REVERSE_ANTI_WINDUP_UNWIND_SCALE = 2.5f;
+constexpr float REVERSE_ANTI_WINDUP_ERROR_THRESHOLD_MPS = 0.10f;
+
 constexpr TickType_t OTA_PERIOD = pdMS_TO_TICKS(20);
 constexpr TickType_t RC_SAMPLER_PERIOD = pdMS_TO_TICKS(10);
 constexpr TickType_t RC_MONITOR_PERIOD = pdMS_TO_TICKS(100);
@@ -109,7 +118,7 @@ constexpr bool kLogSystem = false;
 constexpr bool kLogOta = false;
 constexpr bool kLogBridge = false;
 constexpr bool kLogLoop = false;
-constexpr bool kLogRc = true;
+constexpr bool kLogRc = false;
 constexpr bool kLogAs5600 = false;
 constexpr bool kLogPid = false;
 constexpr bool kLogDrive = false;
@@ -198,6 +207,16 @@ static QuadDriveTaskConfig g_driveTaskConfig = {
         SPEED_PID_BRAKE_HOLD_MS,
         SPEED_PID_BRAKE_DEADBAND_PERCENT,
     },
+    {
+        REVERSE_RELAY_PIN,
+        REVERSE_RELAY_ACTIVE_LOW,
+        REVERSE_PRE_DELAY,
+        REVERSE_POST_DELAY,
+        REVERSE_FORCE_FORWARD_WHEN_PWM_OFF,
+        REVERSE_MAX_SPEED_MPS,
+        REVERSE_ANTI_WINDUP_UNWIND_SCALE,
+        REVERSE_ANTI_WINDUP_ERROR_THRESHOLD_MPS,
+    },
     true,
     THROTTLE_PERIOD,
     debug::kLogDrive};
@@ -218,6 +237,7 @@ static HallSpeedConfig g_hallSpeedConfig = {
     27,      // Hall B
     14,      // Hall C
     true,    // activeLow
+    true,    // directionInverted
     8,       // motorPoles
     10.0f,   // gearReduction
     0.45f,   // wheelDiameterM

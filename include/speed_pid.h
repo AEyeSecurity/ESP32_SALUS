@@ -120,7 +120,8 @@ bool speedPidCompute(float targetRawMps,
                      float measuredMps,
                      bool feedbackOk,
                      float dtSeconds,
-                     SpeedPidControlOutput& output);
+                     SpeedPidControlOutput& output,
+                     float antiWindupUnwindScale = 1.0f);
 void speedPidReset();
 
 bool speedPidGetTunings(SpeedPidTunings& tunings);

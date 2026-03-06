@@ -8,15 +8,23 @@ struct HallSpeedConfig {
   uint8_t pinB;
   uint8_t pinC;
   bool activeLow;
+  bool directionInverted;
   uint8_t motorPoles;
   float gearReduction;
   float wheelDiameterM;
   uint32_t rpmTimeoutUs;
 };
 
+enum class HallDirection : int8_t {
+  kUnknown = 0,
+  kForward = 1,
+  kReverse = -1,
+};
+
 struct HallSpeedSnapshot {
   bool driverReady;
   uint8_t hallMask;
+  HallDirection direction;
   bool hasTransition;
   uint32_t transitionPeriodUs;
   uint32_t lastTransitionUs;

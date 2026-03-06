@@ -15,6 +15,17 @@ volatile uint32_t g_transitionsOk = 0;
 volatile uint32_t g_transitionsInvalidState = 0;
 volatile uint32_t g_transitionsInvalidJump = 0;
 volatile uint32_t g_isrCount = 0;
+volatile int8_t g_directionSign = 0;
+
+constexpr uint8_t kHallStateCount = 6;
+constexpr uint8_t kHallSequence[kHallStateCount] = {
+    0b001,
+    0b101,
+    0b100,
+    0b110,
+    0b010,
+    0b011,
+};
 
 portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -43,6 +54,32 @@ uint8_t IRAM_ATTR readHallMaskFromPins() {
   return mask;
 }
 
+int8_t IRAM_ATTR hallMaskToSequenceIndex(uint8_t mask) {
+  for (uint8_t idx = 0; idx < kHallStateCount; ++idx) {
+    if (kHallSequence[idx] == mask) {
+      return static_cast<int8_t>(idx);
+    }
+  }
+  return -1;
+}
+
+int8_t IRAM_ATTR directionSignFromTransition(uint8_t previousMask, uint8_t currentMask) {
+  const int8_t previousIndex = hallMaskToSequenceIndex(previousMask);
+  const int8_t currentIndex = hallMaskToSequenceIndex(currentMask);
+  if (previousIndex < 0 || currentIndex < 0) {
+    return 0;
+  }
+
+  if (static_cast<uint8_t>((previousIndex + 1) % kHallStateCount) == static_cast<uint8_t>(currentIndex)) {
+    return 1;
+  }
+  if (static_cast<uint8_t>((previousIndex + (kHallStateCount - 1)) % kHallStateCount) ==
+      static_cast<uint8_t>(currentIndex)) {
+    return -1;
+  }
+  return 0;
+}
+
 void IRAM_ATTR onHallSensorChange() {
   const uint32_t nowUs = micros();
   const uint8_t currentMask = readHallMaskFromPins();
@@ -65,6 +102,17 @@ void IRAM_ATTR onHallSensorChange() {
     portEXIT_CRITICAL_ISR(&g_mux);
     return;
   }
+
+  int8_t directionSign = directionSignFromTransition(previousMask, currentMask);
+  if (directionSign == 0) {
+    g_transitionsInvalidJump++;
+    portEXIT_CRITICAL_ISR(&g_mux);
+    return;
+  }
+  if (g_config.directionInverted) {
+    directionSign = static_cast<int8_t>(-directionSign);
+  }
+  g_directionSign = directionSign;
 
   if (g_lastTransitionUs != 0U) {
     g_transitionPeriodUs = nowUs - g_lastTransitionUs;
@@ -100,7 +148,17 @@ inline float kmhFromRpm(float motorRpm, float gearReduction, float wheelDiameter
 }
 
 inline float mpsFromKmh(float speedKmh) {
-  return speedKmh > 0.0f ? (speedKmh / 3.6f) : 0.0f;
+  return speedKmh / 3.6f;
+}
+
+HallDirection directionFromSign(int8_t sign) {
+  if (sign > 0) {
+    return HallDirection::kForward;
+  }
+  if (sign < 0) {
+    return HallDirection::kReverse;
+  }
+  return HallDirection::kUnknown;
 }
 
 }  // namespace
@@ -129,6 +187,7 @@ bool hallSpeedInit(const HallSpeedConfig& config) {
   g_transitionsInvalidState = 0;
   g_transitionsInvalidJump = 0;
   g_isrCount = 0;
+  g_directionSign = 0;
   portEXIT_CRITICAL(&g_mux);
 
   attachInterrupt(digitalPinToInterrupt(g_config.pinA), onHallSensorChange, CHANGE);
@@ -154,6 +213,7 @@ bool hallSpeedGetSnapshot(HallSpeedSnapshot& snapshot) {
   uint32_t transitionsInvalidState = 0;
   uint32_t transitionsInvalidJump = 0;
   uint32_t isrCount = 0;
+  int8_t directionSign = 0;
 
   portENTER_CRITICAL(&g_mux);
   hallMask = g_hallMask;
@@ -164,6 +224,7 @@ bool hallSpeedGetSnapshot(HallSpeedSnapshot& snapshot) {
   transitionsInvalidState = g_transitionsInvalidState;
   transitionsInvalidJump = g_transitionsInvalidJump;
   isrCount = g_isrCount;
+  directionSign = g_directionSign;
   portEXIT_CRITICAL(&g_mux);
 
   const uint32_t nowUs = micros();
@@ -172,15 +233,28 @@ bool hallSpeedGetSnapshot(HallSpeedSnapshot& snapshot) {
     ageUs = nowUs - lastTransitionUs;
   }
 
+  const bool transitionFresh = hasTransition && ageUs <= g_config.rpmTimeoutUs;
   float rpm = 0.0f;
-  if (hasTransition && ageUs <= g_config.rpmTimeoutUs) {
-    rpm = rpmFromTransitionUs(transitionPeriodUs, g_config.motorPoles);
+  float speedKmh = 0.0f;
+  float speedMps = 0.0f;
+  HallDirection direction = HallDirection::kUnknown;
+
+  if (transitionFresh) {
+    const float rpmMagnitude = rpmFromTransitionUs(transitionPeriodUs, g_config.motorPoles);
+    const int8_t sign = (directionSign > 0) ? 1 : ((directionSign < 0) ? -1 : 0);
+    direction = directionFromSign(sign);
+    if (sign != 0) {
+      rpm = rpmMagnitude * static_cast<float>(sign);
+      const float speedKmhMagnitude =
+          kmhFromRpm(rpmMagnitude, g_config.gearReduction, g_config.wheelDiameterM);
+      speedKmh = speedKmhMagnitude * static_cast<float>(sign);
+      speedMps = mpsFromKmh(speedKmh);
+    }
   }
-  const float speedKmh = kmhFromRpm(rpm, g_config.gearReduction, g_config.wheelDiameterM);
-  const float speedMps = mpsFromKmh(speedKmh);
 
   snapshot.driverReady = true;
   snapshot.hallMask = hallMask;
+  snapshot.direction = direction;
   snapshot.hasTransition = hasTransition;
   snapshot.transitionPeriodUs = transitionPeriodUs;
   snapshot.lastTransitionUs = lastTransitionUs;
@@ -208,5 +282,6 @@ void hallSpeedResetStats() {
   g_transitionsInvalidState = 0;
   g_transitionsInvalidJump = 0;
   g_isrCount = 0;
+  g_directionSign = 0;
   portEXIT_CRITICAL(&g_mux);
 }

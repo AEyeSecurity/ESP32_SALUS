@@ -286,7 +286,7 @@ def parse_speed_status(line: str) -> Dict[str, Any]:
     mm = re.search(r"\bdriver=([A-Z_]+)", line)
     if mm:
         parsed["driver"] = mm.group(1)
-    mm_speed = re.search(r"\bspeed=([0-9.]+)km/h", line)
+    mm_speed = re.search(r"\bspeed=([-+]?[0-9.]+)km/h", line)
     if mm_speed:
         parsed["speedKmh"] = float(mm_speed.group(1))
     return parsed

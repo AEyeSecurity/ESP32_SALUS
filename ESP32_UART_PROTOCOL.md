@@ -5,7 +5,7 @@ Documento canónico del protocolo UART entre ESP32 y Raspberry Pi para control y
 ## Estado de versión
 
 - Protocolo: `SALUS-UART-ESP32-RPI-V2`
-- Fecha de actualización: `2026-02-25`
+- Fecha de actualización: `2026-03-06`
 - Fuente de verdad: `/home/leo/codigo/aeye-ros-workspace/src/sensores/ESP32_UART_PROTOCOL.md`
 - Espejos obligatorios:
   - `/home/leo/codigo/ESP32_SALUS/ESP32_UART_PROTOCOL.md`
@@ -40,7 +40,7 @@ Estructura:
 - nibble bajo:
   - bit0: `ESTOP`
   - bit1: `DRIVE_EN`
-  - bit2: reservado
+  - bit2: `REV_REQ` (solicita reversa para comando de velocidad)
   - bit3: reservado
 
 Codificación de `speed_cmd_u16`:
@@ -48,6 +48,12 @@ Codificación de `speed_cmd_u16`:
 - little-endian
 - unidades: `m/s x100`
 - ejemplo: `2.50 m/s` -> `250` -> `0x00FA` -> bytes `FA 00`
+
+Semántica de velocidad firmada:
+
+- `signed_speed_cmd = (REV_REQ ? -1 : +1) * speed_cmd_u16`
+- El PID de velocidad en ESP32 usa magnitud (`abs`) y el sentido lo resuelve el relé de reversa.
+- Si `DRIVE_EN=0`, frame stale o `target=0`, la dirección efectiva vuelve a `FWD`.
 
 Rangos esperados:
 
@@ -69,7 +75,7 @@ Estructura:
 
 Codificación de campos:
 
-- `speed_meas_u16` (LE): velocidad Hall en `m/s x100`
+- `speed_meas_u16` (LE): velocidad Hall en `m/s x100` (magnitud absoluta)
   - `0xFFFF`: N/A (Hall no válido)
 - `steer_meas_i16` (LE): ángulo de dirección centrado en `deg x100`
   - relativo a `adjustedCenterDeg`
@@ -107,7 +113,8 @@ Codificación de campos:
 
 ## 5. Semántica de control en firmware
 
-- Pi fresca + `DRIVE_EN=1` -> control de velocidad por PID Hall con target `speed_cmd_u16`.
+- Pi fresca + `DRIVE_EN=1` -> control de velocidad por PID Hall con target firmado derivado de `speed_cmd_u16 + REV_REQ`.
+- `REV_REQ=1` con magnitud >0 solicita `REV`; sin solicitud efectiva (`target=0`, `DRIVE_EN=0`, stale) vuelve a `FWD`.
 - `ESTOP=1` -> throttle inhibido y freno 100%.
 - Dirección desde Pi usa `steer_i8` cuando frame Pi está fresco.
 - Sin frame fresco, el firmware vuelve a ruta RC/local.
@@ -124,6 +131,11 @@ Codificación de campos:
 Payload sin CRC:
 
 - `AA 22 00 FA 00 00`
+
+Ejemplo en reversa:
+
+- `ver_flags=0x26` (`ver=2`, `DRIVE_EN=1`, `REV_REQ=1`)
+- `speed_cmd=1.20 m/s` (`0x0078`) -> comando efectivo `-1.20 m/s`
 
 ### 6.2 ESP32->Pi ejemplo conceptual
 

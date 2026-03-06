@@ -250,13 +250,13 @@ def main() -> int:
                 drive_events.append((ts, parsed))
                 s = parsed.get("speed_mps")
                 if isinstance(s, float):
-                    max_speed_drive = max(max_speed_drive, s)
+                    max_speed_drive = max(max_speed_drive, abs(s))
                 if parsed.get("fs") == "Y":
                     failsafe_seen = True
             elif line.startswith("[SPD][STATUS]"):
-                m = re.search(r"\s([0-9.]+)m/s", line)
+                m = re.search(r"\s([-+]?[0-9.]+)m/s", line)
                 if m:
-                    max_speed_status = max(max_speed_status, float(m.group(1)))
+                    max_speed_status = max(max_speed_status, abs(float(m.group(1))))
 
         first_motion = None
         for ts, d in drive_events:

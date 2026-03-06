@@ -56,6 +56,46 @@ portMUX_TYPE g_driveRcDebugMux = portMUX_INITIALIZER_UNLOCKED;
 QuadDriveRuntimeSnapshot g_driveRuntimeSnapshot{};
 portMUX_TYPE g_driveRuntimeMux = portMUX_INITIALIZER_UNLOCKED;
 
+QuadReverseConfig g_reverseConfig = {
+    4,
+    false,
+    pdMS_TO_TICKS(300),
+    pdMS_TO_TICKS(300),
+    true,
+    1.30f,
+    2.5f,
+    0.10f,
+};
+bool g_reverseInitialized = false;
+QuadDriveDirection g_reverseCurrentDirection = QuadDriveDirection::kForward;
+QuadDriveDirection g_reverseRequestedDirection = QuadDriveDirection::kForward;
+bool g_reverseRelayEnergized = false;
+TickType_t g_reversePhaseStartTick = 0;
+portMUX_TYPE g_reverseMux = portMUX_INITIALIZER_UNLOCKED;
+
+enum class ReverseSwitchPhase : uint8_t {
+  kIdle = 0,
+  kPreDelay,
+  kPostDelay,
+};
+
+ReverseSwitchPhase g_reverseSwitchPhase = ReverseSwitchPhase::kIdle;
+
+bool directionToRelayEnergized(QuadDriveDirection direction) {
+  return direction == QuadDriveDirection::kReverse;
+}
+
+uint8_t relayLevelFromEnergized(bool relayEnergized) {
+  if (g_reverseConfig.activeLow) {
+    return relayEnergized ? LOW : HIGH;
+  }
+  return relayEnergized ? HIGH : LOW;
+}
+
+const char* directionText(QuadDriveDirection direction) {
+  return (direction == QuadDriveDirection::kReverse) ? "REV" : "FWD";
+}
+
 uint32_t computeMaxDuty(uint8_t resolutionBits) {
   if (resolutionBits == 0) {
     return 255u;
@@ -189,6 +229,10 @@ constexpr TickType_t kDriveDtWarningCooldown = pdMS_TO_TICKS(1000);
 constexpr TickType_t kDriveRuntimeWarningCooldown = pdMS_TO_TICKS(1000);
 constexpr TickType_t kDriveEventCooldown = pdMS_TO_TICKS(300);
 constexpr TickType_t kDrivePidTraceDefaultPeriod = pdMS_TO_TICKS(100);
+constexpr float kReverseMinSpeedMps = 0.05f;
+constexpr float kReverseMaxAntiWindupScale = 10.0f;
+constexpr float kReverseMinAntiWindupScale = 1.0f;
+constexpr float kReverseMinAntiWindupErrorThresholdMps = 0.0f;
 
 enum class DriveThrottleInhibitReason : uint8_t {
   kNone = 0,
@@ -213,16 +257,43 @@ enum class RcDriveInputState : uint8_t {
   kManualBrake,
 };
 
-float mapPiSpeedCmdToTargetMps(uint16_t speedCmdCentiMps) {
-  float targetMps = static_cast<float>(speedCmdCentiMps) / 100.0f;
-  const float maxSpeed = speedPidGetMaxSpeedMps();
-  if (targetMps < 0.0f) {
-    return 0.0f;
+void normalizeSignedTargetMps(float requestedMps,
+                              float maxForwardSpeedMps,
+                              float maxReverseSpeedMps,
+                              float& targetSignedMpsOut,
+                              float& targetAbsMpsOut,
+                              bool& clampedOut) {
+  float safeMaxForward = isfinite(maxForwardSpeedMps) ? maxForwardSpeedMps : 0.0f;
+  if (safeMaxForward < 0.0f) {
+    safeMaxForward = 0.0f;
   }
-  if (targetMps > maxSpeed) {
-    return maxSpeed;
+
+  float safeMaxReverse = isfinite(maxReverseSpeedMps) ? maxReverseSpeedMps : safeMaxForward;
+  if (safeMaxReverse < 0.0f) {
+    safeMaxReverse = 0.0f;
   }
-  return targetMps;
+  if (safeMaxReverse > safeMaxForward) {
+    safeMaxReverse = safeMaxForward;
+  }
+
+  float signedTarget = isfinite(requestedMps) ? requestedMps : 0.0f;
+  clampedOut = false;
+  if (signedTarget >= 0.0f) {
+    if (signedTarget > safeMaxForward) {
+      signedTarget = safeMaxForward;
+      clampedOut = true;
+    }
+  } else if (signedTarget < -safeMaxReverse) {
+    signedTarget = -safeMaxReverse;
+    clampedOut = true;
+  }
+
+  targetSignedMpsOut = signedTarget;
+  targetAbsMpsOut = fabsf(signedTarget);
+}
+
+float mapPiSpeedCmdSignedToTargetMps(int16_t speedCmdSignedCentiMps) {
+  return static_cast<float>(speedCmdSignedCentiMps) / 100.0f;
 }
 
 float mapRcToSpeedTargetMps(int rcValue) {
@@ -353,6 +424,108 @@ const char* driveThrottleInhibitReasonText(DriveThrottleInhibitReason reason) {
     default:
       return "NONE";
   }
+}
+
+bool initQuadReverse(const QuadReverseConfig& config) {
+  g_reverseConfig = config;
+  if (g_reverseConfig.preSwitchDelay == 0) {
+    g_reverseConfig.preSwitchDelay = pdMS_TO_TICKS(300);
+  }
+  if (g_reverseConfig.postSwitchDelay == 0) {
+    g_reverseConfig.postSwitchDelay = pdMS_TO_TICKS(300);
+  }
+  if (!isfinite(g_reverseConfig.maxReverseSpeedMps) || g_reverseConfig.maxReverseSpeedMps < kReverseMinSpeedMps) {
+    g_reverseConfig.maxReverseSpeedMps = 1.35f;
+  }
+  const float maxForwardSpeed = speedPidGetMaxSpeedMps();
+  if (g_reverseConfig.maxReverseSpeedMps > maxForwardSpeed) {
+    g_reverseConfig.maxReverseSpeedMps = maxForwardSpeed;
+  }
+  if (!isfinite(g_reverseConfig.antiWindupUnwindScale) ||
+      g_reverseConfig.antiWindupUnwindScale < kReverseMinAntiWindupScale) {
+    g_reverseConfig.antiWindupUnwindScale = kReverseMinAntiWindupScale;
+  } else if (g_reverseConfig.antiWindupUnwindScale > kReverseMaxAntiWindupScale) {
+    g_reverseConfig.antiWindupUnwindScale = kReverseMaxAntiWindupScale;
+  }
+  if (!isfinite(g_reverseConfig.antiWindupErrorThresholdMps) ||
+      g_reverseConfig.antiWindupErrorThresholdMps < kReverseMinAntiWindupErrorThresholdMps) {
+    g_reverseConfig.antiWindupErrorThresholdMps = 0.10f;
+  }
+
+  pinMode(g_reverseConfig.relayPin, OUTPUT);
+
+  portENTER_CRITICAL(&g_reverseMux);
+  g_reverseCurrentDirection = QuadDriveDirection::kForward;
+  g_reverseRequestedDirection = QuadDriveDirection::kForward;
+  g_reverseRelayEnergized = false;
+  g_reverseSwitchPhase = ReverseSwitchPhase::kIdle;
+  g_reversePhaseStartTick = 0;
+  g_reverseInitialized = true;
+  portEXIT_CRITICAL(&g_reverseMux);
+
+  digitalWrite(g_reverseConfig.relayPin, relayLevelFromEnergized(g_reverseRelayEnergized));
+  return true;
+}
+
+void requestDirection(QuadDriveDirection direction) {
+  portENTER_CRITICAL(&g_reverseMux);
+  g_reverseRequestedDirection = direction;
+  portEXIT_CRITICAL(&g_reverseMux);
+}
+
+void updateDirectionState(TickType_t nowTick) {
+  if (!g_reverseInitialized) {
+    return;
+  }
+
+  bool applyRelayWrite = false;
+  uint8_t relayLevel = LOW;
+
+  portENTER_CRITICAL(&g_reverseMux);
+  switch (g_reverseSwitchPhase) {
+    case ReverseSwitchPhase::kIdle:
+      if (g_reverseRequestedDirection != g_reverseCurrentDirection) {
+        g_reverseSwitchPhase = ReverseSwitchPhase::kPreDelay;
+        g_reversePhaseStartTick = nowTick;
+      }
+      break;
+    case ReverseSwitchPhase::kPreDelay:
+      if ((nowTick - g_reversePhaseStartTick) >= g_reverseConfig.preSwitchDelay) {
+        g_reverseCurrentDirection = g_reverseRequestedDirection;
+        g_reverseRelayEnergized = directionToRelayEnergized(g_reverseCurrentDirection);
+        relayLevel = relayLevelFromEnergized(g_reverseRelayEnergized);
+        applyRelayWrite = true;
+        g_reverseSwitchPhase = ReverseSwitchPhase::kPostDelay;
+        g_reversePhaseStartTick = nowTick;
+      }
+      break;
+    case ReverseSwitchPhase::kPostDelay:
+      if ((nowTick - g_reversePhaseStartTick) >= g_reverseConfig.postSwitchDelay) {
+        g_reverseSwitchPhase = ReverseSwitchPhase::kIdle;
+        if (g_reverseRequestedDirection != g_reverseCurrentDirection) {
+          g_reverseSwitchPhase = ReverseSwitchPhase::kPreDelay;
+          g_reversePhaseStartTick = nowTick;
+        }
+      }
+      break;
+    default:
+      g_reverseSwitchPhase = ReverseSwitchPhase::kIdle;
+      g_reversePhaseStartTick = nowTick;
+      break;
+  }
+  portEXIT_CRITICAL(&g_reverseMux);
+
+  if (applyRelayWrite) {
+    digitalWrite(g_reverseConfig.relayPin, relayLevel);
+  }
+}
+
+void getDirectionState(QuadDriveDirection& directionOut, bool& switchingOut, bool& relayEnergizedOut) {
+  portENTER_CRITICAL(&g_reverseMux);
+  directionOut = g_reverseCurrentDirection;
+  switchingOut = (g_reverseSwitchPhase != ReverseSwitchPhase::kIdle);
+  relayEnergizedOut = g_reverseRelayEnergized;
+  portEXIT_CRITICAL(&g_reverseMux);
 }
 
 float computeServoBrakePercent(int currentAngleDeg, int releaseAngleDeg, int brakeAngleDeg, bool& validOut) {
@@ -548,7 +721,7 @@ bool quadDriveSetSpeedTargetOverride(bool enabled, float targetMps) {
   }
 
   const float maxSpeed = speedPidGetMaxSpeedMps();
-  if (!isfinite(targetMps) || targetMps < 0.0f || targetMps > maxSpeed) {
+  if (!isfinite(targetMps) || targetMps < -maxSpeed || targetMps > maxSpeed) {
     return false;
   }
 
@@ -573,6 +746,9 @@ bool quadDriveSetPwmOverride(bool enabled, int percent) {
     g_pwmOverrideEnabled = false;
     g_pwmOverridePercent = 0;
     portEXIT_CRITICAL(&g_pwmOverrideMux);
+    if (g_reverseConfig.forceForwardWhenPwmOff) {
+      requestDirection(QuadDriveDirection::kForward);
+    }
     return true;
   }
 
@@ -593,6 +769,69 @@ bool quadDriveGetPwmOverride(bool& enabledOut, int& percentOut) {
   percentOut = g_pwmOverridePercent;
   portEXIT_CRITICAL(&g_pwmOverrideMux);
   return true;
+}
+
+bool quadDriveSetDirectionOverride(QuadDriveDirection dir) {
+  if (dir != QuadDriveDirection::kForward && dir != QuadDriveDirection::kReverse) {
+    return false;
+  }
+  requestDirection(dir);
+  return true;
+}
+
+bool quadDriveGetDirectionStatus(QuadDriveDirection& dirOut, bool& switchingOut, bool& relayEnergizedOut) {
+  getDirectionState(dirOut, switchingOut, relayEnergizedOut);
+  return g_reverseInitialized;
+}
+
+bool quadDriveGetDirectionConfig(uint8_t& relayPinOut, bool& activeLowOut) {
+  relayPinOut = g_reverseConfig.relayPin;
+  activeLowOut = g_reverseConfig.activeLow;
+  return g_reverseInitialized;
+}
+
+bool quadDriveSetReverseSpeedLimitMps(float maxReverseSpeedMps) {
+  const float maxForwardSpeed = speedPidGetMaxSpeedMps();
+  if (!isfinite(maxReverseSpeedMps) || maxReverseSpeedMps < kReverseMinSpeedMps ||
+      maxReverseSpeedMps > maxForwardSpeed) {
+    return false;
+  }
+  portENTER_CRITICAL(&g_reverseMux);
+  g_reverseConfig.maxReverseSpeedMps = maxReverseSpeedMps;
+  portEXIT_CRITICAL(&g_reverseMux);
+  return true;
+}
+
+bool quadDriveGetReverseSpeedLimitMps(float& maxReverseSpeedMpsOut) {
+  portENTER_CRITICAL(&g_reverseMux);
+  maxReverseSpeedMpsOut = g_reverseConfig.maxReverseSpeedMps;
+  portEXIT_CRITICAL(&g_reverseMux);
+  return g_reverseInitialized;
+}
+
+bool quadDriveSetReverseAntiWindupScale(float unwindScale) {
+  if (!isfinite(unwindScale) || unwindScale < kReverseMinAntiWindupScale ||
+      unwindScale > kReverseMaxAntiWindupScale) {
+    return false;
+  }
+  portENTER_CRITICAL(&g_reverseMux);
+  g_reverseConfig.antiWindupUnwindScale = unwindScale;
+  portEXIT_CRITICAL(&g_reverseMux);
+  return true;
+}
+
+bool quadDriveGetReverseAntiWindupScale(float& unwindScaleOut) {
+  portENTER_CRITICAL(&g_reverseMux);
+  unwindScaleOut = g_reverseConfig.antiWindupUnwindScale;
+  portEXIT_CRITICAL(&g_reverseMux);
+  return g_reverseInitialized;
+}
+
+bool quadDriveGetReverseAntiWindupErrorThresholdMps(float& errorThresholdOut) {
+  portENTER_CRITICAL(&g_reverseMux);
+  errorThresholdOut = g_reverseConfig.antiWindupErrorThresholdMps;
+  portEXIT_CRITICAL(&g_reverseMux);
+  return g_reverseInitialized;
 }
 
 bool quadDriveGetRcDebugSnapshot(QuadDriveRcDebugSnapshot& out) {
@@ -671,7 +910,12 @@ QuadDriveRuntimeSnapshot makeDriveRuntimeSnapshot(bool commandFromPwmOverride,
                                                   bool piEstopActive,
                                                   bool speedPidFailsafe,
                                                   bool speedPidOverspeed,
-                                                  uint8_t appliedBrakePercent) {
+                                                  uint8_t appliedBrakePercent,
+                                                  float speedTargetSignedMps,
+                                                  float speedTargetAbsMps,
+                                                  QuadDriveDirection direction,
+                                                  bool directionSwitching,
+                                                  bool relayEnergized) {
   QuadDriveRuntimeSnapshot runtime{};
   runtime.valid = true;
   runtime.source =
@@ -681,6 +925,11 @@ QuadDriveRuntimeSnapshot makeDriveRuntimeSnapshot(bool commandFromPwmOverride,
   runtime.speedPidFailsafe = speedPidFailsafe;
   runtime.speedPidOverspeed = speedPidOverspeed;
   runtime.appliedBrakePercent = appliedBrakePercent;
+  runtime.speedTargetSignedMps = speedTargetSignedMps;
+  runtime.speedTargetAbsMps = speedTargetAbsMps;
+  runtime.direction = direction;
+  runtime.directionSwitching = directionSwitching;
+  runtime.relayEnergized = relayEnergized;
   return runtime;
 }
 
@@ -731,6 +980,7 @@ void taskQuadDriveControl(void* parameter) {
   if (cfg->autoInitHardware) {
     initQuadThrottle(cfg->throttle);
     initQuadBrake(cfg->brake);
+    initQuadReverse(cfg->reverse);
   }
   quadDriveSetLogEnabled(cfg->log);
 
@@ -800,6 +1050,11 @@ void taskQuadDriveControl(void* parameter) {
   initialRuntime.speedPidFailsafe = false;
   initialRuntime.speedPidOverspeed = false;
   initialRuntime.appliedBrakePercent = 0;
+  initialRuntime.speedTargetSignedMps = 0.0f;
+  initialRuntime.speedTargetAbsMps = 0.0f;
+  initialRuntime.direction = QuadDriveDirection::kForward;
+  initialRuntime.directionSwitching = false;
+  initialRuntime.relayEnergized = false;
   setDriveRuntimeSnapshot(initialRuntime);
 
   for (;;) {
@@ -871,6 +1126,9 @@ void taskQuadDriveControl(void* parameter) {
     bool pwmOverrideEnabled = false;
     int pwmOverridePercent = 0;
     quadDriveGetPwmOverride(pwmOverrideEnabled, pwmOverridePercent);
+    QuadDriveDirection driveDirection = QuadDriveDirection::kForward;
+    bool directionSwitching = false;
+    bool relayEnergized = false;
 
     int commandValue = rcValue;
     bool commandFromPi = false;
@@ -976,6 +1234,12 @@ void taskQuadDriveControl(void* parameter) {
     bool speedPidFailsafe = false;
     bool speedPidOverspeed = false;
     SpeedPidMode speedPidMode = SpeedPidMode::kNormal;
+    float speedTargetSignedMps = 0.0f;
+    float speedTargetAbsMps = 0.0f;
+    float speedTargetRequestedSignedMps = 0.0f;
+    bool speedTargetWasClamped = false;
+    bool reverseTargetClampActive = false;
+    float speedPidAntiWindupScale = 1.0f;
     float speedTargetRawMps = 0.0f;
     float speedTargetRampedMps = 0.0f;
     float speedMeasuredMps = 0.0f;
@@ -1039,7 +1303,7 @@ void taskQuadDriveControl(void* parameter) {
         speedLastTransitionsOk = 0;
       }
       if (speedControlSource == SpeedControlSource::kPiSpeedPid) {
-        speedTargetRawMps = mapPiSpeedCmdToTargetMps(piSnapshot.speedCmdCentiMps);
+        speedTargetRequestedSignedMps = mapPiSpeedCmdSignedToTargetMps(piSnapshot.speedCmdSignedCentiMps);
       } else if (speedControlSource == SpeedControlSource::kRcSpeedPid) {
         const float rcTargetInstantMps =
             rcUsingLatchThisCycle ? rcLastTargetRawMps : mapRcToSpeedTargetMps(rcValue);
@@ -1063,19 +1327,49 @@ void taskQuadDriveControl(void* parameter) {
           rcTargetShapedMps = 0.0f;
         }
         rcTargetShapedMpsDebug = rcTargetShapedMps;
-        speedTargetRawMps = rcTargetShapedMps;
+        speedTargetRequestedSignedMps = rcTargetShapedMps;
       } else {
-        speedTargetRawMps = speedTargetOverrideMps;
+        speedTargetRequestedSignedMps = speedTargetOverrideMps;
       }
+      const float speedMaxForwardMps = speedPidGetMaxSpeedMps();
+      float speedMaxReverseMps = speedMaxForwardMps;
+      float reverseAntiWindupScale = kReverseMinAntiWindupScale;
+      float reverseAntiWindupErrThresholdMps = 0.10f;
+      quadDriveGetReverseSpeedLimitMps(speedMaxReverseMps);
+      quadDriveGetReverseAntiWindupScale(reverseAntiWindupScale);
+      quadDriveGetReverseAntiWindupErrorThresholdMps(reverseAntiWindupErrThresholdMps);
+      if (!isfinite(speedMaxReverseMps) || speedMaxReverseMps < kReverseMinSpeedMps) {
+        speedMaxReverseMps = speedMaxForwardMps;
+      } else if (speedMaxReverseMps > speedMaxForwardMps) {
+        speedMaxReverseMps = speedMaxForwardMps;
+      }
+      if (!isfinite(reverseAntiWindupScale) || reverseAntiWindupScale < kReverseMinAntiWindupScale) {
+        reverseAntiWindupScale = kReverseMinAntiWindupScale;
+      } else if (reverseAntiWindupScale > kReverseMaxAntiWindupScale) {
+        reverseAntiWindupScale = kReverseMaxAntiWindupScale;
+      }
+      if (!isfinite(reverseAntiWindupErrThresholdMps) ||
+          reverseAntiWindupErrThresholdMps < kReverseMinAntiWindupErrorThresholdMps) {
+        reverseAntiWindupErrThresholdMps = 0.10f;
+      }
+      normalizeSignedTargetMps(speedTargetRequestedSignedMps,
+                               speedMaxForwardMps,
+                               speedMaxReverseMps,
+                               speedTargetSignedMps,
+                               speedTargetAbsMps,
+                               speedTargetWasClamped);
+      speedTargetRawMps = speedTargetAbsMps;
+      reverseTargetClampActive = speedTargetWasClamped && (speedTargetRequestedSignedMps < -0.05f);
 
       HallSpeedSnapshot speedSnapshot{};
       const bool speedOk = hallSpeedGetSnapshot(speedSnapshot) && speedSnapshot.driverReady;
       HallSpeedConfig speedCfg{};
       hallSpeedGetConfig(speedCfg);
       const uint32_t rpmTimeoutUs = (speedCfg.rpmTimeoutUs > 0U) ? speedCfg.rpmTimeoutUs : 500000U;
+      const float speedAbsMps = speedOk ? fabsf(speedSnapshot.speedMps) : 0.0f;
       const bool transitionStale = !speedSnapshot.hasTransition || speedSnapshot.transitionAgeUs > rpmTimeoutUs;
       const bool speedEffectivelyStopped = speedOk &&
-                                           speedSnapshot.speedMps <= kSpeedPidStoppedMpsThreshold &&
+                                           speedAbsMps <= kSpeedPidStoppedMpsThreshold &&
                                            transitionStale;
       const bool startupCommandEdge = (speedTargetRawMps > 0.05f) && (lastSpeedTargetRawMps <= 0.05f);
       const bool sourceSupportsStartupReentry =
@@ -1116,7 +1410,11 @@ void taskQuadDriveControl(void* parameter) {
       const bool transitionFresh = speedOk && validTransitionEvent &&
                                    speedSnapshot.hasTransition &&
                                    speedSnapshot.transitionAgeUs <= rpmTimeoutUs;
-      speedMeasuredMps = speedOk ? speedSnapshot.speedMps : 0.0f;
+      speedMeasuredMps = speedAbsMps;
+      if (reverseTargetClampActive &&
+          speedMeasuredMps < (speedTargetRawMps - reverseAntiWindupErrThresholdMps)) {
+        speedPidAntiWindupScale = reverseAntiWindupScale;
+      }
 
       if (!speedOk) {
         speedFeedbackMissingTick = sampleTick;
@@ -1139,7 +1437,8 @@ void taskQuadDriveControl(void* parameter) {
 
       SpeedPidControlOutput speedOutput{};
       const bool speedComputed =
-          speedPidCompute(speedTargetRawMps, speedMeasuredMps, speedPidFeedbackOk, dtSeconds, speedOutput);
+          speedPidCompute(
+              speedTargetRawMps, speedMeasuredMps, speedPidFeedbackOk, dtSeconds, speedOutput, speedPidAntiWindupScale);
 
       if (!speedComputed) {
         speedPidFeedbackOk = false;
@@ -1214,6 +1513,18 @@ void taskQuadDriveControl(void* parameter) {
       }
     }
 
+    if (!pwmOverrideEnabled) {
+      const bool reverseRequestedBySignedTarget =
+          (speedControlSource != SpeedControlSource::kNone) && (speedTargetSignedMps < -0.05f);
+      if (reverseRequestedBySignedTarget) {
+        requestDirection(QuadDriveDirection::kReverse);
+      } else if (g_reverseConfig.forceForwardWhenPwmOff || speedControlSource != SpeedControlSource::kNone) {
+        requestDirection(QuadDriveDirection::kForward);
+      }
+    }
+    updateDirectionState(sampleTick);
+    getDirectionState(driveDirection, directionSwitching, relayEnergized);
+
     uint8_t overspeedBrakePercent = 0;
     if (speedControlSource != SpeedControlSource::kNone && speedPidFeedbackOk && !speedPidFailsafe &&
         speedPidBrakePercent > 0.0f) {
@@ -1232,7 +1543,7 @@ void taskQuadDriveControl(void* parameter) {
                                      rcBrakePercent,
                                      overspeedBrakePercent);
 
-    if (appliedBrakePercent > 0 || inhibitReason != DriveThrottleInhibitReason::kNone) {
+    if (appliedBrakePercent > 0 || inhibitReason != DriveThrottleInhibitReason::kNone || directionSwitching) {
       throttleInhibit = true;
     }
     quadBrakeApplyPercent(appliedBrakePercent);
@@ -1243,7 +1554,12 @@ void taskQuadDriveControl(void* parameter) {
                                                                            piEstopActive,
                                                                            speedPidFailsafe,
                                                                            speedPidOverspeed,
-                                                                           appliedBrakePercent);
+                                                                           appliedBrakePercent,
+                                                                           speedTargetSignedMps,
+                                                                           speedTargetAbsMps,
+                                                                           driveDirection,
+                                                                           directionSwitching,
+                                                                           relayEnergized);
     setDriveRuntimeSnapshot(driveRuntime);
 
     const int duty = applyThrottleActuation(throttleInhibit, commandValue);
@@ -1302,6 +1618,12 @@ void taskQuadDriveControl(void* parameter) {
       msg += duty;
       msg += "/";
       msg += static_cast<int>(g_maxDuty);
+      msg += " dir=";
+      msg += directionText(driveDirection);
+      msg += " dirSw=";
+      msg += directionSwitching ? "Y" : "N";
+      msg += " relay=";
+      msg += relayEnergized ? "ON" : "OFF";
       msg += " brakeA=";
       msg += g_brakeCurrentAngles.servoA;
       msg += "deg brakeB=";
@@ -1325,7 +1647,17 @@ void taskQuadDriveControl(void* parameter) {
         msg += speedControlSourceText(speedControlSource);
         msg += " targetRaw=";
         msg += String(speedTargetRawMps, 2);
-        msg += "m/s target=";
+        msg += "m/s targetSigned=";
+        msg += String(speedTargetSignedMps, 2);
+        msg += "m/s targetAbs=";
+        msg += String(speedTargetAbsMps, 2);
+        msg += "m/s reqSigned=";
+        msg += String(speedTargetRequestedSignedMps, 2);
+        msg += "m/s revClamp=";
+        msg += reverseTargetClampActive ? "Y" : "N";
+        msg += " awx=";
+        msg += String(speedPidAntiWindupScale, 2);
+        msg += " target=";
         msg += String(speedTargetRampedMps, 2);
         msg += "m/s speed=";
         msg += String(speedMeasuredMps, 2);
@@ -1536,6 +1868,16 @@ void taskQuadDriveControl(void* parameter) {
         msg += speedPidModeText(speedPidMode);
         msg += " targetRawMps=";
         msg += String(speedTargetRawMps, 3);
+        msg += " targetSignedMps=";
+        msg += String(speedTargetSignedMps, 3);
+        msg += " targetAbsMps=";
+        msg += String(speedTargetAbsMps, 3);
+        msg += " reqSignedMps=";
+        msg += String(speedTargetRequestedSignedMps, 3);
+        msg += " revClamp=";
+        msg += reverseTargetClampActive ? "Y" : "N";
+        msg += " awx=";
+        msg += String(speedPidAntiWindupScale, 2);
         msg += " targetMps=";
         msg += String(speedTargetRampedMps, 3);
         msg += " speedMps=";

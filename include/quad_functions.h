@@ -20,6 +20,22 @@ void initQuadThrottle(const QuadThrottleConfig& config);
 int quadThrottleUpdate(int rcValue);
 void quadThrottleStop();
 
+enum class QuadDriveDirection : uint8_t {
+  kForward = 0,
+  kReverse = 1,
+};
+
+struct QuadReverseConfig {
+  uint8_t relayPin;
+  bool activeLow;
+  TickType_t preSwitchDelay;
+  TickType_t postSwitchDelay;
+  bool forceForwardWhenPwmOff;
+  float maxReverseSpeedMps;
+  float antiWindupUnwindScale;
+  float antiWindupErrorThresholdMps;
+};
+
 struct QuadBrakeConfig {
   uint8_t servoPinA;
   uint8_t servoPinB;
@@ -43,6 +59,7 @@ struct QuadDriveTaskConfig {
   QuadBrakeConfig brake;
   SpeedPidTunings speedPidTuningsDefaults;
   SpeedPidConfig speedPidConfigDefaults;
+  QuadReverseConfig reverse;
   bool autoInitHardware;
   TickType_t period;
   bool log;
@@ -78,6 +95,11 @@ struct QuadDriveRuntimeSnapshot {
   bool speedPidFailsafe;
   bool speedPidOverspeed;
   uint8_t appliedBrakePercent;
+  float speedTargetSignedMps;
+  float speedTargetAbsMps;
+  QuadDriveDirection direction;
+  bool directionSwitching;
+  bool relayEnergized;
 };
 
 void taskQuadDriveControl(void* parameter);
@@ -89,6 +111,14 @@ bool quadDriveSetSpeedTargetOverride(bool enabled, float targetMps);
 bool quadDriveGetSpeedTargetOverride(bool& enabledOut, float& targetMpsOut);
 bool quadDriveSetPwmOverride(bool enabled, int percent);
 bool quadDriveGetPwmOverride(bool& enabledOut, int& percentOut);
+bool quadDriveSetDirectionOverride(QuadDriveDirection dir);
+bool quadDriveGetDirectionStatus(QuadDriveDirection& dirOut, bool& switchingOut, bool& relayEnergizedOut);
+bool quadDriveGetDirectionConfig(uint8_t& relayPinOut, bool& activeLowOut);
+bool quadDriveSetReverseSpeedLimitMps(float maxReverseSpeedMps);
+bool quadDriveGetReverseSpeedLimitMps(float& maxReverseSpeedMpsOut);
+bool quadDriveSetReverseAntiWindupScale(float unwindScale);
+bool quadDriveGetReverseAntiWindupScale(float& unwindScaleOut);
+bool quadDriveGetReverseAntiWindupErrorThresholdMps(float& errorThresholdOut);
 bool quadDriveGetRcDebugSnapshot(QuadDriveRcDebugSnapshot& out);
 bool quadDriveGetRuntimeSnapshot(QuadDriveRuntimeSnapshot& out);
 bool quadDriveSetRcNeutralCalEnabled(bool enabled);

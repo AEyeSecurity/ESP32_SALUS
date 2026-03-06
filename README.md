@@ -59,7 +59,7 @@ Troubleshooting OTA rapido:
 | `taskQuadDriveControl`   | `src/quad_functions.cpp` | 4096 (~16 KB)        | 4    | 1      | Notificacin RC (timeout 30 ms)             | `debug::kEnableDriveTask` (true) | Lazo de velocidad (m/s) con Hall, actualiza LEDC y mezcla freno Pi/overspeed. |
 | `taskRcMonitor`          | `src/fs_ia6.cpp`         | 2048 (~8 KB)         | 1    | 1      | 100 ms periodica (`vTaskDelay`)              | `debug::kEnableRcTask` (false) | Solo loguea el snapshot compartido; ideal para calibracion. |
 | `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~16 KB)        | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
-| `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~12 KB)        | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA` v2 (7 bytes), valida versión/CRC y mantiene `PiCommsRxSnapshot` con `speed_cmd` en `m/s x100`. |
+| `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~12 KB)        | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA` v2 (7 bytes), valida versión/CRC y mantiene `PiCommsRxSnapshot` con `speed_cmd` firmado (`speed_cmd` + `REV_REQ`). |
 | `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~8 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status speed steer brake crc]` (8 bytes) con velocidad Hall, ángulo centrado y flags de seguridad. |
 | `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Supervisor liviano sin lógica de comunicaciones (solo `vTaskDelay`). |
 
@@ -98,9 +98,9 @@ Troubleshooting OTA rapido:
 - Configuracion: `QuadDriveTaskConfig` agrupa la configuracion del LEDC de acelerador, los servos de freno y el flag `autoInitHardware` que llama `initQuadThrottle/Brake` al crear la tarea.
 - Disparo: espera notificaciones RC con `ulTaskNotifyTake` (timeout 30 ms) y utiliza `esp_timer_get_time` para medir la duracion de cada ciclo.
 - Flujo: selecciona fuente de setpoint para `speed_pid` segun prioridad:
-  - Pi fresca + `DRIVE_EN=1`: `speed_cmd_u16` (`m/s x100`) -> objetivo `m/s`.
+  - Pi fresca + `DRIVE_EN=1`: `speed_cmd_u16` (`m/s x100`) + `REV_REQ` -> objetivo firmado (`m/s`).
   - si Pi no esta fresca y RC esta fresco: `rc_throttle` -> objetivo `m/s` lineal (`0..100%` -> `0..4.17 m/s`).
-- En ambos casos ejecuta `speedPidCompute` (modos `NORMAL/OVERSPEED/FAILSAFE`) y aplica `quadThrottleUpdate` con salida PID.
+- En todos los casos ejecuta `speedPidCompute` con magnitud (`abs`) (modos `NORMAL/OVERSPEED/FAILSAFE`) y resuelve el sentido con el relé (`FWD/REV`).
 - Overspeed: cuando `speed > target`, corta throttle (`0`) y aplica freno automático proporcional limitado por `overspeedBrakeMaxPercent`, con `deadband + hold + slew` para reducir chatter del servo de freno.
 - Arbitraje de freno: con Pi fresca aplica `max(brake_u8_pi, brake_overspeed_auto)`; en RC aplica `max(brake_rc_manual, brake_overspeed_auto)`; con `ESTOP` fuerza `100%`.
 - Datos viejos: si el snapshot supera 50 ms sin actualizar, fuerza 0 como entrada y cada 500 ms emite `[DRIVE] sin datos frescos` cuando el logging esta habilitado.
@@ -121,15 +121,17 @@ Troubleshooting OTA rapido:
 ## Comunicaciones UART con Raspberry Pi
 
 - El enlace binario se implementa en `taskPiCommsRx`/`taskPiCommsTx` (`src/pi_comms.cpp`) y usa `GPIO3/GPIO1` a **115200 bps**.  
-- `taskPiCommsRx` procesa frame v2 de 7 bytes (`0xAA ... crc`) y publica `PiCommsRxSnapshot` con `steer`, `speedCmdCentiMps`, `brake`, `estop`, `driveEnabled` y contadores (`ok/crc/malformed/verErr`).  
+- `taskPiCommsRx` procesa frame v2 de 7 bytes (`0xAA ... crc`) y publica `PiCommsRxSnapshot` con `steer`, `speedCmdCentiMps`, `speedCmdSignedCentiMps`, `speedReverseRequest`, `brake`, `estop`, `driveEnabled` y contadores (`ok/crc/malformed/verErr`).  
 - `taskPiCommsTx` envía frame v2 de 8 bytes (`0x55 ... crc`) con:
-  - `speed_meas_u16` (`m/s x100`, Hall; `0xFFFF` si N/A),
+  - `speed_meas_u16` (`m/s x100`, Hall absoluto; `0xFFFF` si N/A),
   - `steer_meas_i16` (`deg x100` centrado; `-32768` si N/A),
   - `brake_applied_u8` real,
   - `status_flags` (`READY`, `ESTOP_ACTIVE`, `FAILSAFE_ACTIVE`, `PI_FRESH`, `CONTROL_SOURCE`, `OVERSPEED_ACTIVE`).
 - `taskQuadDriveControl` consume el snapshot:  
   - `ESTOP` → freno completo y duty mínimo.  
-  - `DRIVE_EN` + `speed_cmd_u16` -> setpoint de velocidad (`m/s`) para PID Hall, clamped a `spid.max`.  
+  - `DRIVE_EN` + `speed_cmd_u16` + `REV_REQ` -> setpoint firmado (`m/s`) para PID Hall, clamp asimétrico `[-rev.max, +spid.max]` (default `rev.max=1.35 m/s`).  
+  - `target< -0.05` solicita `REV`; `target=0`, `DRIVE_EN=0` o stale fuerzan `FWD`.
+  - En REV clamped con error sostenido se activa anti-windup reforzado para descargar integrador más rápido.
   - con frame fresco de Pi, freno aplicado = `max(brake_u8_pi, brake_overspeed_auto)` (y `ESTOP` fuerza 100 %).  
 - `taskPidControl` usa `steer` de Pi cuando el frame está fresco (<=120 ms); si no, vuelve a steering RC.  
 - Para inspeccionar el estado usa Telnet (`comms.status`, `comms.reset`) o activa `debug::kLogPiComms`.  
@@ -137,23 +139,31 @@ Troubleshooting OTA rapido:
 
 ## Velocidad Hall (GPIO ISR IRAM)
 
-- Backend activo: lectura Hall por ISR en IRAM sobre `GPIO26`, `GPIO27`, `GPIO14` (active-low).
-- Parámetros actuales: `motorPoles=8`, `gearReduction=10.0`, `wheelDiameterM=0.45`, `rpmTimeoutUs=500000`.
-- La telemetría de velocidad UART se reporta como `speed_meas_u16` en `m/s x100` desde Hall.
+- Backend activo: lectura Hall por ISR en IRAM sobre `GPIO26`, `GPIO27`, `GPIO14` (active-low), con detección de sentido por secuencia Hall.
+- Parámetros actuales: `motorPoles=8`, `gearReduction=10.0`, `wheelDiameterM=0.45`, `rpmTimeoutUs=500000`, `directionInverted=true`.
+- `speed.status` reporta velocidad Hall firmada (`+` FWD, `-` REV) y en stale fuerza `0` con `dir=UNK`.
+- La telemetría UART a Pi se mantiene en magnitud (`speed_meas_u16` en `m/s x100` absoluto) en esta fase.
 - Comandos Telnet:
-  - `speed.status` muestra snapshot Hall (`km/h`, `m/s`) y contadores ISR/validación.
+  - `speed.status` muestra snapshot Hall firmado (`dir`, `km/h`, `m/s`, `speedAbs`) y contadores ISR/validación.
   - `speed.reset` reinicia contadores Hall.
   - `speed.stream on [ms]` / `speed.stream off` habilita stream periódico por Telnet.
   - `speed.uart` responde `N/A source=hall` (ya no existe backend UART de velocidad).
   - `sys.rt`, `sys.stack`, `sys.jitter on [ms]|off`, `sys.reset [keep|full]` exponen métricas RT/stack y permiten resetear acumulados por etapa.
   - `pid.status`, `pid.deadband`, `pid.minactive`, `pid.stream on [ms]` / `pid.stream off` permiten debug/tuning del PID de direccion en vivo.
-  - `spid.status`, `spid.set`, `spid.kp/ki/kd`, `spid.ramp`, `spid.minthrottle`, `spid.thslewup`, `spid.thslewdown`, `spid.minth.spd`, `spid.launchwin`, `spid.iunwind`, `spid.dfilter`, `spid.max`, `spid.brakecap`, `spid.hys`, `spid.brakeslewup`, `spid.brakeslewdown`, `spid.brakehold`, `spid.brakedb`, `spid.target`, `spid.save`, `spid.reset` ajustan PID de velocidad (incluye `p/i/d`, salida saturada/no saturada, launch-assist controlado y persistencia NVS `speed_pid` `ver=4`).
+  - `spid.status`, `spid.set`, `spid.kp/ki/kd`, `spid.ramp`, `spid.minthrottle`, `spid.thslewup`, `spid.thslewdown`, `spid.minth.spd`, `spid.launchwin`, `spid.iunwind`, `spid.dfilter`, `spid.max`, `spid.maxrev`, `spid.awx`, `spid.brakecap`, `spid.hys`, `spid.brakeslewup`, `spid.brakeslewdown`, `spid.brakehold`, `spid.brakedb`, `spid.target`, `spid.save`, `spid.reset` ajustan PID de velocidad (incluye `spid.target` firmado con clamp asimétrico `[-rev.max,+max]`, salida saturada/no saturada, launch-assist controlado y persistencia NVS `speed_pid` `ver=4`).
   - `spid.stream on [ms]` / `spid.stream off` permite monitoreo continuo de estado/tuning PID.
   - `drive.log on|off` habilita/deshabilita logs `[DRIVE]` base.
   - `drive.log pid on [ms] | drive.log pid off` habilita/deshabilita trace forense periódico `[DRIVE][PIDTRACE]` para analizar estabilidad de velocidad y autofrenado (`target`, `speed`, `PWM`, `P/I/D`, `throttleRaw/Filt`, `launchAssistActive`, `throttleSaturated`, `integratorClamped`, `brakeA_pct`, `brakeB_pct`, `failsafe/overspeed/inhibit`).
     Operación normal recomendada: mantener `drive.log pid off` (el trace se reinicia a OFF al cerrar sesión Telnet).
+  - Reversa por setpoint firmado (Pi/Telnet): `spid.target +v` (FWD), `spid.target -v` (REV), `spid.target 0|off` (FWD).
+  - Reversa manual de banco: `drive.pwm on 0`, `drive.dir rev|fwd`, `drive.pwm <0..100>`, `drive.pwm off`.
+    - Relé de reversa en `GPIO4`, activo en `HIGH` (`ON=FWD`, `OFF=REV`).
+    - Conmutación segura con retardos `300ms + 300ms`; durante switching se inhibe tracción.
+    - Al salir de `drive.pwm` o cerrar Telnet, fuerza automáticamente `FWD`.
+    - RC mantiene control forward-only; Pi y `spid.target` ya soportan setpoint firmado para reversa.
   - `exit` (alias `quit`, `logout`) cierra la sesion Telnet actual.
   - `python3 tools/tests/speed_pid_hil.py --mode interactive` ejecuta pruebas HIL guiadas del PID de velocidad (evidencia en `artifacts/speed_pid_test_report.json` y `.md`).
+  - `python3 tools/tests/reverse_pid_autotune_hil.py --host esp32-salus.local` ejecuta autotuning de reversa (`spid.maxrev` + `spid.awx`) y aplica la mejor combinación.
   - `python3 tools/tests/system_rt_hil.py --host <esp32-host>` ejecuta captura estructurada de `TC-RT-01/TC-RT-02` usando `sys.rt/sys.stack/sys.jitter` y `sys.reset`.
     El runner valida por defecto `PiUartRx` con umbral realista `p95<=800us`, `p99<=2000us` (ajustable con `--pi-rx-p95-max-us` y `--pi-rx-p99-max-us`).
 
