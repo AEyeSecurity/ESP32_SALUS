@@ -69,10 +69,12 @@ struct QuadDriveRcDebugSnapshot {
   int rawThrottle;
   int filteredThrottle;
   int normalizedThrottle;
+  int rcAuxReverse;
   bool rcFresh;
   uint32_t snapshotAgeMs;
   bool rcManualBrakeActive;
   bool rcSpeedPidEligible;
+  bool rcReverseRequest;
   bool rcSourceLatched;
   bool rcNeutralOffsetCalEnabled;
   bool rcNeutralOffsetCalAllowed;

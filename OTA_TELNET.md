@@ -153,8 +153,8 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low), con dirección por s
 - `spid.iunwind <gain>`: descarga del integrador en saturación (`anti-windup`, default `0.35`).
 - `spid.dfilter <hz>`: filtro del derivativo sobre medición Hall (default `3.0`).
 - `spid.max <mps>`: ajusta velocidad máxima usada para clamp de setpoints remotos/RC (default `4.17`, equivalente a `15 km/h`).
-- `spid.maxrev <mps>`: ajusta clamp máximo de magnitud en reversa (default `1.35`).
-- `spid.awx <scale>`: ajusta multiplicador de anti-windup en reversa clamped (default `3.0`).
+- `spid.maxrev <mps>`: ajusta clamp máximo de magnitud en reversa (default `1.30`).
+- `spid.awx <scale>`: ajusta multiplicador de anti-windup en reversa clamped (default `2.5`).
 - `spid.brakecap <pct>`: tope de freno automático por overspeed (`0..100`, default `30`).
 - `spid.hys <mps>`: histéresis de salida de overspeed (default `0.3`).
 - `spid.brakeslewup <pctps>`: limita subida del freno automático (`%/s`, default `35`).
@@ -162,7 +162,7 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low), con dirección por s
 - `spid.brakehold <ms>`: tiempo mínimo en overspeed antes de liberar (`ms`, default `200`).
 - `spid.brakedb <pct>`: banda muerta del freno automático (no mueve servo por debajo de este valor, default `3`).
 - `spid.target <mps|off>`: override de setpoint de velocidad firmado por Telnet para pruebas HIL (`+` limitado por `spid.max`, `-` limitado por `rev.max` default `1.35 m/s`). `off` devuelve el control a PI/RC.
-- `drive.rc.status`: snapshot del camino RC hacia `speed_pid` (`raw/filt/norm`, `fresh`, `elig`, `latched`, estado de auto-calibración neutral y `targetRaw/targetShaped`).
+- `drive.rc.status`: snapshot del camino RC hacia `speed_pid` (`raw/filt/norm`, `aux5`, `fresh`, `elig`, `revReq`, `latched`, estado de auto-calibración neutral y `targetRaw/targetShaped`).
 - `drive.rc.stream on [ms] | drive.rc.stream off`: stream periódico de `drive.rc.status` (`50..1000 ms`, default `100 ms`).
 - `drive.rc.cal on|off`: habilita o congela la auto-calibración del offset neutral del filtro RC.
 - `drive.pwm <0..100> | drive.pwm off`: override directo de PWM para pruebas de banco.
@@ -198,18 +198,19 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low), con dirección por s
   - `[DRIVE][EVENT] OVERSPEED_ENTER/EXIT`
   - `[DRIVE][EVENT] THROTTLE_INHIBIT reason=...`
 
-## Reversa (`PI` firmado + Telnet)
+## Reversa (`PI` firmado + Telnet + RC CH5)
 
 - Pi (`comms`): `ver_flags bit2 = REV_REQ` define el signo del setpoint (`speed_cmd_u16` sigue siendo magnitud).
 - Telnet (`spid.target`): acepta setpoints firmados (`+` FWD, `-` REV) para simular pedidos Pi sin Raspy.
+- RC (`CH5/AUX1`): switch alto solicita `REV`, switch bajo solicita `FWD` (aplica histéresis y permite latch corto durante dropout RC).
 - Hardware: relé en `GPIO4`, activo en `HIGH` (`ON=FWD`, `OFF=REV`).
 - Seguridad:
   - Cambio de dirección con secuencia `pre=300ms`, conmutación relé, `post=300ms`.
   - Durante `switching` se inhibe tracción.
   - Sin solicitud efectiva de reversa (`target=0`, `DRIVE_EN=0` o stale) se fuerza `FWD`.
 - Clamp/anti-windup REV:
-  - Objetivo firmado clamp asimétrico: `+` hasta `spid.max`, `-` hasta `rev.max` (default `1.35 m/s`).
-  - Si REV queda clamped y persiste error positivo, el controlador usa `iunwind` escalado (default `x3`) para descargar integrador más rápido.
+  - Objetivo firmado clamp asimétrico: `+` hasta `spid.max`, `-` hasta `rev.max` (default `1.30 m/s`).
+  - Si REV queda clamped y persiste error positivo, el controlador usa `iunwind` escalado (default `x2.5`) para descargar integrador más rápido.
 - Flujo recomendado de simulación HIL:
   1. `spid.target 1.0` (FWD)
   2. `spid.target -1.0` (REV)

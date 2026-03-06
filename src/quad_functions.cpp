@@ -219,6 +219,8 @@ constexpr TickType_t kSpeedPidFeedbackRunGraceTicks = pdMS_TO_TICKS(1000);
 constexpr float kSpeedPidStoppedMpsThreshold = 0.05f;
 constexpr TickType_t kRcSourceDropoutGraceTicks = pdMS_TO_TICKS(150);
 constexpr int kRcNeutralDeadbandPercent = 3;
+constexpr int kRcReverseEnableThreshold = 25;
+constexpr int kRcReverseDisableThreshold = -25;
 // Respuesta RC mas directa sin tocar ganancias del PID.
 constexpr float kRcTargetSlewMps2Up = 4.0f;
 constexpr float kRcTargetSlewMps2Down = 5.0f;
@@ -936,11 +938,13 @@ QuadDriveRuntimeSnapshot makeDriveRuntimeSnapshot(bool commandFromPwmOverride,
 QuadDriveRcDebugSnapshot makeRcDebugSnapshot(int rawThrottle,
                                              int rcFilteredThrottle,
                                              int rcValue,
+                                             int rcAuxReverseValue,
                                              bool rcFresh,
                                              TickType_t sampleTick,
                                              TickType_t snapshotTick,
                                              bool rcManualBrakeActive,
                                              bool rcSpeedPidEligible,
+                                             bool rcReverseRequested,
                                              bool rcUsingLatchThisCycle,
                                              float rcTargetRawMpsDebug,
                                              float rcTargetShapedMpsDebug) {
@@ -948,11 +952,13 @@ QuadDriveRcDebugSnapshot makeRcDebugSnapshot(int rawThrottle,
   rcDebug.rawThrottle = rawThrottle;
   rcDebug.filteredThrottle = rcFilteredThrottle;
   rcDebug.normalizedThrottle = rcValue;
+  rcDebug.rcAuxReverse = rcAuxReverseValue;
   rcDebug.rcFresh = rcFresh;
   rcDebug.snapshotAgeMs =
       (snapshotTick != 0) ? static_cast<uint32_t>((sampleTick - snapshotTick) * portTICK_PERIOD_MS) : 0u;
   rcDebug.rcManualBrakeActive = rcManualBrakeActive;
   rcDebug.rcSpeedPidEligible = rcSpeedPidEligible;
+  rcDebug.rcReverseRequest = rcReverseRequested;
   rcDebug.rcSourceLatched = rcUsingLatchThisCycle;
   rcDebug.rcNeutralOffsetCalEnabled = g_rcNeutralOffsetCalEnabled;
   rcDebug.rcNeutralOffsetCalAllowed = g_rcNeutralOffsetCalAllowUpdate;
@@ -1019,8 +1025,10 @@ void taskQuadDriveControl(void* parameter) {
   bool lastOverspeedState = false;
   DriveThrottleInhibitReason lastInhibitReason = DriveThrottleInhibitReason::kNone;
   bool lastRcUsingLatchState = false;
+  bool lastRcReverseSwitchActive = false;
   TickType_t rcLastFreshTick = 0;
   bool rcSourceLatched = false;
+  bool rcReverseSwitchActive = false;
   float rcTargetShapedMps = 0.0f;
   float rcLastTargetRawMps = 0.0f;
   float lastSpeedTargetRawMps = 0.0f;
@@ -1100,6 +1108,7 @@ void taskQuadDriveControl(void* parameter) {
         rcValid && rcSnapshot.valid && snapshotTick != 0 && (sampleTick - snapshotTick) <= pdMS_TO_TICKS(50);
     const bool rcFresh = snapshotFresh;
     const int rawThrottle = snapshotFresh ? rcSnapshot.throttle : 0;
+    const int rcAuxReverseValue = snapshotFresh ? rcSnapshot.ch0 : 0;
 
     const int rcValue = updateThrottleFilter(rawThrottle);
     if (snapshotFresh) {
@@ -1146,6 +1155,16 @@ void taskQuadDriveControl(void* parameter) {
     const char* rcPiBlockReason =
         piEstopActive ? "ESTOP" : (piBrakeActive ? "BRAKE" : (piDriveEnabled ? "DRIVE_ON" : "NONE"));
 
+    if (!rcAuthorityAllowed) {
+      rcReverseSwitchActive = false;
+    } else if (rcFresh) {
+      if (rcAuxReverseValue >= kRcReverseEnableThreshold) {
+        rcReverseSwitchActive = true;
+      } else if (rcAuxReverseValue <= kRcReverseDisableThreshold) {
+        rcReverseSwitchActive = false;
+      }
+    }
+
     uint8_t rcBrakePercent = 0;
     if (rcAuthorityAllowed) {
       if (rcFresh) {
@@ -1188,6 +1207,7 @@ void taskQuadDriveControl(void* parameter) {
         (sampleTick - rcLastFreshTick) <= kRcSourceDropoutGraceTicks;
     const bool rcSpeedPidRequested = rcSpeedPidEligible || rcDropoutGraceActive;
     const bool rcUsingLatchThisCycle = (!rcSpeedPidEligible && rcDropoutGraceActive);
+    const bool rcReverseRequested = rcCanLatch && (rcFresh || rcDropoutGraceActive) && rcReverseSwitchActive;
     SpeedControlSource speedControlSource = SpeedControlSource::kNone;
     if (pwmOverrideEnabled) {
       speedControlSource = SpeedControlSource::kNone;
@@ -1326,8 +1346,9 @@ void taskQuadDriveControl(void* parameter) {
           rcReentryHoldBlocksThrottle = true;
           rcTargetShapedMps = 0.0f;
         }
-        rcTargetShapedMpsDebug = rcTargetShapedMps;
-        speedTargetRequestedSignedMps = rcTargetShapedMps;
+        const float rcTargetSignedMps = rcReverseRequested ? -rcTargetShapedMps : rcTargetShapedMps;
+        rcTargetShapedMpsDebug = rcTargetSignedMps;
+        speedTargetRequestedSignedMps = rcTargetSignedMps;
       } else {
         speedTargetRequestedSignedMps = speedTargetOverrideMps;
       }
@@ -1514,9 +1535,11 @@ void taskQuadDriveControl(void* parameter) {
     }
 
     if (!pwmOverrideEnabled) {
+      const bool reverseRequestedByRcSwitch =
+          (speedControlSource == SpeedControlSource::kRcSpeedPid) && rcReverseRequested;
       const bool reverseRequestedBySignedTarget =
           (speedControlSource != SpeedControlSource::kNone) && (speedTargetSignedMps < -0.05f);
-      if (reverseRequestedBySignedTarget) {
+      if (reverseRequestedByRcSwitch || reverseRequestedBySignedTarget) {
         requestDirection(QuadDriveDirection::kReverse);
       } else if (g_reverseConfig.forceForwardWhenPwmOff || speedControlSource != SpeedControlSource::kNone) {
         requestDirection(QuadDriveDirection::kForward);
@@ -1581,11 +1604,13 @@ void taskQuadDriveControl(void* parameter) {
         makeRcDebugSnapshot(rawThrottle,
                             rcFilteredThrottle,
                             rcValue,
+                            rcAuxReverseValue,
                             rcFresh,
                             sampleTick,
                             snapshotTick,
                             rcManualBrakeActive,
                             rcSpeedPidEligible,
+                            rcReverseRequested,
                             rcUsingLatchThisCycle,
                             rcTargetRawMpsDebug,
                             rcTargetShapedMpsDebug);
@@ -1817,6 +1842,21 @@ void taskQuadDriveControl(void* parameter) {
       }
       lastRcUsingLatchState = rcUsingLatchThisCycle;
 
+      if (rcReverseSwitchActive != lastRcReverseSwitchActive &&
+          (sampleTick - lastRcSourceEventTick) >= kDriveEventCooldown) {
+        String msg;
+        msg.reserve(96);
+        msg += "[DRIVE][EVENT] ";
+        msg += rcReverseSwitchActive ? "RC_REV_REQ_ON" : "RC_REV_REQ_OFF";
+        msg += " aux5=";
+        msg += rcAuxReverseValue;
+        msg += " fresh=";
+        msg += rcFresh ? "Y" : "N";
+        broadcastIf(true, msg);
+        lastRcSourceEventTick = sampleTick;
+      }
+      lastRcReverseSwitchActive = rcReverseSwitchActive;
+
       if (prevSpeedControlSource == SpeedControlSource::kRcSpeedPid &&
           speedControlSource != SpeedControlSource::kRcSpeedPid &&
           !piBlocksRc && !speedTargetOverrideEnabled && !rcManualBrakeActive &&
@@ -1959,6 +1999,10 @@ void taskQuadDriveControl(void* parameter) {
           msg += rcFilteredThrottle;
           msg += " rcNorm=";
           msg += rcValue;
+          msg += " rcAux5=";
+          msg += rcAuxReverseValue;
+          msg += " rcRevReq=";
+          msg += rcReverseRequested ? "Y" : "N";
           msg += " rcFresh=";
           msg += rcFresh ? "Y" : "N";
           msg += " rcElig=";
@@ -1980,6 +2024,7 @@ void taskQuadDriveControl(void* parameter) {
     }
     lastRcInputState = rcInputState;
     lastRcUsingLatchState = rcUsingLatchThisCycle;
+    lastRcReverseSwitchActive = rcReverseSwitchActive;
 
     if (driveLogEnabled && !snapshotFresh && !commandFromPi) {
       if ((sampleTick - lastStaleLog) >= pdMS_TO_TICKS(500)) {

@@ -777,6 +777,8 @@ String buildDriveRcStatusMessage() {
   msg += snapshot.filteredThrottle;
   msg += " norm=";
   msg += snapshot.normalizedThrottle;
+  msg += " aux5=";
+  msg += snapshot.rcAuxReverse;
   msg += " fresh=";
   msg += snapshot.rcFresh ? "Y" : "N";
   msg += " ageMs=";
@@ -785,6 +787,8 @@ String buildDriveRcStatusMessage() {
   msg += snapshot.rcManualBrakeActive ? "Y" : "N";
   msg += " elig=";
   msg += snapshot.rcSpeedPidEligible ? "Y" : "N";
+  msg += " revReq=";
+  msg += snapshot.rcReverseRequest ? "Y" : "N";
   msg += " latched=";
   msg += snapshot.rcSourceLatched ? "Y" : "N";
   msg += " cal{en=";

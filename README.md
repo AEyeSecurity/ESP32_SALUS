@@ -129,7 +129,7 @@ Troubleshooting OTA rapido:
   - `status_flags` (`READY`, `ESTOP_ACTIVE`, `FAILSAFE_ACTIVE`, `PI_FRESH`, `CONTROL_SOURCE`, `OVERSPEED_ACTIVE`).
 - `taskQuadDriveControl` consume el snapshot:  
   - `ESTOP` → freno completo y duty mínimo.  
-  - `DRIVE_EN` + `speed_cmd_u16` + `REV_REQ` -> setpoint firmado (`m/s`) para PID Hall, clamp asimétrico `[-rev.max, +spid.max]` (default `rev.max=1.35 m/s`).  
+  - `DRIVE_EN` + `speed_cmd_u16` + `REV_REQ` -> setpoint firmado (`m/s`) para PID Hall, clamp asimétrico `[-rev.max, +spid.max]` (default `rev.max=1.30 m/s`).  
   - `target< -0.05` solicita `REV`; `target=0`, `DRIVE_EN=0` o stale fuerzan `FWD`.
   - En REV clamped con error sostenido se activa anti-windup reforzado para descargar integrador más rápido.
   - con frame fresco de Pi, freno aplicado = `max(brake_u8_pi, brake_overspeed_auto)` (y `ESTOP` fuerza 100 %).  
@@ -160,7 +160,7 @@ Troubleshooting OTA rapido:
     - Relé de reversa en `GPIO4`, activo en `HIGH` (`ON=FWD`, `OFF=REV`).
     - Conmutación segura con retardos `300ms + 300ms`; durante switching se inhibe tracción.
     - Al salir de `drive.pwm` o cerrar Telnet, fuerza automáticamente `FWD`.
-    - RC mantiene control forward-only; Pi y `spid.target` ya soportan setpoint firmado para reversa.
+    - RC usa `CH5` (AUX1) como solicitud de dirección: switch alto `REV`, switch bajo `FWD` (con histéresis y el mismo interlock de conmutación).
   - `exit` (alias `quit`, `logout`) cierra la sesion Telnet actual.
   - `python3 tools/tests/speed_pid_hil.py --mode interactive` ejecuta pruebas HIL guiadas del PID de velocidad (evidencia en `artifacts/speed_pid_test_report.json` y `.md`).
   - `python3 tools/tests/reverse_pid_autotune_hil.py --host esp32-salus.local` ejecuta autotuning de reversa (`spid.maxrev` + `spid.awx`) y aplica la mejor combinación.
