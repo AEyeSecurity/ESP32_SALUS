@@ -49,7 +49,7 @@ struct RcSharedState {
   bool valid;
 };
 
-constexpr uint8_t kRcPpmPin = 17;
+constexpr uint8_t kRcPpmPin = 16;
 
 void taskRcSampler(void* parameter);
 void taskRcMonitor(void* parameter);
