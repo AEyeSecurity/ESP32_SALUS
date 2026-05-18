@@ -1498,7 +1498,8 @@ void taskQuadDriveControl(void* parameter) {
         speedPidMode = speedOutput.mode;
       }
 
-      if (!speedPidFeedbackOk || speedPidFailsafe) {
+      const bool speedPidAllowsThrottle = speedPidFeedbackOk || speedPidLaunchAssistActive;
+      if (!speedPidAllowsThrottle || speedPidFailsafe) {
         commandValue = 0;
         throttleInhibit = true;
       } else {
