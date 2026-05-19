@@ -155,6 +155,8 @@ Troubleshooting OTA rapido:
   - `drive.log on|off` habilita/deshabilita logs `[DRIVE]` base.
   - `drive.log pid on [ms] | drive.log pid off` habilita/deshabilita trace forense periódico `[DRIVE][PIDTRACE]` para analizar estabilidad de velocidad y autofrenado (`target`, `speed`, `PWM`, `P/I/D`, `throttleRaw/Filt`, `launchAssistActive`, `throttleSaturated`, `integratorClamped`, `brakeA_pct`, `brakeB_pct`, `failsafe/overspeed/inhibit`).
     Operación normal recomendada: mantener `drive.log pid off` (el trace se reinicia a OFF al cerrar sesión Telnet).
+  - `drive.brake on [pct] | drive.brake off | drive.brake status` permite aplicar freno manual por Telnet para debug.
+  - `drive.brake release A B`, `drive.brake apply A B` y `drive.brake range relA applyA relB applyB` ajustan angulos start/end runtime de los servos de freno.
   - Reversa por setpoint firmado (Pi/Telnet): `spid.target +v` (FWD), `spid.target -v` (REV), `spid.target 0|off` (FWD).
   - Reversa manual de banco: `drive.pwm on 0`, `drive.dir rev|fwd`, `drive.pwm <0..100>`, `drive.pwm off`.
     - Relé de reversa en `GPIO4`, activo en `HIGH` (`ON=FWD`, `OFF=REV`).

@@ -24,6 +24,9 @@ QuadBrakeConfig g_brakeConfig{};
 uint32_t g_brakeMaxDuty = 0;
 uint32_t g_brakePeriodUs = 20000;
 bool g_brakeInitialized = false;
+bool g_brakeOverrideEnabled = false;
+uint8_t g_brakeOverridePercent = 0;
+portMUX_TYPE g_brakeMux = portMUX_INITIALIZER_UNLOCKED;
 
 struct BrakeServoAngles {
   int servoA;
@@ -241,6 +244,7 @@ enum class DriveThrottleInhibitReason : uint8_t {
   kEstop,
   kPiBrake,
   kRcBrake,
+  kBrakeOverride,
   kOverspeed,
   kFailsafe,
 };
@@ -418,6 +422,8 @@ const char* driveThrottleInhibitReasonText(DriveThrottleInhibitReason reason) {
       return "PI_BRAKE";
     case DriveThrottleInhibitReason::kRcBrake:
       return "RC_BRAKE";
+    case DriveThrottleInhibitReason::kBrakeOverride:
+      return "BRAKE_OVERRIDE";
     case DriveThrottleInhibitReason::kOverspeed:
       return "OVERSPEED";
     case DriveThrottleInhibitReason::kFailsafe:
@@ -679,6 +685,63 @@ void quadBrakeApplyPercent(uint8_t percent) {
   applyBrakeAngles(targetAngleA, targetAngleB);
 }
 
+bool quadBrakeSetReleaseAngles(int servoADeg, int servoBDeg) {
+  if (!g_brakeInitialized) {
+    return false;
+  }
+  portENTER_CRITICAL(&g_brakeMux);
+  g_brakeConfig.releaseAngleServoADeg = clampAngle(servoADeg);
+  g_brakeConfig.releaseAngleServoBDeg = clampAngle(servoBDeg);
+  portEXIT_CRITICAL(&g_brakeMux);
+  return true;
+}
+
+bool quadBrakeSetApplyAngles(int servoADeg, int servoBDeg) {
+  if (!g_brakeInitialized) {
+    return false;
+  }
+  portENTER_CRITICAL(&g_brakeMux);
+  g_brakeConfig.brakeAngleServoADeg = clampAngle(servoADeg);
+  g_brakeConfig.brakeAngleServoBDeg = clampAngle(servoBDeg);
+  portEXIT_CRITICAL(&g_brakeMux);
+  return true;
+}
+
+bool quadBrakeSetAngleRange(int releaseServoADeg,
+                            int applyServoADeg,
+                            int releaseServoBDeg,
+                            int applyServoBDeg) {
+  if (!g_brakeInitialized) {
+    return false;
+  }
+  portENTER_CRITICAL(&g_brakeMux);
+  g_brakeConfig.releaseAngleServoADeg = clampAngle(releaseServoADeg);
+  g_brakeConfig.brakeAngleServoADeg = clampAngle(applyServoADeg);
+  g_brakeConfig.releaseAngleServoBDeg = clampAngle(releaseServoBDeg);
+  g_brakeConfig.brakeAngleServoBDeg = clampAngle(applyServoBDeg);
+  portEXIT_CRITICAL(&g_brakeMux);
+  return true;
+}
+
+bool quadBrakeGetDebugSnapshot(QuadBrakeDebugSnapshot& out) {
+  portENTER_CRITICAL(&g_brakeMux);
+  out.initialized = g_brakeInitialized;
+  out.overrideEnabled = g_brakeOverrideEnabled;
+  out.overridePercent = g_brakeOverridePercent;
+  out.releaseAngleServoADeg = g_brakeConfig.releaseAngleServoADeg;
+  out.brakeAngleServoADeg = g_brakeConfig.brakeAngleServoADeg;
+  out.releaseAngleServoBDeg = g_brakeConfig.releaseAngleServoBDeg;
+  out.brakeAngleServoBDeg = g_brakeConfig.brakeAngleServoBDeg;
+  out.currentAngleServoADeg = g_brakeCurrentAngles.servoA;
+  out.currentAngleServoBDeg = g_brakeCurrentAngles.servoB;
+  out.servoPinA = g_brakeConfig.servoPinA;
+  out.servoPinB = g_brakeConfig.servoPinB;
+  out.ledcChannelA = g_brakeConfig.ledcChannelA;
+  out.ledcChannelB = g_brakeConfig.ledcChannelB;
+  portEXIT_CRITICAL(&g_brakeMux);
+  return true;
+}
+
 bool quadDriveSetLogEnabled(bool enabled) {
   portENTER_CRITICAL(&g_driveLogMux);
   g_driveLogEnabled = enabled;
@@ -770,6 +833,25 @@ bool quadDriveGetPwmOverride(bool& enabledOut, int& percentOut) {
   enabledOut = g_pwmOverrideEnabled;
   percentOut = g_pwmOverridePercent;
   portEXIT_CRITICAL(&g_pwmOverrideMux);
+  return true;
+}
+
+bool quadDriveSetBrakeOverride(bool enabled, uint8_t percent) {
+  if (percent > 100u) {
+    percent = 100u;
+  }
+  portENTER_CRITICAL(&g_brakeMux);
+  g_brakeOverrideEnabled = enabled;
+  g_brakeOverridePercent = enabled ? percent : 0u;
+  portEXIT_CRITICAL(&g_brakeMux);
+  return true;
+}
+
+bool quadDriveGetBrakeOverride(bool& enabledOut, uint8_t& percentOut) {
+  portENTER_CRITICAL(&g_brakeMux);
+  enabledOut = g_brakeOverrideEnabled;
+  percentOut = g_brakeOverridePercent;
+  portEXIT_CRITICAL(&g_brakeMux);
   return true;
 }
 
@@ -867,7 +949,9 @@ uint8_t resolveAppliedBrakePercent(bool piBlocksRc,
                                    bool piEstopActive,
                                    uint8_t piBrakePercent,
                                    uint8_t rcBrakePercent,
-                                   uint8_t overspeedBrakePercent) {
+                                   uint8_t overspeedBrakePercent,
+                                   bool brakeOverrideEnabled,
+                                   uint8_t brakeOverridePercent) {
   uint8_t appliedBrakePercent = 0;
   if (piBlocksRc) {
     appliedBrakePercent = (piBrakePercent >= overspeedBrakePercent) ? piBrakePercent : overspeedBrakePercent;
@@ -876,6 +960,9 @@ uint8_t resolveAppliedBrakePercent(bool piBlocksRc,
     }
   } else {
     appliedBrakePercent = (rcBrakePercent >= overspeedBrakePercent) ? rcBrakePercent : overspeedBrakePercent;
+  }
+  if (brakeOverrideEnabled && brakeOverridePercent > appliedBrakePercent) {
+    appliedBrakePercent = brakeOverridePercent;
   }
   return appliedBrakePercent;
 }
@@ -887,7 +974,9 @@ DriveThrottleInhibitReason resolveThrottleInhibitReason(bool piEstopActive,
                                                         bool piBlocksRc,
                                                         uint8_t piBrakePercent,
                                                         uint8_t rcBrakePercent,
-                                                        uint8_t overspeedBrakePercent) {
+                                                        uint8_t overspeedBrakePercent,
+                                                        bool brakeOverrideEnabled,
+                                                        uint8_t brakeOverridePercent) {
   if (piEstopActive) {
     return DriveThrottleInhibitReason::kEstop;
   }
@@ -899,6 +988,9 @@ DriveThrottleInhibitReason resolveThrottleInhibitReason(bool piEstopActive,
   }
   if (!piBlocksRc && rcBrakePercent > 0) {
     return DriveThrottleInhibitReason::kRcBrake;
+  }
+  if (brakeOverrideEnabled && brakeOverridePercent > 0) {
+    return DriveThrottleInhibitReason::kBrakeOverride;
   }
   if (overspeedBrakePercent > 0) {
     return DriveThrottleInhibitReason::kOverspeed;
@@ -1135,6 +1227,9 @@ void taskQuadDriveControl(void* parameter) {
     bool pwmOverrideEnabled = false;
     int pwmOverridePercent = 0;
     quadDriveGetPwmOverride(pwmOverrideEnabled, pwmOverridePercent);
+    bool brakeOverrideEnabled = false;
+    uint8_t brakeOverridePercent = 0;
+    quadDriveGetBrakeOverride(brakeOverrideEnabled, brakeOverridePercent);
     QuadDriveDirection driveDirection = QuadDriveDirection::kForward;
     bool directionSwitching = false;
     bool relayEnergized = false;
@@ -1555,8 +1650,13 @@ void taskQuadDriveControl(void* parameter) {
       overspeedBrakePercent = clampPercentFromFloat(speedPidBrakePercent);
     }
 
-    const uint8_t appliedBrakePercent =
-        resolveAppliedBrakePercent(piBlocksRc, piEstopActive, piBrakePercent, rcBrakePercent, overspeedBrakePercent);
+    const uint8_t appliedBrakePercent = resolveAppliedBrakePercent(piBlocksRc,
+                                                                   piEstopActive,
+                                                                   piBrakePercent,
+                                                                   rcBrakePercent,
+                                                                   overspeedBrakePercent,
+                                                                   brakeOverrideEnabled,
+                                                                   brakeOverridePercent);
     const DriveThrottleInhibitReason inhibitReason =
         resolveThrottleInhibitReason(piEstopActive,
                                      speedControlSource,
@@ -1565,7 +1665,9 @@ void taskQuadDriveControl(void* parameter) {
                                      piBlocksRc,
                                      piBrakePercent,
                                      rcBrakePercent,
-                                     overspeedBrakePercent);
+                                     overspeedBrakePercent,
+                                     brakeOverrideEnabled,
+                                     brakeOverridePercent);
 
     if (appliedBrakePercent > 0 || inhibitReason != DriveThrottleInhibitReason::kNone || directionSwitching) {
       throttleInhibit = true;

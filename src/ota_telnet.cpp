@@ -233,6 +233,7 @@ void resetTelnetSession() {
   quadDriveSetLogEnabled(false);
   quadDriveSetPidTraceEnabled(false, kDrivePidTraceDefaultPeriod);
   quadDriveSetPwmOverride(false, 0);
+  quadDriveSetBrakeOverride(false, 0);
   quadDriveSetDirectionOverride(QuadDriveDirection::kForward);
   g_telnetCommandBuffer = "";
   g_speedStreamEnabled = false;
@@ -255,7 +256,7 @@ void openTelnetSession(WiFiClient& incoming) {
   g_telnetClient.println("=== Servidor Telnet ESP32 ===");
   g_telnetClient.println("Conexion establecida correctamente");
   g_telnetClient.println(
-      "Comandos: steer.help | pid.help | spid.help | comms.status | speed.status | speed.reset | speed.stream | speed.uart | pid.stream | spid.stream | spid.target | drive.log | drive.pwm | drive.dir | drive.rc.status | drive.rc.stream | sys.rt | sys.stack | sys.jitter | sys.reset | net.status | exit");
+      "Comandos: steer.help | pid.help | spid.help | comms.status | speed.status | speed.reset | speed.stream | speed.uart | pid.stream | spid.stream | spid.target | drive.log | drive.pwm | drive.brake | drive.dir | drive.rc.status | drive.rc.stream | sys.rt | sys.stack | sys.jitter | sys.reset | net.status | exit");
   reportNetworkStatus();
 }
 
@@ -296,6 +297,49 @@ bool parseIntArg(const String& text, int& valueOut) {
   }
   valueOut = static_cast<int>(parsed);
   return true;
+}
+
+bool parseNextInt(const char*& cursor, int& valueOut) {
+  if (cursor == nullptr) {
+    return false;
+  }
+  while (*cursor != '\0' && isspace(static_cast<unsigned char>(*cursor))) {
+    ++cursor;
+  }
+  if (*cursor == '\0') {
+    return false;
+  }
+  char* endPtr = nullptr;
+  const long parsed = strtol(cursor, &endPtr, 10);
+  if (endPtr == cursor) {
+    return false;
+  }
+  cursor = endPtr;
+  valueOut = static_cast<int>(parsed);
+  return true;
+}
+
+bool parseIntPair(const String& text, int& a, int& b) {
+  const char* cursor = text.c_str();
+  if (!parseNextInt(cursor, a) || !parseNextInt(cursor, b)) {
+    return false;
+  }
+  while (*cursor != '\0' && isspace(static_cast<unsigned char>(*cursor))) {
+    ++cursor;
+  }
+  return *cursor == '\0';
+}
+
+bool parseIntQuad(const String& text, int& a, int& b, int& c, int& d) {
+  const char* cursor = text.c_str();
+  if (!parseNextInt(cursor, a) || !parseNextInt(cursor, b) || !parseNextInt(cursor, c) ||
+      !parseNextInt(cursor, d)) {
+    return false;
+  }
+  while (*cursor != '\0' && isspace(static_cast<unsigned char>(*cursor))) {
+    ++cursor;
+  }
+  return *cursor == '\0';
 }
 
 bool parseNextFloat(const char*& cursor, float& valueOut) {
@@ -691,6 +735,41 @@ void reportDrivePwmOverrideStatus() {
   msg += " duty=";
   msg += percent;
   msg += "%";
+  sendTelnet(msg);
+}
+
+void reportDriveBrakeStatus() {
+  QuadBrakeDebugSnapshot snapshot{};
+  if (!quadBrakeGetDebugSnapshot(snapshot)) {
+    sendTelnet("[DRIVE][BRAKE] N/A");
+    return;
+  }
+  String msg = "[DRIVE][BRAKE] ";
+  msg += snapshot.initialized ? "READY" : "NOINIT";
+  msg += " override=";
+  msg += snapshot.overrideEnabled ? "ON" : "OFF";
+  msg += " pct=";
+  msg += snapshot.overridePercent;
+  msg += "% currentA=";
+  msg += snapshot.currentAngleServoADeg;
+  msg += "deg currentB=";
+  msg += snapshot.currentAngleServoBDeg;
+  msg += "deg releaseA=";
+  msg += snapshot.releaseAngleServoADeg;
+  msg += "deg applyA=";
+  msg += snapshot.brakeAngleServoADeg;
+  msg += "deg releaseB=";
+  msg += snapshot.releaseAngleServoBDeg;
+  msg += "deg applyB=";
+  msg += snapshot.brakeAngleServoBDeg;
+  msg += "deg pins=";
+  msg += snapshot.servoPinA;
+  msg += "/";
+  msg += snapshot.servoPinB;
+  msg += " ch=";
+  msg += snapshot.ledcChannelA;
+  msg += "/";
+  msg += snapshot.ledcChannelB;
   sendTelnet(msg);
 }
 
@@ -2219,6 +2298,113 @@ bool handleDriveCommand(const String& command, const String& args) {
     msg += dutyPercent;
     msg += "%";
     sendTelnet(msg);
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("drive.brake")) {
+    if (args.isEmpty()) {
+      reportDriveBrakeStatus();
+      return true;
+    }
+
+    String normalized = args;
+    normalized.toLowerCase();
+    normalized.trim();
+
+    if (normalized == "status") {
+      reportDriveBrakeStatus();
+      return true;
+    }
+
+    if (normalized == "off" || normalized == "0" || normalized == "release") {
+      quadDriveSetBrakeOverride(false, 0);
+      sendTelnet("[DRIVE][BRAKE] OFF");
+      reportDriveBrakeStatus();
+      return true;
+    }
+
+    if (normalized.startsWith("release ") || normalized.startsWith("start ")) {
+      const int subcommandLen = normalized.startsWith("release ") ? 7 : 5;
+      int angleA = 0;
+      int angleB = 0;
+      String valueText = args.substring(subcommandLen);
+      valueText.trim();
+      if (!parseIntPair(valueText, angleA, angleB) || angleA < 0 || angleA > 180 || angleB < 0 || angleB > 180) {
+        sendTelnet("[DRIVE][BRAKE] Uso: drive.brake release <servoA_deg> <servoB_deg> (0..180)");
+        return true;
+      }
+      if (!quadBrakeSetReleaseAngles(angleA, angleB)) {
+        sendTelnet("[DRIVE][BRAKE] Freno no inicializado");
+        return true;
+      }
+      sendTelnet("[DRIVE][BRAKE] Release/start actualizado");
+      reportDriveBrakeStatus();
+      return true;
+    }
+
+    if (normalized.startsWith("apply ") || normalized.startsWith("end ")) {
+      const int subcommandLen = normalized.startsWith("apply ") ? 5 : 3;
+      int angleA = 0;
+      int angleB = 0;
+      String valueText = args.substring(subcommandLen);
+      valueText.trim();
+      if (!parseIntPair(valueText, angleA, angleB) || angleA < 0 || angleA > 180 || angleB < 0 || angleB > 180) {
+        sendTelnet("[DRIVE][BRAKE] Uso: drive.brake apply <servoA_deg> <servoB_deg> (0..180)");
+        return true;
+      }
+      if (!quadBrakeSetApplyAngles(angleA, angleB)) {
+        sendTelnet("[DRIVE][BRAKE] Freno no inicializado");
+        return true;
+      }
+      sendTelnet("[DRIVE][BRAKE] Apply/end actualizado");
+      reportDriveBrakeStatus();
+      return true;
+    }
+
+    if (normalized.startsWith("range ")) {
+      int releaseA = 0;
+      int applyA = 0;
+      int releaseB = 0;
+      int applyB = 0;
+      String valueText = args.substring(5);
+      valueText.trim();
+      if (!parseIntQuad(valueText, releaseA, applyA, releaseB, applyB) || releaseA < 0 || releaseA > 180 ||
+          applyA < 0 || applyA > 180 || releaseB < 0 || releaseB > 180 || applyB < 0 || applyB > 180) {
+        sendTelnet("[DRIVE][BRAKE] Uso: drive.brake range <relA> <applyA> <relB> <applyB> (0..180)");
+        return true;
+      }
+      if (!quadBrakeSetAngleRange(releaseA, applyA, releaseB, applyB)) {
+        sendTelnet("[DRIVE][BRAKE] Freno no inicializado");
+        return true;
+      }
+      sendTelnet("[DRIVE][BRAKE] Rango actualizado");
+      reportDriveBrakeStatus();
+      return true;
+    }
+
+    int percent = 100;
+    if (normalized.startsWith("on")) {
+      String valueText = args.substring(2);
+      valueText.trim();
+      if (!valueText.isEmpty() && !parseIntArg(valueText, percent)) {
+        sendTelnet("[DRIVE][BRAKE] Uso: drive.brake on [0..100]");
+        return true;
+      }
+    } else if (!parseIntArg(args, percent)) {
+      sendTelnet("[DRIVE][BRAKE] Uso: drive.brake [on [pct]|off|pct|release A B|apply A B|range relA applyA relB applyB]");
+      return true;
+    }
+
+    if (percent < 0 || percent > 100) {
+      sendTelnet("[DRIVE][BRAKE] Porcentaje fuera de rango (0..100)");
+      return true;
+    }
+    quadDriveSetBrakeOverride(true, static_cast<uint8_t>(percent));
+    String msg = "[DRIVE][BRAKE] ON pct=";
+    msg += percent;
+    msg += "%";
+    sendTelnet(msg);
+    reportDriveBrakeStatus();
     return true;
   }
 

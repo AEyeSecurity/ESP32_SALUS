@@ -198,6 +198,16 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low), con dirección por s
   - `[DRIVE][EVENT] OVERSPEED_ENTER/EXIT`
   - `[DRIVE][EVENT] THROTTLE_INHIBIT reason=...`
 
+## Debug de frenos (`drive.brake`)
+
+- `drive.brake` o `drive.brake status`: muestra override, porcentaje, angulos actuales, rangos y pines/canales.
+- `drive.brake on [pct]` o `drive.brake <pct>`: activa override manual de freno (`0..100`, default `100`). Inhibe throttle mientras `pct > 0`.
+- `drive.brake off`: desactiva override manual y vuelve a release/start.
+- `drive.brake release <servoA_deg> <servoB_deg>`: ajusta el angulo start/release runtime de ambos servos (`0..180`).
+- `drive.brake apply <servoA_deg> <servoB_deg>`: ajusta el angulo end/apply runtime de ambos servos (`0..180`).
+- `drive.brake range <relA> <applyA> <relB> <applyB>`: ajusta start/end de ambos servos en una sola linea.
+- Los ajustes son runtime para debug: no se guardan en NVS ni sobreviven reinicio.
+
 ## Reversa (`PI` firmado + Telnet + RC CH5)
 
 - Pi (`comms`): `ver_flags bit2 = REV_REQ` define el signo del setpoint (`speed_cmd_u16` sigue siendo magnitud).

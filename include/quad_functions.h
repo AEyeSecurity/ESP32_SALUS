@@ -50,9 +50,30 @@ struct QuadBrakeConfig {
   int activationThreshold;  // negative threshold (e.g. -15)
 };
 
+struct QuadBrakeDebugSnapshot {
+  bool initialized;
+  bool overrideEnabled;
+  uint8_t overridePercent;
+  int releaseAngleServoADeg;
+  int brakeAngleServoADeg;
+  int releaseAngleServoBDeg;
+  int brakeAngleServoBDeg;
+  int currentAngleServoADeg;
+  int currentAngleServoBDeg;
+  uint8_t servoPinA;
+  uint8_t servoPinB;
+  uint8_t ledcChannelA;
+  uint8_t ledcChannelB;
+};
+
 void initQuadBrake(const QuadBrakeConfig& config);
 void quadBrakeUpdate(int rcValue);
 void quadBrakeRelease();
+void quadBrakeApplyPercent(uint8_t percent);
+bool quadBrakeSetReleaseAngles(int servoADeg, int servoBDeg);
+bool quadBrakeSetApplyAngles(int servoADeg, int servoBDeg);
+bool quadBrakeSetAngleRange(int releaseServoADeg, int applyServoADeg, int releaseServoBDeg, int applyServoBDeg);
+bool quadBrakeGetDebugSnapshot(QuadBrakeDebugSnapshot& out);
 
 struct QuadDriveTaskConfig {
   QuadThrottleConfig throttle;
@@ -113,6 +134,8 @@ bool quadDriveSetSpeedTargetOverride(bool enabled, float targetMps);
 bool quadDriveGetSpeedTargetOverride(bool& enabledOut, float& targetMpsOut);
 bool quadDriveSetPwmOverride(bool enabled, int percent);
 bool quadDriveGetPwmOverride(bool& enabledOut, int& percentOut);
+bool quadDriveSetBrakeOverride(bool enabled, uint8_t percent);
+bool quadDriveGetBrakeOverride(bool& enabledOut, uint8_t& percentOut);
 bool quadDriveSetDirectionOverride(QuadDriveDirection dir);
 bool quadDriveGetDirectionStatus(QuadDriveDirection& dirOut, bool& switchingOut, bool& relayEnergizedOut);
 bool quadDriveGetDirectionConfig(uint8_t& relayPinOut, bool& activeLowOut);
