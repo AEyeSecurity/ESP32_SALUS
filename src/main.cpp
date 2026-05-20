@@ -14,7 +14,7 @@
 #include "speed_pid.h"
 #include "system_diag.h"
 
-constexpr uint16_t STACK_OTA = 4096;
+constexpr uint16_t STACK_OTA = 8192;
 constexpr uint16_t STACK_BRIDGE = 4096;
 constexpr uint16_t STACK_RC = 2048;
 constexpr uint16_t STACK_AS5600 = 3072;
