@@ -49,11 +49,41 @@ struct RcSharedState {
   bool valid;
 };
 
+struct RcRawDebugSnapshot {
+  bool rmtInitialized;
+  bool ppmPolarityLocked;
+  uint8_t ppmMarkerLevel;
+  uint8_t trustedFrameCount;
+  uint32_t rawBursts;
+  uint32_t decodedFrames;
+  uint32_t decodeFailures;
+  uint32_t rmtRestarts;
+  uint32_t rmtRestartErrors;
+  int lastRmtRestartErr;
+  uint32_t gpioEdges;
+  uint32_t gpioPpmFrames;
+  uint32_t gpioPpmErrors;
+  uint32_t lastGpioEdgeUs;
+  uint8_t gpioLevel;
+  TickType_t lastGpioFrameTick;
+  TickType_t lastRawTick;
+  TickType_t lastDecodedTick;
+  TickType_t lastRmtRestartTick;
+  size_t lastRawItemCount;
+  uint8_t lastChannelCount;
+  uint8_t sampleItemCount;
+  uint16_t sampleDuration0[4];
+  uint16_t sampleDuration1[4];
+  uint8_t sampleLevel0[4];
+  uint8_t sampleLevel1[4];
+};
+
 constexpr uint8_t kRcPpmPin = 16;
 
 void taskRcSampler(void* parameter);
 void taskRcMonitor(void* parameter);
 bool rcGetStateCopy(RcSharedState& out);
+bool rcGetRawDebugSnapshot(RcRawDebugSnapshot& out);
 bool rcRegisterConsumer(TaskHandle_t handle);
 void rcUnregisterConsumer(TaskHandle_t handle);
 

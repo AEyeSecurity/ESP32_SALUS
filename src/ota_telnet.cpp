@@ -17,6 +17,7 @@
 #include "hall_speed.h"
 #include "speed_pid.h"
 #include "quad_functions.h"
+#include "fs_ia6.h"
 #include "system_diag.h"
 
 #ifndef WIFI_STA_SSID
@@ -256,7 +257,7 @@ void openTelnetSession(WiFiClient& incoming) {
   g_telnetClient.println("=== Servidor Telnet ESP32 ===");
   g_telnetClient.println("Conexion establecida correctamente");
   g_telnetClient.println(
-      "Comandos: steer.help | pid.help | spid.help | comms.status | speed.status | speed.reset | speed.stream | speed.uart | pid.stream | spid.stream | spid.target | drive.log | drive.pwm | drive.brake | drive.dir | drive.rc.status | drive.rc.stream | sys.rt | sys.stack | sys.jitter | sys.reset | net.status | exit");
+      "Comandos: steer.help | pid.help | spid.help | rc.raw | comms.status | speed.status | speed.reset | speed.stream | speed.uart | pid.stream | spid.stream | spid.target | drive.log | drive.pwm | drive.brake | drive.dir | drive.rc.status | drive.rc.stream | sys.rt | sys.stack | sys.jitter | sys.reset | net.status | exit");
   reportNetworkStatus();
 }
 
@@ -870,6 +871,8 @@ String buildDriveRcStatusMessage() {
   msg += snapshot.rcReverseRequest ? "Y" : "N";
   msg += " latched=";
   msg += snapshot.rcSourceLatched ? "Y" : "N";
+  msg += " armed=";
+  msg += snapshot.rcDriveArmed ? "Y" : "N";
   msg += " cal{en=";
   msg += snapshot.rcNeutralOffsetCalEnabled ? "Y" : "N";
   msg += " allow=";
@@ -879,6 +882,85 @@ String buildDriveRcStatusMessage() {
   msg += "m/s targetShaped=";
   msg += String(snapshot.rcTargetShapedMps, 3);
   msg += "m/s";
+  return msg;
+}
+
+String buildRcRawStatusMessage() {
+  RcRawDebugSnapshot snapshot{};
+  const bool initialized = rcGetRawDebugSnapshot(snapshot);
+  const TickType_t now = xTaskGetTickCount();
+
+  String msg = "[RC][RAW] rmt=";
+  msg += initialized ? "READY" : "NOT_READY";
+  msg += " pin=";
+  msg += kRcPpmPin;
+  msg += " rawBursts=";
+  msg += snapshot.rawBursts;
+  msg += " decoded=";
+  msg += snapshot.decodedFrames;
+  msg += " fail=";
+  msg += snapshot.decodeFailures;
+  msg += " rst=";
+  msg += snapshot.rmtRestarts;
+  msg += "/";
+  msg += snapshot.rmtRestartErrors;
+  msg += " rstErr=";
+  msg += snapshot.lastRmtRestartErr;
+  msg += " lastItems=";
+  msg += static_cast<uint32_t>(snapshot.lastRawItemCount);
+  msg += " ch=";
+  msg += snapshot.lastChannelCount;
+  msg += " trusted=";
+  msg += snapshot.trustedFrameCount;
+  msg += " polLock=";
+  msg += snapshot.ppmPolarityLocked ? "Y" : "N";
+  msg += " marker=";
+  msg += snapshot.ppmMarkerLevel;
+  msg += " rawAgeMs=";
+  msg += snapshot.lastRawTick != 0 ? static_cast<uint32_t>((now - snapshot.lastRawTick) * portTICK_PERIOD_MS) : 0u;
+  msg += " decAgeMs=";
+  msg += snapshot.lastDecodedTick != 0
+             ? static_cast<uint32_t>((now - snapshot.lastDecodedTick) * portTICK_PERIOD_MS)
+             : 0u;
+  msg += " rstAgeMs=";
+  msg += snapshot.lastRmtRestartTick != 0
+             ? static_cast<uint32_t>((now - snapshot.lastRmtRestartTick) * portTICK_PERIOD_MS)
+             : 0u;
+  msg += " edges=";
+  msg += snapshot.gpioEdges;
+  msg += " gpioPpm=";
+  msg += snapshot.gpioPpmFrames;
+  msg += "/";
+  msg += snapshot.gpioPpmErrors;
+  msg += " edgeAgeMs=";
+  if (snapshot.lastGpioEdgeUs != 0) {
+    const uint32_t edgeAgeUs = static_cast<uint32_t>(esp_timer_get_time()) - snapshot.lastGpioEdgeUs;
+    msg += edgeAgeUs / 1000U;
+  } else {
+    msg += 0U;
+  }
+  msg += " level=";
+  msg += snapshot.gpioLevel;
+  msg += " gpioAgeMs=";
+  msg += snapshot.lastGpioFrameTick != 0
+             ? static_cast<uint32_t>((now - snapshot.lastGpioFrameTick) * portTICK_PERIOD_MS)
+             : 0u;
+  msg += " samples=";
+  for (uint8_t i = 0; i < snapshot.sampleItemCount; ++i) {
+    if (i > 0) {
+      msg += ",";
+    }
+    msg += snapshot.sampleLevel0[i];
+    msg += ":";
+    msg += snapshot.sampleDuration0[i];
+    msg += "/";
+    msg += snapshot.sampleLevel1[i];
+    msg += ":";
+    msg += snapshot.sampleDuration1[i];
+  }
+  if (snapshot.sampleItemCount == 0) {
+    msg += "-";
+  }
   return msg;
 }
 
@@ -2451,6 +2533,11 @@ bool handleDriveCommand(const String& command, const String& args) {
 
   if (command.equalsIgnoreCase("drive.rc.status")) {
     sendTelnet(buildDriveRcStatusMessage());
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("rc.raw") || command.equalsIgnoreCase("rc.raw.status")) {
+    sendTelnet(buildRcRawStatusMessage());
     return true;
   }
 

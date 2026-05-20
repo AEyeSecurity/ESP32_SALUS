@@ -97,6 +97,7 @@ struct QuadDriveRcDebugSnapshot {
   bool rcSpeedPidEligible;
   bool rcReverseRequest;
   bool rcSourceLatched;
+  bool rcDriveArmed;
   bool rcNeutralOffsetCalEnabled;
   bool rcNeutralOffsetCalAllowed;
   float rcTargetRawMps;
