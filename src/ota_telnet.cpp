@@ -243,15 +243,6 @@ void enterOtaMaintenanceMode() {
   g_lastOtaProgressPercent = 255;
   disableTelnetStreams();
   clearTelnetLogQueue();
-  quadDriveSetLogEnabled(false);
-  quadDriveSetPidTraceEnabled(false, kDrivePidTraceDefaultPeriod);
-  quadDriveSetSpeedTargetOverride(false, 0.0f);
-  quadDriveSetPwmOverride(false, 0);
-  quadDriveSetBrakeOverride(false, 0);
-  quadDriveSetDirectionOverride(QuadDriveDirection::kForward);
-  quadThrottleStop();
-  quadBrakeRelease();
-  speedPidReset();
 }
 
 void exitOtaMaintenanceMode() {
@@ -2628,6 +2619,7 @@ void processTelnetInput() {
 /* ========= Wi-Fi ========= */
 void InicializaWiFi() {
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
   WiFi.setHostname(OTA_HOSTNAME);
   WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASS);
 
@@ -2760,7 +2752,8 @@ void taskOtaTelnet(void* parameter) {
     if (otaIsInProgress()) {
       const bool overrun = cycleUs > expectedPeriodUs;
       systemDiagReportLoop(SystemDiagTaskId::kOtaTelnet, cycleUs, expectedPeriodUs, overrun, false);
-      vTaskDelayUntil(&lastWake, period);
+      vTaskDelay(1);
+      lastWake = xTaskGetTickCount();
       continue;
     }
     handleTelnetClient();

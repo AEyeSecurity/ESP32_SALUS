@@ -1184,6 +1184,11 @@ void taskQuadDriveControl(void* parameter) {
     bool relayEnergized = false;
 
     if (otaIsInProgress()) {
+      quadDriveSetLogEnabled(false);
+      quadDriveSetPidTraceEnabled(false, kDrivePidTraceDefaultPeriod);
+      quadDriveSetSpeedTargetOverride(false, 0.0f);
+      quadDriveSetPwmOverride(false, 0);
+      quadDriveSetBrakeOverride(false, 0);
       quadThrottleStop();
       quadBrakeRelease();
       requestDirection(QuadDriveDirection::kForward);
