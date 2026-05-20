@@ -7,9 +7,18 @@
 #include <driver/rmt.h>
 #include <esp_err.h>
 #include <esp_timer.h>
+#include <soc/gpio_struct.h>
 
 #include "ota_telnet.h"
 #include "system_diag.h"
+
+#ifndef RC_GPIO_EDGE_DEBUG
+#define RC_GPIO_EDGE_DEBUG 0
+#endif
+
+#ifndef RC_GPIO_PPM_FALLBACK
+#define RC_GPIO_PPM_FALLBACK 0
+#endif
 
 namespace {
 constexpr uint32_t kMinPulseUs = 950;
@@ -30,7 +39,12 @@ constexpr uint16_t kPpmChannelMinUs = 900;
 constexpr uint16_t kPpmChannelMaxUs = 2100;
 constexpr uint16_t kPpmSyncGapUs = 2700;
 constexpr uint8_t kPpmMinValidChannels = 4;
+constexpr uint8_t kPpmFramesToTrust = 3;
 constexpr uint8_t kPpmDefaultMarkerLevel = 0;
+constexpr TickType_t kRmtStallRestartTicks = pdMS_TO_TICKS(200);
+constexpr TickType_t kRmtRestartCooldownTicks = pdMS_TO_TICKS(500);
+constexpr bool kEnableGpioPpmFallback = RC_GPIO_PPM_FALLBACK != 0;
+constexpr bool kEnableGpioEdgeDebug = (RC_GPIO_EDGE_DEBUG != 0) || kEnableGpioPpmFallback;
 
 struct RcConsumerRegistry {
   TaskHandle_t handle = nullptr;
@@ -49,19 +63,77 @@ struct PpmRuntime {
   std::array<uint16_t, kPpmMaxChannels> lastChannels{};
   uint8_t lastChannelCount = 0;
   TickType_t lastFrameTick = 0;
+  uint8_t trustedFrameCount = 0;
   bool polarityLocked = false;
   uint8_t markerLevel = kPpmDefaultMarkerLevel;
 };
 
 portMUX_TYPE g_rcStateMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE g_rcRawDebugMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE g_rcGpioPpmMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE g_consumerMux = portMUX_INITIALIZER_UNLOCKED;
 
 RcSharedState g_rcState = {0, 0, 0, 0, 0, false};
+RcRawDebugSnapshot g_rcRawDebug{};
 TickType_t g_lastRcLogTick = 0;
 bool g_rmtInitialized = false;
 PpmRuntime g_ppmRuntime;
 
 RcConsumerRegistry g_consumerRegistry[kMaxRcConsumers];
+volatile uint32_t g_rcGpioEdgeCount = 0;
+volatile uint32_t g_rcLastGpioEdgeUs = 0;
+volatile uint8_t g_rcLastGpioLevel = 0;
+bool g_rcGpioEdgeMonitorInitialized = false;
+volatile uint32_t g_gpioPpmLastMarkerUs = 0;
+volatile uint8_t g_gpioPpmWorkingCount = 0;
+volatile uint16_t g_gpioPpmWorkingChannels[kPpmMaxChannels] = {};
+volatile uint16_t g_gpioPpmFrameChannels[kPpmMaxChannels] = {};
+volatile uint8_t g_gpioPpmFrameChannelCount = 0;
+volatile bool g_gpioPpmFrameAvailable = false;
+volatile uint32_t g_gpioPpmFrameCount = 0;
+volatile uint32_t g_gpioPpmErrorCount = 0;
+volatile uint32_t g_gpioPpmLastFrameUs = 0;
+
+void IRAM_ATTR onRcPpmGpioChange() {
+  const uint32_t nowUs = micros();
+  const uint8_t level = static_cast<uint8_t>((GPIO.in >> kRcPpmPin) & 0x01U);
+  g_rcGpioEdgeCount++;
+  g_rcLastGpioEdgeUs = nowUs;
+  g_rcLastGpioLevel = level;
+
+  if (level != kPpmDefaultMarkerLevel) {
+    return;
+  }
+
+  portENTER_CRITICAL_ISR(&g_rcGpioPpmMux);
+  if (g_gpioPpmLastMarkerUs != 0) {
+    const uint32_t intervalUs = nowUs - g_gpioPpmLastMarkerUs;
+    if (intervalUs >= kPpmSyncGapUs) {
+      if (g_gpioPpmWorkingCount >= kPpmMinValidChannels) {
+        for (uint8_t i = 0; i < kPpmMaxChannels; ++i) {
+          g_gpioPpmFrameChannels[i] = (i < g_gpioPpmWorkingCount) ? g_gpioPpmWorkingChannels[i] : 0;
+        }
+        g_gpioPpmFrameChannelCount = g_gpioPpmWorkingCount;
+        g_gpioPpmFrameAvailable = true;
+        g_gpioPpmFrameCount++;
+        g_gpioPpmLastFrameUs = nowUs;
+      }
+      g_gpioPpmWorkingCount = 0;
+    } else if (intervalUs >= kPpmChannelMinUs && intervalUs <= kPpmChannelMaxUs) {
+      if (g_gpioPpmWorkingCount < kPpmMaxChannels) {
+        g_gpioPpmWorkingChannels[g_gpioPpmWorkingCount++] = static_cast<uint16_t>(intervalUs);
+      } else {
+        g_gpioPpmWorkingCount = 0;
+        g_gpioPpmErrorCount++;
+      }
+    } else if (intervalUs > kPpmMarkerMaxUs) {
+      g_gpioPpmWorkingCount = 0;
+      g_gpioPpmErrorCount++;
+    }
+  }
+  g_gpioPpmLastMarkerUs = nowUs;
+  portEXIT_CRITICAL_ISR(&g_rcGpioPpmMux);
+}
 
 int clampToRange(int value, int minValue, int maxValue) {
   if (minValue < maxValue) {
@@ -255,17 +327,34 @@ bool configurePpmRmt(PpmRuntime& runtime, bool logErrors) {
   runtime.lastChannels.fill(kPpmDefaultPulseUs);
   runtime.lastChannelCount = 0;
   runtime.lastFrameTick = 0;
+  runtime.trustedFrameCount = 0;
   runtime.markerLevel = kPpmDefaultMarkerLevel;
   runtime.polarityLocked = false;
   return true;
 }
 
+void ensureGpioEdgeMonitorInitialized() {
+  if (!kEnableGpioEdgeDebug) {
+    return;
+  }
+  if (g_rcGpioEdgeMonitorInitialized) {
+    return;
+  }
+  g_rcLastGpioLevel = static_cast<uint8_t>(digitalRead(kRcPpmPin));
+  attachInterrupt(digitalPinToInterrupt(kRcPpmPin), onRcPpmGpioChange, CHANGE);
+  g_rcGpioEdgeMonitorInitialized = true;
+}
+
 bool ensureRmtInitialized(bool logErrors) {
   if (g_rmtInitialized) {
+    ensureGpioEdgeMonitorInitialized();
     return true;
   }
 
   g_rmtInitialized = configurePpmRmt(g_ppmRuntime, logErrors);
+  if (g_rmtInitialized) {
+    ensureGpioEdgeMonitorInitialized();
+  }
   return g_rmtInitialized;
 }
 
@@ -285,6 +374,85 @@ bool readRmtItems(PpmRuntime& runtime, TickType_t timeoutTicks, rmt_item32_t*& o
   outItems = items;
   outItemCount = rxSize / sizeof(rmt_item32_t);
   return outItemCount > 0;
+}
+
+bool readGpioPpmFrame(ParsedPpmFrame& outFrame) {
+  outFrame = {};
+  if (!kEnableGpioPpmFallback) {
+    return false;
+  }
+  bool available = false;
+  uint8_t channelCount = 0;
+  std::array<uint16_t, kPpmMaxChannels> channels{};
+
+  portENTER_CRITICAL(&g_rcGpioPpmMux);
+  if (g_gpioPpmFrameAvailable) {
+    available = true;
+    channelCount = g_gpioPpmFrameChannelCount;
+    for (uint8_t i = 0; i < kPpmMaxChannels; ++i) {
+      channels[i] = g_gpioPpmFrameChannels[i];
+    }
+    g_gpioPpmFrameAvailable = false;
+  }
+  portEXIT_CRITICAL(&g_rcGpioPpmMux);
+
+  if (!available || channelCount < kPpmMinValidChannels) {
+    return false;
+  }
+
+  outFrame.valid = true;
+  outFrame.channelCount = channelCount;
+  outFrame.channels = channels;
+  return true;
+}
+
+void recordRmtRestartResult(PpmRuntime& runtime, TickType_t now, bool ok, esp_err_t err, bool resetTrust) {
+  if (resetTrust) {
+    runtime.trustedFrameCount = 0;
+  }
+  portENTER_CRITICAL(&g_rcRawDebugMux);
+  g_rcRawDebug.rmtRestarts++;
+  g_rcRawDebug.lastRmtRestartTick = now;
+  g_rcRawDebug.trustedFrameCount = runtime.trustedFrameCount;
+  g_rcRawDebug.rmtInitialized = g_rmtInitialized;
+  g_rcRawDebug.gpioEdges = g_rcGpioEdgeCount;
+  g_rcRawDebug.gpioPpmFrames = g_gpioPpmFrameCount;
+  g_rcRawDebug.gpioPpmErrors = g_gpioPpmErrorCount;
+  g_rcRawDebug.lastGpioEdgeUs = g_rcLastGpioEdgeUs;
+  g_rcRawDebug.gpioLevel = g_rcLastGpioLevel;
+  if (!ok) {
+    g_rcRawDebug.rmtRestartErrors++;
+    g_rcRawDebug.lastRmtRestartErr = static_cast<int>(err);
+  } else {
+    g_rcRawDebug.lastRmtRestartErr = 0;
+  }
+  portEXIT_CRITICAL(&g_rcRawDebugMux);
+}
+
+bool rearmPpmRmt(PpmRuntime& runtime, TickType_t now, bool clearMemory, bool logErrors) {
+  rmt_rx_stop(runtime.channel);
+  esp_err_t startErr = rmt_rx_start(runtime.channel, clearMemory);
+  const bool ok = (startErr == ESP_OK);
+  if (clearMemory || !ok) {
+    recordRmtRestartResult(runtime, now, ok, startErr, clearMemory);
+  }
+
+  if (!ok && logErrors) {
+    broadcastIf(true, String("[RC][RMT] Error reiniciando RX PPM err=") + startErr);
+  }
+  return ok;
+}
+
+bool reinstallPpmRmt(PpmRuntime& runtime, TickType_t now, bool logErrors) {
+  rmt_rx_stop(runtime.channel);
+  rmt_driver_uninstall(runtime.channel);
+  runtime.ring = nullptr;
+  g_rmtInitialized = false;
+
+  const bool ok = configurePpmRmt(runtime, logErrors);
+  g_rmtInitialized = ok;
+  recordRmtRestartResult(runtime, now, ok, ok ? ESP_OK : ESP_FAIL, true);
+  return ok;
 }
 
 int ppmChannelToRange(const PpmRuntime& runtime, uint8_t channelIndex, int minLimit, int maxLimit, int defaultValue) {
@@ -330,6 +498,71 @@ void notifyConsumers() {
   }
 }
 
+void recordRawRmtBurst(const rmt_item32_t* items, size_t itemCount, TickType_t now) {
+  portENTER_CRITICAL(&g_rcRawDebugMux);
+  g_rcRawDebug.rmtInitialized = g_rmtInitialized;
+  g_rcRawDebug.gpioEdges = g_rcGpioEdgeCount;
+  g_rcRawDebug.gpioPpmFrames = g_gpioPpmFrameCount;
+  g_rcRawDebug.gpioPpmErrors = g_gpioPpmErrorCount;
+  g_rcRawDebug.lastGpioEdgeUs = g_rcLastGpioEdgeUs;
+  g_rcRawDebug.gpioLevel = g_rcLastGpioLevel;
+  g_rcRawDebug.ppmPolarityLocked = g_ppmRuntime.polarityLocked;
+  g_rcRawDebug.ppmMarkerLevel = g_ppmRuntime.markerLevel;
+  g_rcRawDebug.trustedFrameCount = g_ppmRuntime.trustedFrameCount;
+  g_rcRawDebug.rawBursts++;
+  g_rcRawDebug.lastRawTick = now;
+  g_rcRawDebug.lastRawItemCount = itemCount;
+  g_rcRawDebug.sampleItemCount = static_cast<uint8_t>(std::min<size_t>(itemCount, 4));
+  for (uint8_t i = 0; i < 4; ++i) {
+    if (i < g_rcRawDebug.sampleItemCount) {
+      g_rcRawDebug.sampleDuration0[i] = static_cast<uint16_t>(items[i].duration0);
+      g_rcRawDebug.sampleDuration1[i] = static_cast<uint16_t>(items[i].duration1);
+      g_rcRawDebug.sampleLevel0[i] = static_cast<uint8_t>(items[i].level0);
+      g_rcRawDebug.sampleLevel1[i] = static_cast<uint8_t>(items[i].level1);
+    } else {
+      g_rcRawDebug.sampleDuration0[i] = 0;
+      g_rcRawDebug.sampleDuration1[i] = 0;
+      g_rcRawDebug.sampleLevel0[i] = 0;
+      g_rcRawDebug.sampleLevel1[i] = 0;
+    }
+  }
+  portEXIT_CRITICAL(&g_rcRawDebugMux);
+}
+
+void recordPpmDecodeResult(bool decoded, const ParsedPpmFrame& frame, TickType_t now) {
+  portENTER_CRITICAL(&g_rcRawDebugMux);
+  g_rcRawDebug.rmtInitialized = g_rmtInitialized;
+  g_rcRawDebug.gpioEdges = g_rcGpioEdgeCount;
+  g_rcRawDebug.lastGpioEdgeUs = g_rcLastGpioEdgeUs;
+  g_rcRawDebug.gpioLevel = g_rcLastGpioLevel;
+  g_rcRawDebug.ppmPolarityLocked = g_ppmRuntime.polarityLocked;
+  g_rcRawDebug.ppmMarkerLevel = g_ppmRuntime.markerLevel;
+  g_rcRawDebug.trustedFrameCount = g_ppmRuntime.trustedFrameCount;
+  if (decoded) {
+    g_rcRawDebug.decodedFrames++;
+    g_rcRawDebug.lastDecodedTick = now;
+    g_rcRawDebug.lastChannelCount = frame.channelCount;
+  } else {
+    g_rcRawDebug.decodeFailures++;
+    g_rcRawDebug.lastChannelCount = 0;
+  }
+  portEXIT_CRITICAL(&g_rcRawDebugMux);
+}
+
+void recordGpioPpmFrame(const ParsedPpmFrame& frame, TickType_t now) {
+  portENTER_CRITICAL(&g_rcRawDebugMux);
+  g_rcRawDebug.rmtInitialized = g_rmtInitialized;
+  g_rcRawDebug.gpioEdges = g_rcGpioEdgeCount;
+  g_rcRawDebug.gpioPpmFrames = g_gpioPpmFrameCount;
+  g_rcRawDebug.gpioPpmErrors = g_gpioPpmErrorCount;
+  g_rcRawDebug.lastGpioEdgeUs = g_rcLastGpioEdgeUs;
+  g_rcRawDebug.gpioLevel = g_rcLastGpioLevel;
+  g_rcRawDebug.lastGpioFrameTick = now;
+  g_rcRawDebug.lastChannelCount = frame.channelCount;
+  g_rcRawDebug.trustedFrameCount = g_ppmRuntime.trustedFrameCount;
+  portEXIT_CRITICAL(&g_rcRawDebugMux);
+}
+
 }  // namespace
 
 void initFS_IA6(uint8_t ch1, uint8_t ch2, uint8_t ch3, uint8_t ch4, uint8_t ch5, uint8_t ch6) {
@@ -369,6 +602,18 @@ bool rcGetStateCopy(RcSharedState& out) {
   out = g_rcState;
   portEXIT_CRITICAL(&g_rcStateMux);
   return out.valid;
+}
+
+bool rcGetRawDebugSnapshot(RcRawDebugSnapshot& out) {
+  portENTER_CRITICAL(&g_rcRawDebugMux);
+  out = g_rcRawDebug;
+  out.gpioEdges = g_rcGpioEdgeCount;
+  out.gpioPpmFrames = g_gpioPpmFrameCount;
+  out.gpioPpmErrors = g_gpioPpmErrorCount;
+  out.lastGpioEdgeUs = g_rcLastGpioEdgeUs;
+  out.gpioLevel = g_rcLastGpioLevel;
+  portEXIT_CRITICAL(&g_rcRawDebugMux);
+  return out.rmtInitialized;
 }
 
 bool rcRegisterConsumer(TaskHandle_t handle) {
@@ -424,6 +669,7 @@ void taskRcSampler(void* parameter) {
   TickType_t lastWake = xTaskGetTickCount();
   const uint32_t expectedPeriodUs = static_cast<uint32_t>(period * portTICK_PERIOD_MS * 1000U);
   int64_t lastIterationStartUs = esp_timer_get_time();
+  TickType_t lastRmtRestartAttemptTick = 0;
 
   for (;;) {
     const int64_t iterationStartUs = esp_timer_get_time();
@@ -439,25 +685,53 @@ void taskRcSampler(void* parameter) {
     rmt_item32_t* items = nullptr;
     size_t itemCount = 0;
     if (readRmtItems(g_ppmRuntime, receiveTimeout, items, itemCount)) {
+      recordRawRmtBurst(items, itemCount, now);
       ParsedPpmFrame decodedFrame;
-      if (decodePpmFrame(items,
-                         itemCount,
-                         log,
-                         g_ppmRuntime.markerLevel,
-                         g_ppmRuntime.polarityLocked,
-                         decodedFrame)) {
+      const bool decoded = decodePpmFrame(items,
+                                          itemCount,
+                                          log,
+                                          g_ppmRuntime.markerLevel,
+                                          g_ppmRuntime.polarityLocked,
+                                          decodedFrame);
+      if (decoded) {
         g_ppmRuntime.lastChannels = decodedFrame.channels;
         g_ppmRuntime.lastChannelCount = decodedFrame.channelCount;
         g_ppmRuntime.lastFrameTick = now;
+        if (g_ppmRuntime.trustedFrameCount < kPpmFramesToTrust) {
+          g_ppmRuntime.trustedFrameCount++;
+        }
         anyUpdated = true;
+      } else {
+        g_ppmRuntime.trustedFrameCount = 0;
       }
+      recordPpmDecodeResult(decoded, decodedFrame, now);
 
       vRingbufferReturnItem(g_ppmRuntime.ring, items);
-      rmt_rx_start(g_ppmRuntime.channel, false);
+      rearmPpmRmt(g_ppmRuntime, now, false, log);
+    } else {
+      ParsedPpmFrame gpioFrame;
+      if (kEnableGpioPpmFallback && readGpioPpmFrame(gpioFrame)) {
+        g_ppmRuntime.lastChannels = gpioFrame.channels;
+        g_ppmRuntime.lastChannelCount = gpioFrame.channelCount;
+        g_ppmRuntime.lastFrameTick = now;
+        if (g_ppmRuntime.trustedFrameCount < kPpmFramesToTrust) {
+          g_ppmRuntime.trustedFrameCount++;
+        }
+        anyUpdated = true;
+        recordGpioPpmFrame(gpioFrame, now);
+      } else if (g_ppmRuntime.lastFrameTick != 0 &&
+	                 (now - g_ppmRuntime.lastFrameTick) >= kRmtStallRestartTicks &&
+	                 (lastRmtRestartAttemptTick == 0 ||
+	                  (now - lastRmtRestartAttemptTick) >= kRmtRestartCooldownTicks)) {
+        reinstallPpmRmt(g_ppmRuntime, now, log);
+        lastRmtRestartAttemptTick = now;
+      }
     }
 
     RcSharedState snapshot{};
-    const bool fresh = g_ppmRuntime.lastFrameTick != 0 && (now - g_ppmRuntime.lastFrameTick) <= staleThreshold;
+    const bool fresh = g_ppmRuntime.lastFrameTick != 0 &&
+                       g_ppmRuntime.trustedFrameCount >= kPpmFramesToTrust &&
+                       (now - g_ppmRuntime.lastFrameTick) <= staleThreshold;
     if (fresh) {
       snapshot.steering = ppmChannelToRange(g_ppmRuntime, kPpmSteeringIdx, -100, 100, 0);
       snapshot.throttle = ppmChannelToRange(g_ppmRuntime, kPpmThrottleIdx, -100, 100, 0);
@@ -472,6 +746,9 @@ void taskRcSampler(void* parameter) {
       snapshot.steering = 0;
       snapshot.lastUpdateTick = g_ppmRuntime.lastFrameTick;
       snapshot.valid = false;
+      if (g_ppmRuntime.lastFrameTick == 0 || (now - g_ppmRuntime.lastFrameTick) > staleThreshold) {
+        g_ppmRuntime.trustedFrameCount = 0;
+      }
     }
 
     portENTER_CRITICAL(&g_rcStateMux);

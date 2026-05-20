@@ -82,6 +82,8 @@ Troubleshooting OTA rapido:
 ### `taskRcSampler` (src/fs_ia6.cpp)
 - Configuracion: `FsIa6SamplerConfig` define periodo de vigilancia (10 ms), umbral de datos frescos y timeout de recepcion RMT.
 - Bucle: inicializa un canal RMT RX en GPIO16 a 1 us de resolucion, decodifica frame PPM (CH1 steering, CH2 throttle, CH5/CH6 AUX), normaliza a -100..100 y publica un `RcSharedState` protegido por `portMUX`.
+- Rearmado RMT: tras consumir cada item del ringbuffer se rearma RX sin limpiar memoria y existe un watchdog de reinstalacion del driver ante stalls. Ver [KNOWN_BUGS.md](KNOWN_BUGS.md) para el incidente resuelto del RMT PPM.
+- Diagnostico crudo: el comando Telnet `rc.raw` muestra contadores de bursts, decode y recuperacion RMT para separar fallas de senal fisica, decoder PPM y rearmado.
 - Prioridad: corre con prioridad 4 en el nucleo 1; cada pulso nuevo dispara `xTaskNotifyGive` a los consumidores registrados mediante `rcRegisterConsumer`.
 - Logging: con `debug::kLogRc` envia un resumen cada 500 ms solamente cuando hay lecturas recientes, evitando ruido cuando el receptor esta desconectado.
 - Consumo: otras tareas obtienen el snapshot con `rcGetStateCopy` y dependen de las notificaciones para reaccionar con latencia baja sin saturar la CPU.
@@ -231,6 +233,7 @@ Estos valores se inyectan en los `*_TaskConfig` y definen la cadencia con la que
 ## Diagnostico y mejores practicas
 
 - Activa `debug::kLogPid` y `debug::kLogDrive` cuando necesites validar el lazo y el acelerador; desactivalos para vuelo normal.
+- Para diagnosticar el RC usa `rc.raw` antes de tocar control. Los detalles de interpretacion estan en [KNOWN_BUGS.md](KNOWN_BUGS.md).
 - Si `taskAs5600Monitor` reporta `connected=NO`, revisa VCC, GND y pull-ups del bus I2C antes de habilitar el PID.
 - Antes de usar el PID, puedes habilitar temporalmente `taskRcMonitor` para asegurarte de que los pulsos del receptor lleguen dentro del rango esperado.
 - No ejecutes `taskBridgeTest` mientras el PID este activo; ambas tareas usan el puente H sin mutex y se interferirian mutuamente.
