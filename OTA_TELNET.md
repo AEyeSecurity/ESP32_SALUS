@@ -96,6 +96,7 @@ spid.target
 drive.log
 drive.pwm
 drive.dir
+rc.raw
 drive.rc.status
 drive.rc.stream
 drive.rc.cal
@@ -163,6 +164,7 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low), con dirección por s
 - `spid.brakehold <ms>`: tiempo mínimo en overspeed antes de liberar (`ms`, default `200`).
 - `spid.brakedb <pct>`: banda muerta del freno automático (no mueve servo por debajo de este valor, default `3`).
 - `spid.target <mps|off>`: override de setpoint de velocidad firmado por Telnet para pruebas HIL (`+` limitado por `spid.max`, `-` limitado por `rev.max` default `1.35 m/s`). `off` devuelve el control a PI/RC.
+- `rc.raw`: diagnóstico del receptor PPM en GPIO16. Muestra estado RMT (`rmt`), bursts crudos (`rawBursts`), frames decodificados (`decoded`), fallos (`fail`), recuperaciones RMT (`rst=ok/err`, `rstErr`), edad del ultimo burst (`rawAgeMs`) y muestras `level:duration`. En operacion normal `rawBursts` y `decoded` deben subir continuamente, `fail` debe quedar en cero o muy bajo, y `rawAgeMs` debe mantenerse bajo. Si `rawBursts` se clava y `rst` sube, el watchdog esta recuperando el RMT; si `rstErr` es distinto de cero, revisar el error del driver.
 - `drive.rc.status`: snapshot del camino RC hacia `speed_pid` (`raw/filt/norm`, `aux5`, `fresh`, `elig`, `revReq`, `latched`, estado de auto-calibración neutral y `targetRaw/targetShaped`).
 - `drive.rc.stream on [ms] | drive.rc.stream off`: stream periódico de `drive.rc.status` (`50..1000 ms`, default `100 ms`).
 - `drive.rc.cal on|off`: habilita o congela la auto-calibración del offset neutral del filtro RC.

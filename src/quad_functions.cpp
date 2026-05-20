@@ -230,6 +230,7 @@ constexpr float kRcTargetSlewMps2Down = 5.0f;
 constexpr float kRcMinValidTargetMps = 0.08f;
 constexpr TickType_t kRcBrakeReleaseReentryHoldTicks = pdMS_TO_TICKS(200);
 constexpr TickType_t kRcOffsetAutoCalNeutralHoldTicks = pdMS_TO_TICKS(250);
+constexpr TickType_t kRcStartupNeutralArmTicks = pdMS_TO_TICKS(300);
 constexpr TickType_t kDriveDtWarningCooldown = pdMS_TO_TICKS(1000);
 constexpr TickType_t kDriveRuntimeWarningCooldown = pdMS_TO_TICKS(1000);
 constexpr TickType_t kDriveEventCooldown = pdMS_TO_TICKS(300);
@@ -1038,6 +1039,7 @@ QuadDriveRcDebugSnapshot makeRcDebugSnapshot(int rawThrottle,
                                              bool rcSpeedPidEligible,
                                              bool rcReverseRequested,
                                              bool rcUsingLatchThisCycle,
+                                             bool rcDriveArmed,
                                              float rcTargetRawMpsDebug,
                                              float rcTargetShapedMpsDebug) {
   QuadDriveRcDebugSnapshot rcDebug{};
@@ -1052,6 +1054,7 @@ QuadDriveRcDebugSnapshot makeRcDebugSnapshot(int rawThrottle,
   rcDebug.rcSpeedPidEligible = rcSpeedPidEligible;
   rcDebug.rcReverseRequest = rcReverseRequested;
   rcDebug.rcSourceLatched = rcUsingLatchThisCycle;
+  rcDebug.rcDriveArmed = rcDriveArmed;
   rcDebug.rcNeutralOffsetCalEnabled = g_rcNeutralOffsetCalEnabled;
   rcDebug.rcNeutralOffsetCalAllowed = g_rcNeutralOffsetCalAllowUpdate;
   rcDebug.rcTargetRawMps = rcTargetRawMpsDebug;
@@ -1120,6 +1123,7 @@ void taskQuadDriveControl(void* parameter) {
   bool lastRcReverseSwitchActive = false;
   TickType_t rcLastFreshTick = 0;
   bool rcSourceLatched = false;
+  bool rcDriveArmed = false;
   bool rcReverseSwitchActive = false;
   float rcTargetShapedMps = 0.0f;
   float rcLastTargetRawMps = 0.0f;
@@ -1293,10 +1297,20 @@ void taskQuadDriveControl(void* parameter) {
       rcNeutralStableSinceTick = 0;
     }
 
+    const bool rcRecentlyFresh =
+        rcFresh || (rcLastFreshTick != 0 && (sampleTick - rcLastFreshTick) <= kRcSourceDropoutGraceTicks);
+    if (!rcAuthorityAllowed || !rcRecentlyFresh) {
+      rcDriveArmed = false;
+    } else if (!rcDriveArmed && rcFresh && rcInputState == RcDriveInputState::kNeutral &&
+               rcNeutralStableSinceTick != 0 &&
+               (sampleTick - rcNeutralStableSinceTick) >= kRcStartupNeutralArmTicks) {
+      rcDriveArmed = true;
+    }
+
     const bool rcSpeedPidEligible =
-        rcAuthorityAllowed && rcFresh && !rcManualBrakeActive;
+        rcAuthorityAllowed && rcDriveArmed && rcFresh && !rcManualBrakeActive;
     const bool rcCanLatch =
-        rcAuthorityAllowed && !rcManualBrakeActive && !piEstopActive;
+        rcAuthorityAllowed && rcDriveArmed && !rcManualBrakeActive && !piEstopActive;
     const bool rcDropoutGraceActive =
         rcSourceLatched && rcCanLatch && rcLastFreshTick != 0 &&
         (sampleTick - rcLastFreshTick) <= kRcSourceDropoutGraceTicks;
@@ -1631,8 +1645,7 @@ void taskQuadDriveControl(void* parameter) {
     }
 
     if (!pwmOverrideEnabled) {
-      const bool reverseRequestedByRcSwitch =
-          (speedControlSource == SpeedControlSource::kRcSpeedPid) && rcReverseRequested;
+      const bool reverseRequestedByRcSwitch = rcReverseRequested;
       const bool reverseRequestedBySignedTarget =
           (speedControlSource != SpeedControlSource::kNone) && (speedTargetSignedMps < -0.05f);
       if (reverseRequestedByRcSwitch || reverseRequestedBySignedTarget) {
@@ -1715,6 +1728,7 @@ void taskQuadDriveControl(void* parameter) {
                             rcSpeedPidEligible,
                             rcReverseRequested,
                             rcUsingLatchThisCycle,
+                            rcDriveArmed,
                             rcTargetRawMpsDebug,
                             rcTargetShapedMpsDebug);
     setRcDebugSnapshot(rcDebug);

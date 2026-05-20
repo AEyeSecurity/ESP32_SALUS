@@ -49,24 +49,29 @@ Troubleshooting OTA rapido:
 - Si `esp32dev-ota-sta` no resuelve hostname, probar con IP STA real del dispositivo.
 - Si la red STA no esta disponible, usar `esp32dev-ota-ap` y conectar al AP del ESP32.
 - Si falla autenticacion OTA, verificar que `OTA_PASSWORD` y `upload_flags --auth` coincidan.
+- Si autentica (`Authenticating...OK`) pero corta durante la transferencia con `[ERROR]: Error Uploading`,
+  revisar `sys.stack` por Telnet. En este proyecto `taskOtaTelnet` necesita margen de stack para
+  `ArduinoOTA._runUpdate()`/`Update.write()`; se reserva 8192 bytes y deberia quedar con varios KB libres.
 
 ## Resumen de tareas FreeRTOS
 
-| Tarea                     | Archivo/funcion          | Stack (palabras ~KB) | Prio | Nucleo | Cadencia / disparador                       | Habilitacion por defecto | Comentario principal |
+| Tarea                     | Archivo/funcion          | Stack (bytes ~KB) | Prio | Nucleo | Cadencia / disparador                       | Habilitacion por defecto | Comentario principal |
 |---------------------------|--------------------------|----------------------|------|--------|---------------------------------------------|--------------------------|----------------------|
-| `taskOtaTelnet`          | `src/ota_telnet.cpp`     | 4096 (~16 KB)        | 3    | 0      | 20 ms periodica (`vTaskDelayUntil`)         | Siempre                  | Ejecuta `ArduinoOTA.handle()` y heartbeat Telnet cada 5 s si se habilita. |
-| `taskRcSampler`          | `src/fs_ia6.cpp`         | 2048 (~8 KB)         | 4    | 1      | Notificacin RMT (timeout 10 ms)            | Siempre                  | Usa RMT para decodificar PPM en GPIO16, actualiza `RcSharedState` y despierta consumidores. |
-| `taskAs5600Monitor`      | `src/AS5600.cpp`         | 3072 (~12 KB)        | 1    | 1      | 30 ms periodica, log cada 500 ms            | Siempre                  | Mide estado del AS5600 y opcionalmente reporta estado de iman y angulo. |
-| `taskPidControl`         | `src/pid.cpp`            | 4096 (~16 KB)        | 4    | 0      | Notificacin RC (timeout 30 ms)             | `debug::kEnablePidTask` (true) | Cierra el lazo PID, incluye estado de calibracion y protege limites via finales de carrera. |
-| `taskQuadDriveControl`   | `src/quad_functions.cpp` | 4096 (~16 KB)        | 4    | 1      | Notificacin RC (timeout 30 ms)             | `debug::kEnableDriveTask` (true) | Lazo de velocidad (m/s) con Hall, actualiza LEDC y mezcla freno Pi/overspeed. |
-| `taskRcMonitor`          | `src/fs_ia6.cpp`         | 2048 (~8 KB)         | 1    | 1      | 100 ms periodica (`vTaskDelay`)              | `debug::kEnableRcTask` (false) | Solo loguea el snapshot compartido; ideal para calibracion. |
-| `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~16 KB)        | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
-| `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~12 KB)        | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA` v2 (7 bytes), valida versión/CRC y mantiene `PiCommsRxSnapshot` con `speed_cmd` firmado (`speed_cmd` + `REV_REQ`). |
-| `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~8 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status speed steer brake crc]` (8 bytes) con velocidad Hall, ángulo centrado y flags de seguridad. |
-| `taskCameraTelemetry`    | `src/camera_telemetry.cpp` | 4096 (~16 KB)      | 1    | 0      | 1000 ms periodica (`vTaskDelayUntil`)        | Solo si `TELEMETRY_URL` no esta vacio | Envia `POST /update` con `data=stem_in_stem_out_ozh` para disparar captura en el servidor de camara. |
+| `taskOtaTelnet`          | `src/ota_telnet.cpp`     | 8192 (~8 KB)         | 3    | 0      | 20 ms periodica (`vTaskDelayUntil`)         | Siempre                  | Ejecuta `ArduinoOTA.handle()` y heartbeat Telnet cada 5 s si se habilita. |
+| `taskRcSampler`          | `src/fs_ia6.cpp`         | 2048 (~2 KB)         | 4    | 1      | Notificacin RMT (timeout 10 ms)            | Siempre                  | Usa RMT para decodificar PPM en GPIO16, actualiza `RcSharedState` y despierta consumidores. |
+| `taskAs5600Monitor`      | `src/AS5600.cpp`         | 3072 (~3 KB)         | 1    | 1      | 30 ms periodica, log cada 500 ms            | Siempre                  | Mide estado del AS5600 y opcionalmente reporta estado de iman y angulo. |
+| `taskPidControl`         | `src/pid.cpp`            | 4096 (~4 KB)         | 4    | 0      | Notificacin RC (timeout 30 ms)             | `debug::kEnablePidTask` (true) | Cierra el lazo PID, incluye estado de calibracion y protege limites via finales de carrera. |
+| `taskQuadDriveControl`   | `src/quad_functions.cpp` | 4096 (~4 KB)         | 4    | 1      | Notificacin RC (timeout 30 ms)             | `debug::kEnableDriveTask` (true) | Lazo de velocidad (m/s) con Hall, actualiza LEDC y mezcla freno Pi/overspeed. |
+| `taskRcMonitor`          | `src/fs_ia6.cpp`         | 2048 (~2 KB)         | 1    | 1      | 100 ms periodica (`vTaskDelay`)              | `debug::kEnableRcTask` (false) | Solo loguea el snapshot compartido; ideal para calibracion. |
+| `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~4 KB)         | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
+| `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~3 KB)         | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA` v2 (7 bytes), valida versión/CRC y mantiene `PiCommsRxSnapshot` con `speed_cmd` firmado (`speed_cmd` + `REV_REQ`). |
+| `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~2 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status speed steer brake crc]` (8 bytes) con velocidad Hall, ángulo centrado y flags de seguridad. |
+| `taskCameraTelemetry`    | `src/camera_telemetry.cpp` | 6144 (~6 KB)       | 1    | 0      | 1000 ms periodica (`vTaskDelayUntil`)        | Solo si `TELEMETRY_URL` no esta vacio | Envia `POST /update` con `data=stem_in_stem_out_ozh` para disparar captura en el servidor de camara. |
 | `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Supervisor liviano sin lógica de comunicaciones (solo `vTaskDelay`). |
 
-> Nota: FreeRTOS en ESP32 interpreta el parametro `stackSize` en palabras de 32 bits. 4096 palabras equivalen a ~16 KB.
+> Nota: en este target Arduino/ESP32 los tamanos pasados a `startTaskPinned`/`xTaskCreatePinnedToCore`
+> se tratan y diagnostican como bytes. `sys.stack` reporta el high-water mark libre en bytes; OTA fallaba
+> con 4096 bytes porque quedaba con margen insuficiente durante la escritura de firmware.
 
 ## Detalle por tarea
 
@@ -80,6 +85,8 @@ Troubleshooting OTA rapido:
 ### `taskRcSampler` (src/fs_ia6.cpp)
 - Configuracion: `FsIa6SamplerConfig` define periodo de vigilancia (10 ms), umbral de datos frescos y timeout de recepcion RMT.
 - Bucle: inicializa un canal RMT RX en GPIO16 a 1 us de resolucion, decodifica frame PPM (CH1 steering, CH2 throttle, CH5/CH6 AUX), normaliza a -100..100 y publica un `RcSharedState` protegido por `portMUX`.
+- Rearmado RMT: tras consumir cada item del ringbuffer se rearma RX sin limpiar memoria y existe un watchdog de reinstalacion del driver ante stalls. Ver [KNOWN_BUGS.md](KNOWN_BUGS.md) para el incidente resuelto del RMT PPM.
+- Diagnostico crudo: el comando Telnet `rc.raw` muestra contadores de bursts, decode y recuperacion RMT para separar fallas de senal fisica, decoder PPM y rearmado.
 - Prioridad: corre con prioridad 4 en el nucleo 1; cada pulso nuevo dispara `xTaskNotifyGive` a los consumidores registrados mediante `rcRegisterConsumer`.
 - Logging: con `debug::kLogRc` envia un resumen cada 500 ms solamente cuando hay lecturas recientes, evitando ruido cuando el receptor esta desconectado.
 - Consumo: otras tareas obtienen el snapshot con `rcGetStateCopy` y dependen de las notificaciones para reaccionar con latencia baja sin saturar la CPU.
@@ -244,6 +251,7 @@ Estos valores se inyectan en los `*_TaskConfig` y definen la cadencia con la que
 ## Diagnostico y mejores practicas
 
 - Activa `debug::kLogPid` y `debug::kLogDrive` cuando necesites validar el lazo y el acelerador; desactivalos para vuelo normal.
+- Para diagnosticar el RC usa `rc.raw` antes de tocar control. Los detalles de interpretacion estan en [KNOWN_BUGS.md](KNOWN_BUGS.md).
 - Si `taskAs5600Monitor` reporta `connected=NO`, revisa VCC, GND y pull-ups del bus I2C antes de habilitar el PID.
 - Antes de usar el PID, puedes habilitar temporalmente `taskRcMonitor` para asegurarte de que los pulsos del receptor lleguen dentro del rango esperado.
 - No ejecutes `taskBridgeTest` mientras el PID este activo; ambas tareas usan el puente H sin mutex y se interferirian mutuamente.

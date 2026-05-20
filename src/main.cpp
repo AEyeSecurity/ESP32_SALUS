@@ -15,7 +15,7 @@
 #include "system_diag.h"
 #include "camera_telemetry.h"
 
-constexpr uint16_t STACK_OTA = 4096;
+constexpr uint16_t STACK_OTA = 8192;
 constexpr uint16_t STACK_BRIDGE = 4096;
 constexpr uint16_t STACK_RC = 2048;
 constexpr uint16_t STACK_AS5600 = 3072;
@@ -23,7 +23,7 @@ constexpr uint16_t STACK_PID = 4096;
 constexpr uint16_t STACK_DRIVE = 4096;
 constexpr uint16_t STACK_PI_RX = 3072;
 constexpr uint16_t STACK_PI_TX = 2048;
-constexpr uint16_t STACK_CAMERA_TELEMETRY = 4096;
+constexpr uint16_t STACK_CAMERA_TELEMETRY = 6144;
 
 constexpr int AS5600_SDA_PIN = 25;
 constexpr int AS5600_SCL_PIN = 33;

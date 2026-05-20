@@ -700,6 +700,7 @@ void taskPidControl(void* parameter) {
     }
     const int rcValue = rcSnapshot.steering;
     int rcSteeringCorrected = rcValue;
+    bool rcNeutralCaptureHoldActive = false;
 
     if (!rcWasFresh && rcFresh) {
       rcNeutralCaptureActive = true;
@@ -712,6 +713,7 @@ void taskPidControl(void* parameter) {
       if (!rcFresh) {
         rcNeutralCaptureActive = false;
       } else if ((nowTicks - rcNeutralCaptureStartTick) <= kRcNeutralCaptureWindow) {
+        rcNeutralCaptureHoldActive = true;
         const int absRcValue = (rcValue >= 0) ? rcValue : -rcValue;
         if (absRcValue <= kRcNeutralCaptureMaxAbsCommand) {
           rcNeutralSampleSum += rcValue;
@@ -758,6 +760,8 @@ void taskPidControl(void* parameter) {
     if (piFresh) {
       steeringCommand = piSnapshot.steer;
       steeringFromPi = true;
+    } else if (rcNeutralCaptureHoldActive) {
+      steeringCommand = 0;
     }
     const int steeringCommandRaw = steeringCommand;
     steeringCommand = applySteeringCommandDeadband(
