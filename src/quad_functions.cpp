@@ -1631,8 +1631,7 @@ void taskQuadDriveControl(void* parameter) {
     }
 
     if (!pwmOverrideEnabled) {
-      const bool reverseRequestedByRcSwitch =
-          (speedControlSource == SpeedControlSource::kRcSpeedPid) && rcReverseRequested;
+      const bool reverseRequestedByRcSwitch = rcReverseRequested;
       const bool reverseRequestedBySignedTarget =
           (speedControlSource != SpeedControlSource::kNone) && (speedTargetSignedMps < -0.05f);
       if (reverseRequestedByRcSwitch || reverseRequestedBySignedTarget) {
