@@ -104,7 +104,7 @@ constexpr float REVERSE_MAX_SPEED_MPS = 1.30f;
 constexpr float REVERSE_ANTI_WINDUP_UNWIND_SCALE = 2.5f;
 constexpr float REVERSE_ANTI_WINDUP_ERROR_THRESHOLD_MPS = 0.10f;
 
-constexpr TickType_t OTA_PERIOD = pdMS_TO_TICKS(20);
+constexpr TickType_t OTA_PERIOD = pdMS_TO_TICKS(5);
 constexpr TickType_t RC_SAMPLER_PERIOD = pdMS_TO_TICKS(10);
 constexpr TickType_t RC_MONITOR_PERIOD = pdMS_TO_TICKS(100);
 constexpr TickType_t AS5600_PERIOD = pdMS_TO_TICKS(30);
@@ -280,7 +280,7 @@ void setup() {
     broadcastIf(debug::kLogBridge, "Inicializado H-bridge (pins 21 enable, 22 left PWM, 23 right PWM)");
   }
 
-  if (startTaskPinned(taskOtaTelnet, "OTA", STACK_OTA, &g_otaConfig, 3, &g_taskOtaHandle, 0)) {
+  if (startTaskPinned(taskOtaTelnet, "OTA", STACK_OTA, &g_otaConfig, 5, &g_taskOtaHandle, 0)) {
     systemDiagRegisterTask(SystemDiagTaskId::kOtaTelnet, "OTA", g_taskOtaHandle);
   }
   if (debug::kEnableBridgeTask) {

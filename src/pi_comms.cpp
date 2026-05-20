@@ -546,6 +546,14 @@ void taskPiCommsRx(void* parameter) {
       cycleUs = static_cast<uint32_t>(iterationStartUs - lastIterationStartUs);
     }
     lastIterationStartUs = iterationStartUs;
+    if (otaIsInProgress()) {
+      const bool overrun = cycleUs > expectedPeriodUs;
+      systemDiagReportLoop(SystemDiagTaskId::kPiUartRx, cycleUs, expectedPeriodUs, overrun, notifyTimeout);
+      if (!usePeriodicWakeTimer) {
+        vTaskDelay(period);
+      }
+      continue;
+    }
     const int len = g_initialized
                         ? uart_read_bytes(cfg->uartNum, chunk.data(), chunk.size(), cfg->rxReadTimeout)
                         : 0;
@@ -654,6 +662,12 @@ void taskPiCommsTx(void* parameter) {
       cycleUs = static_cast<uint32_t>(iterationStartUs - lastIterationStartUs);
     }
     lastIterationStartUs = iterationStartUs;
+    if (otaIsInProgress()) {
+      const bool overrun = cycleUs > expectedPeriodUs;
+      systemDiagReportLoop(SystemDiagTaskId::kPiUartTx, cycleUs, expectedPeriodUs, overrun, false);
+      vTaskDelayUntil(&lastWake, period);
+      continue;
+    }
     if (g_initialized) {
       const uint8_t status = encodeStatusFlags();
       const uint16_t speedTelemetry = encodeSpeedTelemetryFromHall();

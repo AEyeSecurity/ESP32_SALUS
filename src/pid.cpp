@@ -674,6 +674,26 @@ void taskPidControl(void* parameter) {
       dtSeconds = expectedPeriodSeconds;
     }
 
+    if (otaIsInProgress()) {
+      if (calibration.active) {
+        stopCalibrationSession(calibration, cfg->controller);
+      }
+      cfg->controller->reset();
+      bridge_stop();
+      rcNeutralCaptureActive = false;
+
+      PidRuntimeSnapshot maintenanceSnapshot{};
+      maintenanceSnapshot.valid = true;
+      maintenanceSnapshot.calibrationActive = false;
+      maintenanceSnapshot.sensorValid = false;
+      maintenanceSnapshot.dtSeconds = dtSeconds;
+      publishPidRuntimeSnapshot(maintenanceSnapshot);
+
+      const bool overrun = cycleUs > expectedPeriodUs;
+      systemDiagReportLoop(SystemDiagTaskId::kPid, cycleUs, expectedPeriodUs, overrun, notificationCount == 0);
+      continue;
+    }
+
     if (cfg->log && dtSeconds > dtOverrunThreshold) {
       if ((nowTicks - lastDtWarningTick) >= dtWarningCooldown) {
         String warn;

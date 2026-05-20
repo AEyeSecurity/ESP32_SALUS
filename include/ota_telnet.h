@@ -9,6 +9,7 @@ void InicializaWiFi(); // Funcion que inicializa WiFi en modo STA con fallback A
 void InicializaOTA(); //Funcion que inicializa OTA
 void InicializaTelnet();
 void EnviarMensajeTelnet(const String& txt); // Envia mensaje por Telnet
+bool otaIsInProgress();
 
 struct OtaTelnetTaskConfig {
   bool logHeartbeat;

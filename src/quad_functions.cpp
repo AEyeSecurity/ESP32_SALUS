@@ -1179,6 +1179,50 @@ void taskQuadDriveControl(void* parameter) {
     TickType_t drivePidTracePeriodTicks = kDrivePidTraceDefaultPeriod;
     quadDriveGetPidTraceConfig(drivePidTraceEnabled, drivePidTracePeriodTicks);
     const SpeedControlSource prevSpeedControlSource = lastSpeedControlSource;
+    QuadDriveDirection driveDirection = QuadDriveDirection::kForward;
+    bool directionSwitching = false;
+    bool relayEnergized = false;
+
+    if (otaIsInProgress()) {
+      quadThrottleStop();
+      quadBrakeRelease();
+      requestDirection(QuadDriveDirection::kForward);
+      updateDirectionState(sampleTick);
+      getDirectionState(driveDirection, directionSwitching, relayEnergized);
+      if (speedPidWasActive) {
+        speedPidReset();
+        speedPidWasActive = false;
+      }
+      speedFeedbackMissingTick = 0;
+      speedPidSeenTransition = false;
+      speedTransitionCounterPrimed = false;
+      speedLastTransitionsOk = 0;
+      lastSpeedControlSource = SpeedControlSource::kNone;
+      lastSpeedTargetRawMps = 0.0f;
+      rcTargetShapedMps = 0.0f;
+      rcLastTargetRawMps = 0.0f;
+      rcSourceLatched = false;
+      rcReverseSwitchActive = false;
+
+      QuadDriveRuntimeSnapshot maintenanceRuntime{};
+      maintenanceRuntime.valid = true;
+      maintenanceRuntime.source = QuadDriveControlSource::kNone;
+      maintenanceRuntime.piFresh = false;
+      maintenanceRuntime.piEstopActive = false;
+      maintenanceRuntime.speedPidFailsafe = false;
+      maintenanceRuntime.speedPidOverspeed = false;
+      maintenanceRuntime.appliedBrakePercent = 0;
+      maintenanceRuntime.speedTargetSignedMps = 0.0f;
+      maintenanceRuntime.speedTargetAbsMps = 0.0f;
+      maintenanceRuntime.direction = driveDirection;
+      maintenanceRuntime.directionSwitching = directionSwitching;
+      maintenanceRuntime.relayEnergized = relayEnergized;
+      setDriveRuntimeSnapshot(maintenanceRuntime);
+
+      const bool overrun = cycleUs > expectedPeriodUs;
+      systemDiagReportLoop(SystemDiagTaskId::kDrive, cycleUs, expectedPeriodUs, overrun, notificationCount == 0);
+      continue;
+    }
 
     if (driveLogEnabled && dtSeconds > dtOverrunThreshold &&
         (sampleTick - lastDtWarningTick) >= kDriveDtWarningCooldown) {
@@ -1230,9 +1274,6 @@ void taskQuadDriveControl(void* parameter) {
     bool brakeOverrideEnabled = false;
     uint8_t brakeOverridePercent = 0;
     quadDriveGetBrakeOverride(brakeOverrideEnabled, brakeOverridePercent);
-    QuadDriveDirection driveDirection = QuadDriveDirection::kForward;
-    bool directionSwitching = false;
-    bool relayEnergized = false;
 
     int commandValue = rcValue;
     bool commandFromPi = false;

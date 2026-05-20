@@ -95,6 +95,8 @@ String g_telnetCommandBuffer;
 NetworkMode g_networkMode = NetworkMode::kUnknown;
 String g_networkSsid;
 IPAddress g_networkIp;
+volatile bool g_otaInProgress = false;
+uint8_t g_lastOtaProgressPercent = 255;
 // Estado runtime de streams Telnet.
 bool g_speedStreamEnabled = false;
 TickType_t g_speedStreamPeriod = kSpeedStreamDefaultPeriod;
@@ -224,6 +226,38 @@ void markTelnetActivity() {
   g_telnetLastActivityTick = xTaskGetTickCount();
 }
 
+void disableTelnetStreams() {
+  g_speedStreamEnabled = false;
+  g_lastSpeedStreamTick = 0;
+  g_pidStreamEnabled = false;
+  g_lastPidStreamTick = 0;
+  g_speedPidStreamEnabled = false;
+  g_lastSpeedPidStreamTick = 0;
+  g_driveRcStreamEnabled = false;
+  g_lastDriveRcStreamTick = 0;
+  systemDiagSetJitterStream(false, 1);
+}
+
+void enterOtaMaintenanceMode() {
+  g_otaInProgress = true;
+  g_lastOtaProgressPercent = 255;
+  disableTelnetStreams();
+  clearTelnetLogQueue();
+  quadDriveSetLogEnabled(false);
+  quadDriveSetPidTraceEnabled(false, kDrivePidTraceDefaultPeriod);
+  quadDriveSetSpeedTargetOverride(false, 0.0f);
+  quadDriveSetPwmOverride(false, 0);
+  quadDriveSetBrakeOverride(false, 0);
+  quadDriveSetDirectionOverride(QuadDriveDirection::kForward);
+  quadThrottleStop();
+  quadBrakeRelease();
+  speedPidReset();
+}
+
+void exitOtaMaintenanceMode() {
+  g_otaInProgress = false;
+}
+
 void resetTelnetSession() {
   if (g_telnetClient) {
     g_telnetClient.stop();
@@ -236,15 +270,7 @@ void resetTelnetSession() {
   quadDriveSetBrakeOverride(false, 0);
   quadDriveSetDirectionOverride(QuadDriveDirection::kForward);
   g_telnetCommandBuffer = "";
-  g_speedStreamEnabled = false;
-  g_lastSpeedStreamTick = 0;
-  g_pidStreamEnabled = false;
-  g_lastPidStreamTick = 0;
-  g_speedPidStreamEnabled = false;
-  g_lastSpeedPidStreamTick = 0;
-  g_driveRcStreamEnabled = false;
-  g_lastDriveRcStreamTick = 0;
-  systemDiagSetJitterStream(false, 1);
+  disableTelnetStreams();
   g_telnetLastActivityTick = 0;
 }
 
@@ -2631,11 +2657,22 @@ void InicializaOTA() {
   ArduinoOTA.setHostname(OTA_HOSTNAME);
   ArduinoOTA.setPassword(OTA_PASSWORD);
 
-  ArduinoOTA.onStart([]() { EnviarMensajeTelnet("OTA iniciado"); });
-  ArduinoOTA.onEnd([]() { EnviarMensajeTelnet("OTA finalizado"); });
+  ArduinoOTA.onStart([]() {
+    enterOtaMaintenanceMode();
+    EnviarMensajeTelnet("OTA iniciado");
+  });
+  ArduinoOTA.onEnd([]() {
+    EnviarMensajeTelnet("OTA finalizado");
+    exitOtaMaintenanceMode();
+  });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
     const unsigned int percent = (total > 0U) ? ((progress * 100U) / total) : 0U;
-    EnviarMensajeTelnet("Progreso OTA: " + String(percent) + "%");
+    const uint8_t progressPercent = static_cast<uint8_t>((percent > 100U) ? 100U : percent);
+    if (progressPercent == 100U || g_lastOtaProgressPercent == 255 ||
+        progressPercent >= static_cast<uint8_t>(g_lastOtaProgressPercent + 10U)) {
+      g_lastOtaProgressPercent = progressPercent;
+      EnviarMensajeTelnet("Progreso OTA: " + String(progressPercent) + "%");
+    }
   });
   ArduinoOTA.onError([](ota_error_t error) {
     String msg = "Error OTA [" + String(error) + "]: ";
@@ -2653,6 +2690,7 @@ void InicializaOTA() {
       msg += "Unknown";
     }
     EnviarMensajeTelnet(msg);
+    exitOtaMaintenanceMode();
   });
   ArduinoOTA.begin();
 }
@@ -2697,6 +2735,10 @@ void broadcastIf(bool enabled, const String& message) {
   telnetIf(enabled, message);
 }
 
+bool otaIsInProgress() {
+  return g_otaInProgress;
+}
+
 void taskOtaTelnet(void* parameter) {
   OtaTelnetTaskConfig* config = static_cast<OtaTelnetTaskConfig*>(parameter);
   g_otaTaskHandleRuntime = xTaskGetCurrentTaskHandle();
@@ -2715,6 +2757,12 @@ void taskOtaTelnet(void* parameter) {
     }
     lastIterationStartUs = iterationStartUs;
     ArduinoOTA.handle();
+    if (otaIsInProgress()) {
+      const bool overrun = cycleUs > expectedPeriodUs;
+      systemDiagReportLoop(SystemDiagTaskId::kOtaTelnet, cycleUs, expectedPeriodUs, overrun, false);
+      vTaskDelayUntil(&lastWake, period);
+      continue;
+    }
     handleTelnetClient();
     processTelnetInput();
     drainTelnetLogQueue(kTelnetDrainMaxMessagesPerCycle);
