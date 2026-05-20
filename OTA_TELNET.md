@@ -130,6 +130,7 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low), con dirección por s
 - `sys.jitter`: estado del stream de jitter.
 - `sys.jitter on [ms] | sys.jitter off`: habilita/deshabilita stream periódico de resumen de jitter (`50..5000 ms`).
 - `sys.reset [keep|full]`: resetea acumulados de diagnóstico (`keep` por defecto preserva registro de tareas).
+- Si `TELEMETRY_URL` esta configurado, `CamTelemetry` aparece en estos reportes. Revisar que PID, Drive, OTA y PiUart no sumen overruns al habilitar los POSTs de camara.
 
 ## PID de velocidad (`spid.*`)
 

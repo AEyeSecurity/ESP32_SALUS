@@ -25,6 +25,8 @@ Nota operacional: la UI web de Telnet fue removida del repositorio para reducir 
   - `WIFI_AP_SSID`, `WIFI_AP_PASS`
   - `OTA_HOSTNAME`, `OTA_PASSWORD`
   - `WIFI_STA_CONNECT_TIMEOUT_MS`
+  - `TELEMETRY_URL` (vacio por defecto; si se define, habilita POSTs HTTP a la camara)
+  - `TELEMETRY_PERIOD_MS`, `TELEMETRY_HTTP_TIMEOUT_MS`
 - Flujo de arranque:
   1. Intenta conectar como cliente WiFi (STA).
   2. Si no conecta dentro del timeout, activa AP fallback.
@@ -61,6 +63,7 @@ Troubleshooting OTA rapido:
 | `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~16 KB)        | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
 | `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~12 KB)        | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA` v2 (7 bytes), valida versión/CRC y mantiene `PiCommsRxSnapshot` con `speed_cmd` firmado (`speed_cmd` + `REV_REQ`). |
 | `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~8 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status speed steer brake crc]` (8 bytes) con velocidad Hall, ángulo centrado y flags de seguridad. |
+| `taskCameraTelemetry`    | `src/camera_telemetry.cpp` | 4096 (~16 KB)      | 1    | 0      | 1000 ms periodica (`vTaskDelayUntil`)        | Solo si `TELEMETRY_URL` no esta vacio | Envia `POST /update` con `data=stem_in_stem_out_ozh` para disparar captura en el servidor de camara. |
 | `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Supervisor liviano sin lógica de comunicaciones (solo `vTaskDelay`). |
 
 > Nota: FreeRTOS en ESP32 interpreta el parametro `stackSize` en palabras de 32 bits. 4096 palabras equivalen a ~16 KB.
@@ -136,6 +139,21 @@ Troubleshooting OTA rapido:
 - `taskPidControl` usa `steer` de Pi cuando el frame está fresco (<=120 ms); si no, vuelve a steering RC.  
 - Para inspeccionar el estado usa Telnet (`comms.status`, `comms.reset`) o activa `debug::kLogPiComms`.  
 - Documentación detallada, pasos de prueba y troubleshooting: **[PI_COMMS_README.md](PI_COMMS_README.md)**.
+
+## Telemetria HTTP para camara
+
+- La tarea `taskCameraTelemetry` queda deshabilitada si `TELEMETRY_URL` esta vacio.
+- Para habilitarla, compilar con la URL del servidor Flask, por ejemplo:
+
+```ini
+-DTELEMETRY_URL=\"http://<raspi-ip>:5000/update\"
+```
+
+- Cada ciclo envia `application/x-www-form-urlencoded` con `data=stem_in_stem_out_ozh`:
+  - `stem_in`: comando de direccion vigente publicado por el PID.
+  - `stem_out`: angulo AS5600 centrado en centigrados; `-32768` si no esta disponible.
+  - `ozh`: porcentaje de freno aplicado.
+- La tarea corre con prioridad baja, timeout HTTP corto y no emite logs por defecto. Validar impacto con `sys.rt`, `sys.stack` y `sys.jitter`.
 
 ## Velocidad Hall (GPIO ISR IRAM)
 

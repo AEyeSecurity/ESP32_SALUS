@@ -13,6 +13,7 @@
 #include "hall_speed.h"
 #include "speed_pid.h"
 #include "system_diag.h"
+#include "camera_telemetry.h"
 
 constexpr uint16_t STACK_OTA = 4096;
 constexpr uint16_t STACK_BRIDGE = 4096;
@@ -22,6 +23,7 @@ constexpr uint16_t STACK_PID = 4096;
 constexpr uint16_t STACK_DRIVE = 4096;
 constexpr uint16_t STACK_PI_RX = 3072;
 constexpr uint16_t STACK_PI_TX = 2048;
+constexpr uint16_t STACK_CAMERA_TELEMETRY = 4096;
 
 constexpr int AS5600_SDA_PIN = 25;
 constexpr int AS5600_SCL_PIN = 33;
@@ -113,6 +115,18 @@ constexpr TickType_t PID_PERIOD = pdMS_TO_TICKS(30);
 constexpr TickType_t PID_LOG_INTERVAL = pdMS_TO_TICKS(200);
 constexpr TickType_t THROTTLE_PERIOD = pdMS_TO_TICKS(30);
 
+#ifndef TELEMETRY_URL
+#define TELEMETRY_URL ""
+#endif
+
+#ifndef TELEMETRY_PERIOD_MS
+#define TELEMETRY_PERIOD_MS 1000
+#endif
+
+#ifndef TELEMETRY_HTTP_TIMEOUT_MS
+#define TELEMETRY_HTTP_TIMEOUT_MS 200
+#endif
+
 namespace debug {
 constexpr bool kLogSystem = false;
 constexpr bool kLogOta = false;
@@ -123,6 +137,7 @@ constexpr bool kLogAs5600 = false;
 constexpr bool kLogPid = false;
 constexpr bool kLogDrive = false;
 constexpr bool kLogPiComms = false;
+constexpr bool kLogCameraTelemetry = false;
 constexpr bool kEnableBridgeTask = false;
 constexpr bool kEnableRcTask = false;
 constexpr bool kEnablePidTask = true;
@@ -232,6 +247,11 @@ static PiCommsConfig g_piCommsConfig = {
     0,
     debug::kLogPiComms,
     debug::kLogPiComms};
+static CameraTelemetryConfig g_cameraTelemetryConfig = {
+    TELEMETRY_URL,
+    pdMS_TO_TICKS(TELEMETRY_PERIOD_MS),
+    TELEMETRY_HTTP_TIMEOUT_MS,
+    debug::kLogCameraTelemetry};
 static HallSpeedConfig g_hallSpeedConfig = {
     26,      // Hall A
     27,      // Hall B
@@ -250,6 +270,7 @@ static TaskHandle_t g_taskPidHandle = nullptr;
 static TaskHandle_t g_taskDriveHandle = nullptr;
 static TaskHandle_t g_taskPiRxHandle = nullptr;
 static TaskHandle_t g_taskPiTxHandle = nullptr;
+static TaskHandle_t g_taskCameraTelemetryHandle = nullptr;
 
 void setup() {
   InicializaWiFi();
@@ -322,6 +343,18 @@ void setup() {
     }
   } else {
     broadcastIf(true, "[PI][UART] Error inicializando UART0 para Raspberry Pi");
+  }
+
+  if (cameraTelemetryUrlConfigured(g_cameraTelemetryConfig.url)) {
+    if (startTaskPinned(taskCameraTelemetry,
+                        "CamTelemetry",
+                        STACK_CAMERA_TELEMETRY,
+                        &g_cameraTelemetryConfig,
+                        1,
+                        &g_taskCameraTelemetryHandle,
+                        0)) {
+      systemDiagRegisterTask(SystemDiagTaskId::kCameraTelemetry, "CamTelemetry", g_taskCameraTelemetryHandle);
+    }
   }
 
   if (!hallSpeedInit(g_hallSpeedConfig)) {
