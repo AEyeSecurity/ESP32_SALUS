@@ -39,6 +39,7 @@ constexpr uint16_t kPpmChannelMinUs = 900;
 constexpr uint16_t kPpmChannelMaxUs = 2100;
 constexpr uint16_t kPpmSyncGapUs = 2700;
 constexpr uint8_t kPpmMinValidChannels = 4;
+constexpr uint8_t kPpmRequiredChannels = kPpmDebugChannels;
 constexpr uint8_t kPpmFramesToTrust = 3;
 constexpr uint8_t kPpmDefaultMarkerLevel = 0;
 constexpr TickType_t kRmtStallRestartTicks = pdMS_TO_TICKS(200);
@@ -406,6 +407,10 @@ bool readGpioPpmFrame(ParsedPpmFrame& outFrame) {
   return true;
 }
 
+bool hasRequiredPpmChannels(const ParsedPpmFrame& frame) {
+  return frame.valid && frame.channelCount >= kPpmRequiredChannels;
+}
+
 void recordRmtRestartResult(PpmRuntime& runtime, TickType_t now, bool ok, esp_err_t err, bool resetTrust) {
   if (resetTrust) {
     runtime.trustedFrameCount = 0;
@@ -693,7 +698,8 @@ void taskRcSampler(void* parameter) {
                                           g_ppmRuntime.markerLevel,
                                           g_ppmRuntime.polarityLocked,
                                           decodedFrame);
-      if (decoded) {
+      const bool accepted = decoded && hasRequiredPpmChannels(decodedFrame);
+      if (accepted) {
         g_ppmRuntime.lastChannels = decodedFrame.channels;
         g_ppmRuntime.lastChannelCount = decodedFrame.channelCount;
         g_ppmRuntime.lastFrameTick = now;
@@ -704,13 +710,13 @@ void taskRcSampler(void* parameter) {
       } else {
         g_ppmRuntime.trustedFrameCount = 0;
       }
-      recordPpmDecodeResult(decoded, decodedFrame, now);
+      recordPpmDecodeResult(accepted, decodedFrame, now);
 
       vRingbufferReturnItem(g_ppmRuntime.ring, items);
       rearmPpmRmt(g_ppmRuntime, now, false, log);
     } else {
       ParsedPpmFrame gpioFrame;
-      if (kEnableGpioPpmFallback && readGpioPpmFrame(gpioFrame)) {
+      if (kEnableGpioPpmFallback && readGpioPpmFrame(gpioFrame) && hasRequiredPpmChannels(gpioFrame)) {
         g_ppmRuntime.lastChannels = gpioFrame.channels;
         g_ppmRuntime.lastChannelCount = gpioFrame.channelCount;
         g_ppmRuntime.lastFrameTick = now;
