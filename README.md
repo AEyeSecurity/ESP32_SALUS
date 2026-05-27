@@ -8,6 +8,7 @@ Nota operacional: la UI web de Telnet fue removida del repositorio para reducir 
 
 - [OTA_TELNET.md](OTA_TELNET.md): comandos operativos por Telnet/OTA y debugging.
 - [SPID_ACCEL_PID.md](SPID_ACCEL_PID.md): explicacion tecnica completa del PID de aceleracion (`spid`), parametros y escenarios de validacion.
+- [RASPI_CAMERA_TELEMETRY.md](RASPI_CAMERA_TELEMETRY.md): hotspot Raspberry, servidor de camara y telemetria HTTP desde ESP32.
 
 ## Flujo de arranque (src/main.cpp)
 
@@ -35,6 +36,11 @@ Nota operacional: la UI web de Telnet fue removida del repositorio para reducir 
   - `esp32dev`: compilacion base.
   - `esp32dev-ota-sta`: subida OTA por hostname (`<OTA_HOSTNAME>.local`).
   - `esp32dev-ota-ap`: subida OTA por IP del AP fallback (`192.168.4.1`).
+  - `esp32dev-raspi-hotspot`: compilacion para conectarse al hotspot de la Raspberry y habilitar telemetria HTTP de camara.
+  - `esp32dev-ota-sta-to-raspi-hotspot`: primer salto OTA desde la red STA actual hacia firmware configurado para el hotspot de la Raspberry.
+  - `esp32dev-ota-ap-to-raspi-hotspot`: subida OTA desde el AP fallback del ESP32 hacia firmware configurado para el hotspot de la Raspberry.
+  - `esp32dev-ota-raspi-hotspot`: subida OTA cuando el ESP32 esta conectado al hotspot de la Raspberry.
+  - `esp32dev-ota-raspi-hotspot-to-sta`: vuelta OTA desde el hotspot de la Raspberry hacia firmware configurado para la red STA original.
 
 Comandos recomendados:
 
@@ -42,7 +48,18 @@ Comandos recomendados:
 pio run -e esp32dev
 pio run -e esp32dev-ota-sta -t upload
 pio run -e esp32dev-ota-ap -t upload
+pio run -e esp32dev-raspi-hotspot
+pio run -e esp32dev-ota-sta-to-raspi-hotspot -t upload
+pio run -e esp32dev-ota-ap-to-raspi-hotspot -t upload
+pio run -e esp32dev-ota-raspi-hotspot -t upload
+pio run -e esp32dev-ota-raspi-hotspot-to-sta -t upload
 ```
+
+El entorno Raspberry usa el hotspot `hotspotagv` y envia telemetria al servidor Flask
+en `http://10.42.0.1:5000/update`.
+Para migrar desde la red actual `CIT`, usar primero `esp32dev-ota-sta-to-raspi-hotspot`;
+despues del reinicio, usar `esp32dev-ota-raspi-hotspot` conectado al hotspot. Para volver
+a `CIT`, estando conectado al hotspot usar `esp32dev-ota-raspi-hotspot-to-sta`.
 
 Troubleshooting OTA rapido:
 
