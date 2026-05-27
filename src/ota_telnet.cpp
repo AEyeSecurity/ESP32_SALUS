@@ -859,6 +859,8 @@ String buildDriveRcStatusMessage() {
   msg += snapshot.normalizedThrottle;
   msg += " aux5=";
   msg += snapshot.rcAuxReverse;
+  msg += " aux6=";
+  msg += snapshot.rcAuxSafety;
   msg += " fresh=";
   msg += snapshot.rcFresh ? "Y" : "N";
   msg += " ageMs=";
@@ -873,6 +875,8 @@ String buildDriveRcStatusMessage() {
   msg += snapshot.rcSourceLatched ? "Y" : "N";
   msg += " armed=";
   msg += snapshot.rcDriveArmed ? "Y" : "N";
+  msg += " safe=";
+  msg += snapshot.rcSafetyLockActive ? "Y" : "N";
   msg += " cal{en=";
   msg += snapshot.rcNeutralOffsetCalEnabled ? "Y" : "N";
   msg += " allow=";

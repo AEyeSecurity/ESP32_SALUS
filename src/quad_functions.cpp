@@ -224,6 +224,7 @@ constexpr TickType_t kRcSourceDropoutGraceTicks = pdMS_TO_TICKS(150);
 constexpr int kRcNeutralDeadbandPercent = 3;
 constexpr int kRcReverseEnableThreshold = 25;
 constexpr int kRcReverseDisableThreshold = -25;
+constexpr int kRcSafetyLockThreshold = -20;
 // Respuesta RC mas directa sin tocar ganancias del PID.
 constexpr float kRcTargetSlewMps2Up = 4.0f;
 constexpr float kRcTargetSlewMps2Down = 5.0f;
@@ -243,6 +244,7 @@ constexpr float kReverseMinAntiWindupErrorThresholdMps = 0.0f;
 enum class DriveThrottleInhibitReason : uint8_t {
   kNone = 0,
   kEstop,
+  kRcSafetyLock,
   kPiBrake,
   kRcBrake,
   kBrakeOverride,
@@ -419,6 +421,8 @@ const char* driveThrottleInhibitReasonText(DriveThrottleInhibitReason reason) {
   switch (reason) {
     case DriveThrottleInhibitReason::kEstop:
       return "ESTOP";
+    case DriveThrottleInhibitReason::kRcSafetyLock:
+      return "RC_SAFE";
     case DriveThrottleInhibitReason::kPiBrake:
       return "PI_BRAKE";
     case DriveThrottleInhibitReason::kRcBrake:
@@ -946,7 +950,8 @@ bool quadDriveGetRcNeutralCalEnabled(bool& enabledOut) {
   return true;
 }
 
-uint8_t resolveAppliedBrakePercent(bool piBlocksRc,
+uint8_t resolveAppliedBrakePercent(bool rcSafetyLockActive,
+                                   bool piBlocksRc,
                                    bool piEstopActive,
                                    uint8_t piBrakePercent,
                                    uint8_t rcBrakePercent,
@@ -954,6 +959,9 @@ uint8_t resolveAppliedBrakePercent(bool piBlocksRc,
                                    bool brakeOverrideEnabled,
                                    uint8_t brakeOverridePercent) {
   uint8_t appliedBrakePercent = 0;
+  if (rcSafetyLockActive) {
+    return 100;
+  }
   if (piBlocksRc) {
     appliedBrakePercent = (piBrakePercent >= overspeedBrakePercent) ? piBrakePercent : overspeedBrakePercent;
     if (piEstopActive) {
@@ -968,7 +976,8 @@ uint8_t resolveAppliedBrakePercent(bool piBlocksRc,
   return appliedBrakePercent;
 }
 
-DriveThrottleInhibitReason resolveThrottleInhibitReason(bool piEstopActive,
+DriveThrottleInhibitReason resolveThrottleInhibitReason(bool rcSafetyLockActive,
+                                                        bool piEstopActive,
                                                         SpeedControlSource speedControlSource,
                                                         bool speedPidFeedbackOk,
                                                         bool speedPidFailsafe,
@@ -978,6 +987,9 @@ DriveThrottleInhibitReason resolveThrottleInhibitReason(bool piEstopActive,
                                                         uint8_t overspeedBrakePercent,
                                                         bool brakeOverrideEnabled,
                                                         uint8_t brakeOverridePercent) {
+  if (rcSafetyLockActive) {
+    return DriveThrottleInhibitReason::kRcSafetyLock;
+  }
   if (piEstopActive) {
     return DriveThrottleInhibitReason::kEstop;
   }
@@ -1032,6 +1044,7 @@ QuadDriveRcDebugSnapshot makeRcDebugSnapshot(int rawThrottle,
                                              int rcFilteredThrottle,
                                              int rcValue,
                                              int rcAuxReverseValue,
+                                             int rcAuxSafetyValue,
                                              bool rcFresh,
                                              TickType_t sampleTick,
                                              TickType_t snapshotTick,
@@ -1040,6 +1053,7 @@ QuadDriveRcDebugSnapshot makeRcDebugSnapshot(int rawThrottle,
                                              bool rcReverseRequested,
                                              bool rcUsingLatchThisCycle,
                                              bool rcDriveArmed,
+                                             bool rcSafetyLockActive,
                                              float rcTargetRawMpsDebug,
                                              float rcTargetShapedMpsDebug) {
   QuadDriveRcDebugSnapshot rcDebug{};
@@ -1047,6 +1061,7 @@ QuadDriveRcDebugSnapshot makeRcDebugSnapshot(int rawThrottle,
   rcDebug.filteredThrottle = rcFilteredThrottle;
   rcDebug.normalizedThrottle = rcValue;
   rcDebug.rcAuxReverse = rcAuxReverseValue;
+  rcDebug.rcAuxSafety = rcAuxSafetyValue;
   rcDebug.rcFresh = rcFresh;
   rcDebug.snapshotAgeMs =
       (snapshotTick != 0) ? static_cast<uint32_t>((sampleTick - snapshotTick) * portTICK_PERIOD_MS) : 0u;
@@ -1055,6 +1070,7 @@ QuadDriveRcDebugSnapshot makeRcDebugSnapshot(int rawThrottle,
   rcDebug.rcReverseRequest = rcReverseRequested;
   rcDebug.rcSourceLatched = rcUsingLatchThisCycle;
   rcDebug.rcDriveArmed = rcDriveArmed;
+  rcDebug.rcSafetyLockActive = rcSafetyLockActive;
   rcDebug.rcNeutralOffsetCalEnabled = g_rcNeutralOffsetCalEnabled;
   rcDebug.rcNeutralOffsetCalAllowed = g_rcNeutralOffsetCalAllowUpdate;
   rcDebug.rcTargetRawMps = rcTargetRawMpsDebug;
@@ -1205,6 +1221,8 @@ void taskQuadDriveControl(void* parameter) {
     const bool rcFresh = snapshotFresh;
     const int rawThrottle = snapshotFresh ? rcSnapshot.throttle : 0;
     const int rcAuxReverseValue = snapshotFresh ? rcSnapshot.ch0 : 0;
+    const int rcAuxSafetyValue = snapshotFresh ? rcSnapshot.ch2 : 0;
+    const bool rcSafetyLockActive = snapshotFresh && rcAuxSafetyValue < kRcSafetyLockThreshold;
 
     const int rcValue = updateThrottleFilter(rawThrottle);
     if (snapshotFresh) {
@@ -1231,6 +1249,12 @@ void taskQuadDriveControl(void* parameter) {
     bool pwmOverrideEnabled = false;
     int pwmOverridePercent = 0;
     quadDriveGetPwmOverride(pwmOverrideEnabled, pwmOverridePercent);
+    if (rcSafetyLockActive) {
+      speedTargetOverrideEnabled = false;
+      speedTargetOverrideMps = 0.0f;
+      pwmOverrideEnabled = false;
+      pwmOverridePercent = 0;
+    }
     bool brakeOverrideEnabled = false;
     uint8_t brakeOverridePercent = 0;
     quadDriveGetBrakeOverride(brakeOverrideEnabled, brakeOverridePercent);
@@ -1248,7 +1272,7 @@ void taskQuadDriveControl(void* parameter) {
     const bool piDriveEnabled = piFresh && piSnapshot.driveEnabled;
     const bool piSpeedPidRequested = piDriveEnabled && !piEstopActive && !piBrakeActive;
     const bool piBlocksRc = piFresh && (piDriveEnabled || piBrakeActive || piEstopActive);
-    const bool rcAuthorityAllowed = !speedTargetOverrideEnabled && !piBlocksRc;
+    const bool rcAuthorityAllowed = !rcSafetyLockActive && !speedTargetOverrideEnabled && !piBlocksRc;
     const bool rcAllowedWithPiPassive = piFresh && !piBlocksRc && !speedTargetOverrideEnabled;
     const bool rcBlockedByPi = piFresh && piBlocksRc && !speedTargetOverrideEnabled;
     const char* rcPiBlockReason =
@@ -1276,6 +1300,11 @@ void taskQuadDriveControl(void* parameter) {
           rcBrakePercent = 100;
         }
       }
+    }
+    if (rcSafetyLockActive) {
+      rcBrakePercent = 100;
+      rcReverseSwitchActive = false;
+      rcDriveArmed = false;
     }
     const bool rcManualBrakeActive = rcAuthorityAllowed && (rcBrakePercent > 0);
     RcDriveInputState rcInputState = RcDriveInputState::kStale;
@@ -1318,7 +1347,11 @@ void taskQuadDriveControl(void* parameter) {
     const bool rcUsingLatchThisCycle = (!rcSpeedPidEligible && rcDropoutGraceActive);
     const bool rcReverseRequested = rcCanLatch && (rcFresh || rcDropoutGraceActive) && rcReverseSwitchActive;
     SpeedControlSource speedControlSource = SpeedControlSource::kNone;
-    if (pwmOverrideEnabled) {
+    if (rcSafetyLockActive) {
+      speedControlSource = SpeedControlSource::kNone;
+      commandValue = 0;
+      throttleInhibit = true;
+    } else if (pwmOverrideEnabled) {
       speedControlSource = SpeedControlSource::kNone;
     } else if (speedTargetOverrideEnabled && !piEstopActive) {
       speedControlSource = SpeedControlSource::kTelnetSpeedPid;
@@ -1663,7 +1696,8 @@ void taskQuadDriveControl(void* parameter) {
       overspeedBrakePercent = clampPercentFromFloat(speedPidBrakePercent);
     }
 
-    const uint8_t appliedBrakePercent = resolveAppliedBrakePercent(piBlocksRc,
+    const uint8_t appliedBrakePercent = resolveAppliedBrakePercent(rcSafetyLockActive,
+                                                                   piBlocksRc,
                                                                    piEstopActive,
                                                                    piBrakePercent,
                                                                    rcBrakePercent,
@@ -1671,7 +1705,8 @@ void taskQuadDriveControl(void* parameter) {
                                                                    brakeOverrideEnabled,
                                                                    brakeOverridePercent);
     const DriveThrottleInhibitReason inhibitReason =
-        resolveThrottleInhibitReason(piEstopActive,
+        resolveThrottleInhibitReason(rcSafetyLockActive,
+                                     piEstopActive,
                                      speedControlSource,
                                      speedPidFeedbackOk,
                                      speedPidFailsafe,
@@ -1721,6 +1756,7 @@ void taskQuadDriveControl(void* parameter) {
                             rcFilteredThrottle,
                             rcValue,
                             rcAuxReverseValue,
+                            rcAuxSafetyValue,
                             rcFresh,
                             sampleTick,
                             snapshotTick,
@@ -1729,6 +1765,7 @@ void taskQuadDriveControl(void* parameter) {
                             rcReverseRequested,
                             rcUsingLatchThisCycle,
                             rcDriveArmed,
+                            rcSafetyLockActive,
                             rcTargetRawMpsDebug,
                             rcTargetShapedMpsDebug);
     setRcDebugSnapshot(rcDebug);

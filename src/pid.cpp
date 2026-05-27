@@ -93,6 +93,7 @@ constexpr uint8_t kCalibrationReleaseDutyPercent = 30;
 constexpr float kCalibrationStallThresholdDeg = 0.5f;
 constexpr int kRcSteeringCommandDeadbandPercent = 4;
 constexpr int kPiSteeringCommandDeadbandPercent = 1;
+constexpr int kRcSafetyLockThreshold = -20;
 const TickType_t kRcFreshThreshold = pdMS_TO_TICKS(50);
 const TickType_t kRcNeutralCaptureWindow = pdMS_TO_TICKS(800);
 constexpr int kRcNeutralCaptureMaxAbsCommand = 30;
@@ -698,6 +699,7 @@ void taskPidControl(void* parameter) {
     if (!rcFresh) {
       rcSnapshot.steering = 0;
     }
+    const bool rcSafetyLockActive = rcFresh && rcSnapshot.ch2 < kRcSafetyLockThreshold;
     const int rcValue = rcSnapshot.steering;
     int rcSteeringCorrected = rcValue;
     bool rcNeutralCaptureHoldActive = false;
@@ -790,6 +792,14 @@ void taskPidControl(void* parameter) {
     const bool shouldLog = cfg->log && (logInterval == 0 || (nowTicks - lastLog) >= logInterval);
 
     if (calibration.active) {
+      if (rcSafetyLockActive) {
+        stopCalibrationSession(calibration, cfg->controller);
+        bridge_stop();
+        publishPidRuntimeSnapshot(runtimeSnapshot);
+        const bool overrun = cycleUs > expectedPeriodUs;
+        systemDiagReportLoop(SystemDiagTaskId::kPid, cycleUs, expectedPeriodUs, overrun, notificationCount == 0);
+        continue;
+      }
       emitCalibrationDebug(calibration, nowTicks, measuredDeg, limitLeftActive, limitRightActive);
       runtimeSnapshot.calibrationActive =
           processCalibrationStep(calibration, cfg, nowTicks, measuredDeg, limitLeftActive, limitRightActive);
@@ -805,6 +815,17 @@ void taskPidControl(void* parameter) {
     runtimeSnapshot.targetDeg = targetDeg;
 
     bool skipControl = false;
+    if (rcSafetyLockActive) {
+      cfg->controller->reset();
+      bridge_stop();
+      skipControl = true;
+      runtimeSnapshot.steeringCommand = 0;
+      runtimeSnapshot.targetDeg = measuredDeg;
+      if (shouldLog) {
+        broadcastIf(true, "[PID] RC safety lock CH6 activo; deteniendo puente H");
+        lastLog = nowTicks;
+      }
+    }
     if (measuredDeg < 0.0f) {
       cfg->controller->reset();
       bridge_stop();
