@@ -6,13 +6,11 @@
 #include <freertos/task.h>
 
 struct CameraTelemetryConfig {
-  const char* url;
+  uint16_t port;
   TickType_t period;
-  uint16_t httpTimeoutMs;
   bool log;
 };
 
-bool cameraTelemetryUrlConfigured(const char* url);
-void taskCameraTelemetry(void* parameter);
+void taskCameraTelemetryServer(void* parameter);
 
 #endif  // CAMERA_TELEMETRY_H

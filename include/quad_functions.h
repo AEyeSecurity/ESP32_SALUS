@@ -121,6 +121,7 @@ struct QuadDriveRuntimeSnapshot {
   bool speedPidFailsafe;
   bool speedPidOverspeed;
   uint8_t appliedBrakePercent;
+  int16_t tractionPwmSigned;
   float speedTargetSignedMps;
   float speedTargetAbsMps;
   QuadDriveDirection direction;

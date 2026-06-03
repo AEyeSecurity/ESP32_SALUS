@@ -407,6 +407,26 @@ uint8_t clampPercentFromFloat(float percent) {
   return static_cast<uint8_t>(percent + 0.5f);
 }
 
+int16_t computeTractionPwmSigned(bool throttleInhibit,
+                                 int commandValue,
+                                 uint8_t appliedBrakePercent,
+                                 QuadDriveDirection direction) {
+  if (throttleInhibit || appliedBrakePercent > 0u) {
+    return 0;
+  }
+  if (commandValue < 0) {
+    commandValue = -commandValue;
+  }
+  if (commandValue > 100) {
+    commandValue = 100;
+  }
+  if (commandValue <= g_config.activationThreshold) {
+    return 0;
+  }
+  const int pwm = (commandValue * 255 + 50) / 100;
+  return (direction == QuadDriveDirection::kReverse) ? static_cast<int16_t>(-pwm) : static_cast<int16_t>(pwm);
+}
+
 float clampFloat(float value, float minValue, float maxValue) {
   if (value < minValue) {
     return minValue;
@@ -1018,6 +1038,7 @@ QuadDriveRuntimeSnapshot makeDriveRuntimeSnapshot(bool commandFromPwmOverride,
                                                   bool speedPidFailsafe,
                                                   bool speedPidOverspeed,
                                                   uint8_t appliedBrakePercent,
+                                                  int16_t tractionPwmSigned,
                                                   float speedTargetSignedMps,
                                                   float speedTargetAbsMps,
                                                   QuadDriveDirection direction,
@@ -1032,6 +1053,7 @@ QuadDriveRuntimeSnapshot makeDriveRuntimeSnapshot(bool commandFromPwmOverride,
   runtime.speedPidFailsafe = speedPidFailsafe;
   runtime.speedPidOverspeed = speedPidOverspeed;
   runtime.appliedBrakePercent = appliedBrakePercent;
+  runtime.tractionPwmSigned = tractionPwmSigned;
   runtime.speedTargetSignedMps = speedTargetSignedMps;
   runtime.speedTargetAbsMps = speedTargetAbsMps;
   runtime.direction = direction;
@@ -1170,6 +1192,7 @@ void taskQuadDriveControl(void* parameter) {
   initialRuntime.speedPidFailsafe = false;
   initialRuntime.speedPidOverspeed = false;
   initialRuntime.appliedBrakePercent = 0;
+  initialRuntime.tractionPwmSigned = 0;
   initialRuntime.speedTargetSignedMps = 0.0f;
   initialRuntime.speedTargetAbsMps = 0.0f;
   initialRuntime.direction = QuadDriveDirection::kForward;
@@ -1721,6 +1744,8 @@ void taskQuadDriveControl(void* parameter) {
       throttleInhibit = true;
     }
     quadBrakeApplyPercent(appliedBrakePercent);
+    const int16_t tractionPwmSigned =
+        computeTractionPwmSigned(throttleInhibit, commandValue, appliedBrakePercent, driveDirection);
 
     const QuadDriveRuntimeSnapshot driveRuntime = makeDriveRuntimeSnapshot(commandFromPwmOverride,
                                                                            speedControlSource,
@@ -1729,6 +1754,7 @@ void taskQuadDriveControl(void* parameter) {
                                                                            speedPidFailsafe,
                                                                            speedPidOverspeed,
                                                                            appliedBrakePercent,
+                                                                           tractionPwmSigned,
                                                                            speedTargetSignedMps,
                                                                            speedTargetAbsMps,
                                                                            driveDirection,

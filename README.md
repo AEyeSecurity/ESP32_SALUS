@@ -8,7 +8,7 @@ Nota operacional: la UI web de Telnet fue removida del repositorio para reducir 
 
 - [OTA_TELNET.md](OTA_TELNET.md): comandos operativos por Telnet/OTA y debugging.
 - [SPID_ACCEL_PID.md](SPID_ACCEL_PID.md): explicacion tecnica completa del PID de aceleracion (`spid`), parametros y escenarios de validacion.
-- [RASPI_CAMERA_TELEMETRY.md](RASPI_CAMERA_TELEMETRY.md): hotspot Raspberry, servidor de camara y telemetria HTTP desde ESP32.
+- [RASPI_CAMERA_TELEMETRY.md](RASPI_CAMERA_TELEMETRY.md): hotspot Raspberry, captura de camaras y contrato HTTP Raspberry -> ESP32.
 
 ## Flujo de arranque (src/main.cpp)
 
@@ -26,8 +26,8 @@ Nota operacional: la UI web de Telnet fue removida del repositorio para reducir 
   - `WIFI_AP_SSID`, `WIFI_AP_PASS`
   - `OTA_HOSTNAME`, `OTA_PASSWORD`
   - `WIFI_STA_CONNECT_TIMEOUT_MS`
-  - `TELEMETRY_URL` (vacio por defecto; si se define, habilita POSTs HTTP a la camara)
-  - `TELEMETRY_PERIOD_MS`, `TELEMETRY_HTTP_TIMEOUT_MS`
+  - `WIFI_STA_STATIC_IP`, `WIFI_STA_GATEWAY`, `WIFI_STA_SUBNET` (opcionales; usados para IP fija en hotspot Raspberry)
+  - `CAMERA_TELEMETRY_SERVER_ENABLED`, `CAMERA_TELEMETRY_PORT`, `CAMERA_TELEMETRY_TASK_PERIOD_MS`
 - Flujo de arranque:
   1. Intenta conectar como cliente WiFi (STA).
   2. Si no conecta dentro del timeout, activa AP fallback.
@@ -36,7 +36,7 @@ Nota operacional: la UI web de Telnet fue removida del repositorio para reducir 
   - `esp32dev`: compilacion base.
   - `esp32dev-ota-sta`: subida OTA por hostname (`<OTA_HOSTNAME>.local`).
   - `esp32dev-ota-ap`: subida OTA por IP del AP fallback (`192.168.4.1`).
-  - `esp32dev-raspi-hotspot`: compilacion para conectarse al hotspot de la Raspberry y habilitar telemetria HTTP de camara.
+  - `esp32dev-raspi-hotspot`: compilacion para conectarse al hotspot de la Raspberry.
   - `esp32dev-ota-sta-to-raspi-hotspot`: primer salto OTA desde la red STA actual hacia firmware configurado para el hotspot de la Raspberry.
   - `esp32dev-ota-ap-to-raspi-hotspot`: subida OTA desde el AP fallback del ESP32 hacia firmware configurado para el hotspot de la Raspberry.
   - `esp32dev-ota-raspi-hotspot`: subida OTA cuando el ESP32 esta conectado al hotspot de la Raspberry.
@@ -55,8 +55,9 @@ pio run -e esp32dev-ota-raspi-hotspot -t upload
 pio run -e esp32dev-ota-raspi-hotspot-to-sta -t upload
 ```
 
-El entorno Raspberry usa el hotspot `hotspotagv` y envia telemetria al servidor Flask
-en `http://10.42.0.1:5000/update`.
+El flujo correcto de camaras usa el hotspot `hotspotagv`: la Raspberry consulta
+`GET http://10.42.0.100:80/telemetria` en el ESP32 y captura las camaras con esa
+telemetria. Ver [RASPI_CAMERA_TELEMETRY.md](RASPI_CAMERA_TELEMETRY.md).
 Para migrar desde la red actual `CIT`, usar primero `esp32dev-ota-sta-to-raspi-hotspot`;
 despues del reinicio, usar `esp32dev-ota-raspi-hotspot` conectado al hotspot. Para volver
 a `CIT`, estando conectado al hotspot usar `esp32dev-ota-raspi-hotspot-to-sta`.
@@ -83,7 +84,7 @@ Troubleshooting OTA rapido:
 | `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~4 KB)         | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
 | `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~3 KB)         | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA` v2 (7 bytes), valida versión/CRC y mantiene `PiCommsRxSnapshot` con `speed_cmd` firmado (`speed_cmd` + `REV_REQ`). |
 | `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~2 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status speed steer brake crc]` (8 bytes) con velocidad Hall, ángulo centrado y flags de seguridad. |
-| `taskCameraTelemetry`    | `src/camera_telemetry.cpp` | 6144 (~6 KB)       | 1    | 0      | 1000 ms periodica (`vTaskDelayUntil`)        | Solo si `TELEMETRY_URL` no esta vacio | Envia `POST /update` con `data=stem_in_stem_out_ozh` para disparar captura en el servidor de camara. |
+| `taskCameraTelemetryServer` | `src/camera_telemetry.cpp` | 6144 (~6 KB)    | 1    | 0      | 5 ms periodica (`vTaskDelayUntil`)           | Solo si `CAMERA_TELEMETRY_SERVER_ENABLED=1` | Sirve `GET /telemetria` para la Raspberry con `traccion_direccion_freno`. |
 | `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Supervisor liviano sin lógica de comunicaciones (solo `vTaskDelay`). |
 
 > Nota: en este target Arduino/ESP32 los tamanos pasados a `startTaskPinned`/`xTaskCreatePinnedToCore`
@@ -166,18 +167,14 @@ Troubleshooting OTA rapido:
 
 ## Telemetria HTTP para camara
 
-- La tarea `taskCameraTelemetry` queda deshabilitada si `TELEMETRY_URL` esta vacio.
-- Para habilitarla, compilar con la URL del servidor Flask, por ejemplo:
+El contrato vigente esta documentado en [RASPI_CAMERA_TELEMETRY.md](RASPI_CAMERA_TELEMETRY.md):
+la Raspberry consulta `GET http://10.42.0.100:80/telemetria`, el ESP32 responde
+`traccion_direccion_freno`, y la Raspberry guarda las imagenes de las 3 camaras con
+esa telemetria en el nombre.
 
-```ini
--DTELEMETRY_URL=\"http://<raspi-ip>:5000/update\"
-```
-
-- Cada ciclo envia `application/x-www-form-urlencoded` con `data=stem_in_stem_out_ozh`:
-  - `stem_in`: comando de direccion vigente publicado por el PID.
-  - `stem_out`: angulo AS5600 centrado en centigrados; `-32768` si no esta disponible.
-  - `ozh`: porcentaje de freno aplicado.
-- La tarea corre con prioridad baja, timeout HTTP corto y no emite logs por defecto. Validar impacto con `sys.rt`, `sys.stack` y `sys.jitter`.
+En el entorno `esp32dev-raspi-hotspot`, el ESP32 usa IP fija `10.42.0.100` y habilita
+`taskCameraTelemetryServer` en puerto `80`. El campo `traccion` es PWM aplicado firmado
+`-255..255`, `direccion` es comando normalizado `0..180`, y `freno` es binario `0/1`.
 
 ## Velocidad Hall (GPIO ISR IRAM)
 

@@ -48,6 +48,18 @@
 #define WIFI_STA_CONNECT_TIMEOUT_MS 10000
 #endif
 
+#ifndef WIFI_STA_STATIC_IP
+#define WIFI_STA_STATIC_IP ""
+#endif
+
+#ifndef WIFI_STA_GATEWAY
+#define WIFI_STA_GATEWAY ""
+#endif
+
+#ifndef WIFI_STA_SUBNET
+#define WIFI_STA_SUBNET ""
+#endif
+
 namespace {
 constexpr uint16_t kTelnetPort = 23;
 // STREAM config por dominio (periodos en ms).
@@ -129,6 +141,28 @@ void updateNetworkState(NetworkMode mode, const String& ssid, const IPAddress& i
   g_networkMode = mode;
   g_networkSsid = ssid;
   g_networkIp = ip;
+}
+
+bool configureStaticStaIfRequested() {
+  if (strlen(WIFI_STA_STATIC_IP) == 0 && strlen(WIFI_STA_GATEWAY) == 0 && strlen(WIFI_STA_SUBNET) == 0) {
+    return true;
+  }
+
+  IPAddress ip;
+  IPAddress gateway;
+  IPAddress subnet;
+  if (!ip.fromString(WIFI_STA_STATIC_IP) ||
+      !gateway.fromString(WIFI_STA_GATEWAY) ||
+      !subnet.fromString(WIFI_STA_SUBNET)) {
+    Serial.println("[WIFI] Configuracion IP estatica invalida; usando DHCP");
+    return false;
+  }
+
+  if (!WiFi.config(ip, gateway, subnet)) {
+    Serial.println("[WIFI] No se pudo aplicar IP estatica; usando DHCP");
+    return false;
+  }
+  return true;
 }
 
 bool isCurrentTaskOtaTelnet() {
@@ -2694,6 +2728,7 @@ void processTelnetInput() {
 void InicializaWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(OTA_HOSTNAME);
+  configureStaticStaIfRequested();
   WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASS);
 
   const uint32_t timeoutMs = static_cast<uint32_t>(WIFI_STA_CONNECT_TIMEOUT_MS);

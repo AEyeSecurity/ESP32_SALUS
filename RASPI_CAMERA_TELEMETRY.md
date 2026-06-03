@@ -1,16 +1,34 @@
-# Raspberry Camara y Telemetria HTTP
+# Raspberry, camaras y telemetria HTTP
 
-Este documento describe la Raspberry que actua como hotspot, servidor de captura de camara y receptor de telemetria HTTP enviada por el ESP32.
+Este documento es la fuente canonica para la comunicacion entre la Raspberry Pi de camaras y el ESP32 durante la captura de datasets.
+
+La Raspberry inicia cada ciclo, consulta telemetria al ESP32 y luego captura las camaras.
 
 ## Rol en el sistema
 
 - La Raspberry levanta el hotspot WiFi `hotspotagv`.
-- El ESP32 se conecta como cliente STA a ese hotspot cuando se compila con el entorno `esp32dev-raspi-hotspot`.
-- La Raspberry escucha HTTP en `10.42.0.1:5000`.
-- El ESP32 envia `POST /update` periodicos con datos de direccion y freno.
-- Cada POST recibido dispara una captura de camara y guarda una imagen con la telemetria embebida en el nombre del archivo.
+- El ESP32 se conecta como cliente STA a ese hotspot.
+- El ESP32 debe usar IP fija `10.42.0.100`.
+- El ESP32 expone un servidor HTTP en puerto `80`.
+- La Raspberry hace `GET /telemetria` al ESP32 antes de cada ciclo de captura.
+- Con la respuesta de telemetria, la Raspberry captura las 3 camaras y guarda las fotos con esos datos en el nombre del archivo.
 
-## Acceso SSH
+Los datos se usan como etiquetas para entrenar el modelo de conduccion autonoma por behavioral cloning.
+
+## Red
+
+| Parametro | Valor |
+|---|---|
+| SSID hotspot Raspberry | `hotspotagv` |
+| Contrasena WiFi | `hotspotagv123` |
+| IP Raspberry / gateway | `10.42.0.1` |
+| IP fija ESP32 | `10.42.0.100` |
+| Puerto HTTP ESP32 | `80` |
+| Endpoint telemetria | `http://10.42.0.100:80/telemetria` |
+
+La IP fija del ESP32 es parte del contrato: la Raspberry necesita saber siempre a donde consultar.
+
+## Acceso SSH a la Raspberry
 
 Desde esta PC queda configurado el alias SSH:
 
@@ -26,114 +44,153 @@ ssh cuatri2@10.42.0.1
 
 La autenticacion por llave SSH ya quedo instalada, por lo que no deberia pedir contrasena desde este usuario.
 
-## Red
-
-Datos operativos:
-
-- SSID hotspot Raspberry: `hotspotagv`
-- IP Raspberry en hotspot: `10.42.0.1`
-- Servidor Flask: `http://10.42.0.1:5000`
-- Endpoint de telemetria/captura: `http://10.42.0.1:5000/update`
-
-El ESP32 usa estos valores en `platformio.ini`:
-
-```ini
-[env:esp32dev-raspi-hotspot]
-build_flags =
-  -DWIFI_STA_SSID=\"hotspotagv\"
-  -DWIFI_STA_PASS=\"hotspotagv123\"
-  -DTELEMETRY_URL=\"http://10.42.0.1:5000/update\"
-```
-
-## Servidor HTTP de camara
-
-Implementacion actual:
-
-- Archivo: `servidor_telemetria.py`
-- Framework: Flask
-- Camara: OpenCV (`cv2.VideoCapture(0)` y fallback a `1`)
-- Directorio de imagenes: `/home/admin/camara_imagenes`
-- Puerto: `5000`
-- Bind: `0.0.0.0`
-
-Arranque manual:
-
-```bash
-ssh raspy-cam
-python3 servidor_telemetria.py
-```
-
-Healthcheck:
-
-```bash
-curl http://10.42.0.1:5000/healthz
-```
-
-Respuesta esperada:
-
-```json
-{"status":"running"}
-```
-
-## Protocolo HTTP ESP32 -> Raspberry
+## Protocolo HTTP Raspberry -> ESP32
 
 Metodo:
 
 ```text
-POST /update
-Content-Type: application/x-www-form-urlencoded
+GET /telemetria
 ```
 
-Body:
+URL completa:
 
 ```text
-data=stem_in_stem_out_ozh
+http://10.42.0.100:80/telemetria
+```
+
+Respuesta:
+
+```text
+<traccion>_<direccion>_<freno>
 ```
 
 Ejemplo:
 
-```bash
-curl -X POST http://10.42.0.1:5000/update -d "data=48_1500_1"
+```text
+180_90_0
 ```
 
 Campos:
 
-- `stem_in`: comando de direccion vigente publicado por el PID del ESP32.
-- `stem_out`: angulo AS5600 centrado en centigrados; `-32768` si no esta disponible.
-- `ozh`: porcentaje de freno aplicado.
+| Campo | Tipo | Rango | Descripcion |
+|---|---|---|---|
+| `traccion` | entero | `-255..255` | PWM del motor de traccion. Positivo = avanzar, negativo = retroceder, `0` = sin potencia. |
+| `direccion` | entero | `0..180` | Posicion de direccion. `0` = maximo izquierda, `90` = recto, `180` = maximo derecha. Si el actuador usa PWM en vez de angulo, adaptar el rango. |
+| `freno` | entero | `0..1` | Estado del freno. `0` = sin freno, `1` = frenando. |
 
-Nombre de archivo generado:
+`traccion` y `direccion` son las acciones principales que el modelo aprende a predecir. `freno` se registra separado porque `traccion=0` no distingue entre "sin potencia" y "frenando".
+
+## Nombre de archivo
+
+Cada foto se guarda con telemetria en el nombre:
 
 ```text
-YYYY-MM-DD_HH-MM-SS_stemIn-48_stemOut-1500_ozh-1.jpg
+2026-06-01_10-30-45_123456_traccion-180_direccion-90_freno-0.jpg
 ```
 
-## Firmware ESP32 relacionado
+Formato:
 
-Archivos principales:
+```text
+{fecha}_{hora}_{microsegundos}_traccion-{valor}_direccion-{valor}_freno-{valor}.jpg
+```
 
-- `src/camera_telemetry.cpp`: arma el body HTTP y envia los POST.
-- `include/camera_telemetry.h`: configuracion de la tarea.
-- `src/main.cpp`: crea `taskCameraTelemetry` solo si `TELEMETRY_URL` no esta vacio.
-- `platformio.ini`: define entornos de red y OTA.
+## Health check
 
-La tarea queda habilitada cuando `TELEMETRY_URL` no esta vacio. En el entorno base `esp32dev` esta vacia, por lo que no envia telemetria HTTP. En `esp32dev-raspi-hotspot` apunta a la Raspberry.
+Para verificar que el ESP32 responde antes de iniciar captura:
 
-## Entornos PlatformIO
+```bash
+curl http://10.42.0.100:80/telemetria
+```
 
-Compilar firmware para el hotspot de la Raspberry:
+Si responde tres valores separados por `_`, esta listo.
+
+## Frecuencia de captura
+
+La Raspberry captura a un maximo de 5 FPS, es decir un ciclo cada 200 ms.
+
+Cada ciclo:
+
+1. Hace `GET /telemetria` al ESP32.
+2. Captura las 3 camaras.
+3. Guarda las imagenes con la telemetria en el nombre.
+4. Espera lo que reste del intervalo de 200 ms.
+
+## Firmware ESP32 requerido
+
+El firmware debe:
+
+- Conectarse al hotspot `hotspotagv`.
+- Configurar IP estatica `10.42.0.100`, gateway `10.42.0.1` y mascara `255.255.255.0`.
+- Levantar un servidor HTTP en puerto `80`.
+- Exponer `GET /telemetria`.
+- Responder `text/plain` con `traccion_direccion_freno`.
+
+Ejemplo minimo de contrato:
+
+```cpp
+#include <WiFi.h>
+#include <WebServer.h>
+
+const char* ssid = "hotspotagv";
+const char* password = "hotspotagv123";
+
+WebServer server(80);
+
+int traccion = 0;
+int direccion = 90;
+int freno = 0;
+
+void handleTelemetria() {
+  String respuesta = String(traccion) + "_" + String(direccion) + "_" + String(freno);
+  server.send(200, "text/plain", respuesta);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  IPAddress ip(10, 42, 0, 100);
+  IPAddress gateway(10, 42, 0, 1);
+  IPAddress subnet(255, 255, 255, 0);
+  WiFi.config(ip, gateway, subnet);
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+  }
+
+  server.on("/telemetria", HTTP_GET, handleTelemetria);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+}
+```
+
+## Firmware en este repositorio
+
+Implementacion actual:
+
+- `src/camera_telemetry.cpp` levanta el servidor HTTP del ESP32 y sirve `GET /telemetria`.
+- `src/quad_functions.cpp` publica `tractionPwmSigned` como PWM aplicado real en `-255..255`.
+- `src/ota_telnet.cpp` aplica IP estatica STA cuando el entorno define `WIFI_STA_STATIC_IP`, `WIFI_STA_GATEWAY` y `WIFI_STA_SUBNET`.
+- `platformio.ini` habilita el servidor solo en `esp32dev-raspi-hotspot` y entornos OTA que extienden ese entorno.
+
+## Entornos PlatformIO relacionados
+
+Compilar firmware para conectarse al hotspot de la Raspberry:
 
 ```bash
 pio run -e esp32dev-raspi-hotspot
 ```
 
-Primer salto desde la red `CIT` hacia firmware que luego se conectara a `hotspotagv`:
+Primer salto OTA desde la red `CIT` hacia firmware configurado para `hotspotagv`:
 
 ```bash
 pio run -e esp32dev-ota-sta-to-raspi-hotspot -t upload
 ```
 
-Subida desde el AP fallback del ESP32 (`esp32-salus`, IP `192.168.4.1`) hacia firmware que luego se conectara a `hotspotagv`:
+Subida desde el AP fallback del ESP32 (`esp32-salus`, IP `192.168.4.1`) hacia firmware configurado para `hotspotagv`:
 
 ```bash
 pio run -e esp32dev-ota-ap-to-raspi-hotspot -t upload
@@ -161,7 +218,7 @@ source ~/.bashrc
 ## Troubleshooting
 
 - Si `ssh raspy-cam` no conecta, verificar que la PC este conectada al hotspot `hotspotagv`.
-- Si `curl /healthz` falla, revisar que `servidor_telemetria.py` este corriendo en la Raspberry.
-- Si `POST /update` responde 500, revisar camara, permisos y disponibilidad de `/dev/video*`.
-- Si el ESP32 no envia POSTs, confirmar que fue cargado con `esp32dev-raspi-hotspot` o un entorno OTA que extienda ese entorno.
+- Si `curl http://10.42.0.100:80/telemetria` falla, verificar que el ESP32 este conectado al hotspot y usando IP fija `10.42.0.100`.
+- Si la respuesta esta vacia o malformada, revisar que el firmware actualice `traccion`, `direccion` y `freno`.
+- Si la Raspberry no captura a 5 FPS, revisar tiempos de captura de camaras y timeouts del `GET`.
 - Si OTA no resuelve `esp32-salus.local`, usar temporalmente la IP real del ESP32 como `upload_port`.

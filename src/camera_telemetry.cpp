@@ -1,153 +1,98 @@
 #include "camera_telemetry.h"
 
-#include <HTTPClient.h>
+#include <WebServer.h>
 #include <WiFi.h>
 #include <esp_timer.h>
-
-#include <math.h>
 
 #include "ota_telnet.h"
 #include "pid.h"
 #include "quad_functions.h"
-#include "steering_calibration.h"
 #include "system_diag.h"
 
 namespace {
 
-constexpr TickType_t kDefaultPeriod = pdMS_TO_TICKS(1000);
-constexpr uint16_t kDefaultHttpTimeoutMs = 200;
-constexpr int16_t kSteerOutNotAvailable = INT16_MIN;
-constexpr int kHttpOkMin = 200;
-constexpr int kHttpOkMax = 299;
+constexpr TickType_t kDefaultPeriod = pdMS_TO_TICKS(5);
 
-int16_t clampCenteredCentiDeg(float centeredDeg) {
-  if (!isfinite(centeredDeg)) {
-    return kSteerOutNotAvailable;
+int clampInt(int value, int minValue, int maxValue) {
+  if (value < minValue) {
+    return minValue;
   }
-  if (centeredDeg < -180.0f) {
-    centeredDeg = -180.0f;
-  } else if (centeredDeg > 180.0f) {
-    centeredDeg = 180.0f;
+  if (value > maxValue) {
+    return maxValue;
   }
-
-  long centeredCenti = lroundf(centeredDeg * 100.0f);
-  if (centeredCenti < -18000L) {
-    centeredCenti = -18000L;
-  } else if (centeredCenti > 18000L) {
-    centeredCenti = 18000L;
-  }
-  return static_cast<int16_t>(centeredCenti);
+  return value;
 }
 
-int16_t readStemOutCentiDeg() {
-  PidRuntimeSnapshot pidSnapshot{};
-  if (!pidGetRuntimeSnapshot(pidSnapshot) || !pidSnapshot.valid || !pidSnapshot.sensorValid ||
-      !isfinite(pidSnapshot.measuredDeg)) {
-    return kSteerOutNotAvailable;
-  }
-
-  const SteeringCalibrationData calibration = steeringCalibrationSnapshot();
-  const float centerDeg = calibration.initialized ? calibration.adjustedCenterDeg : 0.0f;
-  return clampCenteredCentiDeg(wrapAngleDegrees(pidSnapshot.measuredDeg - centerDeg));
-}
-
-int readStemInCommand() {
-  PidRuntimeSnapshot pidSnapshot{};
-  if (!pidGetRuntimeSnapshot(pidSnapshot) || !pidSnapshot.valid) {
-    return 0;
-  }
-  return pidSnapshot.steeringCommand;
-}
-
-uint8_t readOzhBrakePercent() {
+int readTractionPwmSigned() {
   QuadDriveRuntimeSnapshot driveSnapshot{};
   if (!quadDriveGetRuntimeSnapshot(driveSnapshot) || !driveSnapshot.valid) {
     return 0;
   }
-  if (driveSnapshot.appliedBrakePercent > 100u) {
-    return 100u;
-  }
-  return driveSnapshot.appliedBrakePercent;
+  return clampInt(driveSnapshot.tractionPwmSigned, -255, 255);
 }
 
-String buildPostBody() {
-  String body;
-  body.reserve(48);
-  body += "data=";
-  body += readStemInCommand();
-  body += '_';
-  body += readStemOutCentiDeg();
-  body += '_';
-  body += readOzhBrakePercent();
-  return body;
+int readDirectionCommandDeg() {
+  PidRuntimeSnapshot pidSnapshot{};
+  if (!pidGetRuntimeSnapshot(pidSnapshot) || !pidSnapshot.valid) {
+    return 90;
+  }
+  const int steeringCommand = clampInt(pidSnapshot.steeringCommand, -100, 100);
+  return ((steeringCommand + 100) * 180 + 100) / 200;
 }
 
-bool postTelemetry(const CameraTelemetryConfig& cfg, int& httpCodeOut) {
-  httpCodeOut = 0;
-  if (WiFi.status() != WL_CONNECTED) {
-    return false;
+int readBrakeBinary() {
+  QuadDriveRuntimeSnapshot driveSnapshot{};
+  if (!quadDriveGetRuntimeSnapshot(driveSnapshot) || !driveSnapshot.valid) {
+    return 0;
   }
-
-  WiFiClient client;
-  client.setTimeout(cfg.httpTimeoutMs);
-
-  HTTPClient http;
-  http.setTimeout(cfg.httpTimeoutMs);
-  http.setReuse(false);
-
-  if (!http.begin(client, cfg.url)) {
-    return false;
-  }
-
-  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-  const String body = buildPostBody();
-  httpCodeOut = http.POST(body);
-  http.end();
-
-  return httpCodeOut >= kHttpOkMin && httpCodeOut <= kHttpOkMax;
+  return driveSnapshot.appliedBrakePercent > 0u ? 1 : 0;
 }
 
-void maybeLogResult(const CameraTelemetryConfig& cfg, bool ok, int httpCode, TickType_t nowTick) {
+String buildTelemetryPayload() {
+  String payload;
+  payload.reserve(24);
+  payload += readTractionPwmSigned();
+  payload += '_';
+  payload += readDirectionCommandDeg();
+  payload += '_';
+  payload += readBrakeBinary();
+  return payload;
+}
+
+void maybeLogStarted(const CameraTelemetryConfig& cfg) {
   if (!cfg.log) {
     return;
   }
-
-  static TickType_t s_lastLogTick = 0;
-  const TickType_t minInterval = pdMS_TO_TICKS(2000);
-  if (s_lastLogTick != 0 && (nowTick - s_lastLogTick) < minInterval) {
-    return;
-  }
-
   String msg;
-  msg.reserve(96);
-  msg += "[CAM][TEL] ";
-  msg += ok ? "POST ok" : "POST fallo";
-  msg += " code=";
-  msg += httpCode;
+  msg.reserve(64);
+  msg += "[CAM][HTTP] Servidor iniciado en puerto ";
+  msg += cfg.port;
   broadcastIf(true, msg);
-  s_lastLogTick = nowTick;
 }
 
 }  // namespace
 
-bool cameraTelemetryUrlConfigured(const char* url) {
-  return url != nullptr && url[0] != '\0';
-}
-
-void taskCameraTelemetry(void* parameter) {
-  CameraTelemetryConfig* cfg = static_cast<CameraTelemetryConfig*>(parameter);
-  if (cfg == nullptr || !cameraTelemetryUrlConfigured(cfg->url)) {
-    broadcastIf(true, "[CAM][TEL] Configuracion invalida, abortando tarea");
+void taskCameraTelemetryServer(void* parameter) {
+  const CameraTelemetryConfig* cfg = static_cast<const CameraTelemetryConfig*>(parameter);
+  if (cfg == nullptr || cfg->port == 0) {
+    broadcastIf(true, "[CAM][HTTP] Configuracion invalida, abortando tarea");
     vTaskDelete(nullptr);
     return;
   }
 
   const TickType_t period = (cfg->period > 0) ? cfg->period : kDefaultPeriod;
-  if (cfg->httpTimeoutMs == 0) {
-    cfg->httpTimeoutMs = kDefaultHttpTimeoutMs;
-  }
-
   const uint32_t expectedPeriodUs = static_cast<uint32_t>(period * portTICK_PERIOD_MS * 1000U);
+  WebServer server(cfg->port);
+
+  server.on("/telemetria", HTTP_GET, [&server]() {
+    server.send(200, "text/plain", buildTelemetryPayload());
+  });
+  server.onNotFound([&server]() {
+    server.send(404, "text/plain", "not found");
+  });
+  server.begin();
+  maybeLogStarted(*cfg);
+
   TickType_t lastWake = xTaskGetTickCount();
   int64_t lastIterationStartUs = esp_timer_get_time();
 
@@ -159,9 +104,7 @@ void taskCameraTelemetry(void* parameter) {
     }
     lastIterationStartUs = iterationStartUs;
 
-    int httpCode = 0;
-    const bool ok = postTelemetry(*cfg, httpCode);
-    maybeLogResult(*cfg, ok, httpCode, xTaskGetTickCount());
+    server.handleClient();
 
     const bool overrun = cycleUs > expectedPeriodUs;
     systemDiagReportLoop(SystemDiagTaskId::kCameraTelemetry, cycleUs, expectedPeriodUs, overrun, false);

@@ -115,16 +115,16 @@ constexpr TickType_t PID_PERIOD = pdMS_TO_TICKS(30);
 constexpr TickType_t PID_LOG_INTERVAL = pdMS_TO_TICKS(200);
 constexpr TickType_t THROTTLE_PERIOD = pdMS_TO_TICKS(30);
 
-#ifndef TELEMETRY_URL
-#define TELEMETRY_URL ""
+#ifndef CAMERA_TELEMETRY_SERVER_ENABLED
+#define CAMERA_TELEMETRY_SERVER_ENABLED 0
 #endif
 
-#ifndef TELEMETRY_PERIOD_MS
-#define TELEMETRY_PERIOD_MS 1000
+#ifndef CAMERA_TELEMETRY_PORT
+#define CAMERA_TELEMETRY_PORT 80
 #endif
 
-#ifndef TELEMETRY_HTTP_TIMEOUT_MS
-#define TELEMETRY_HTTP_TIMEOUT_MS 200
+#ifndef CAMERA_TELEMETRY_TASK_PERIOD_MS
+#define CAMERA_TELEMETRY_TASK_PERIOD_MS 5
 #endif
 
 namespace debug {
@@ -248,9 +248,8 @@ static PiCommsConfig g_piCommsConfig = {
     debug::kLogPiComms,
     debug::kLogPiComms};
 static CameraTelemetryConfig g_cameraTelemetryConfig = {
-    TELEMETRY_URL,
-    pdMS_TO_TICKS(TELEMETRY_PERIOD_MS),
-    TELEMETRY_HTTP_TIMEOUT_MS,
+    CAMERA_TELEMETRY_PORT,
+    pdMS_TO_TICKS(CAMERA_TELEMETRY_TASK_PERIOD_MS),
     debug::kLogCameraTelemetry};
 static HallSpeedConfig g_hallSpeedConfig = {
     26,      // Hall A
@@ -345,15 +344,15 @@ void setup() {
     broadcastIf(true, "[PI][UART] Error inicializando UART0 para Raspberry Pi");
   }
 
-  if (cameraTelemetryUrlConfigured(g_cameraTelemetryConfig.url)) {
-    if (startTaskPinned(taskCameraTelemetry,
-                        "CamTelemetry",
+  if (CAMERA_TELEMETRY_SERVER_ENABLED != 0) {
+    if (startTaskPinned(taskCameraTelemetryServer,
+                        "CamHttp",
                         STACK_CAMERA_TELEMETRY,
                         &g_cameraTelemetryConfig,
                         1,
                         &g_taskCameraTelemetryHandle,
                         0)) {
-      systemDiagRegisterTask(SystemDiagTaskId::kCameraTelemetry, "CamTelemetry", g_taskCameraTelemetryHandle);
+      systemDiagRegisterTask(SystemDiagTaskId::kCameraTelemetry, "CamHttp", g_taskCameraTelemetryHandle);
     }
   }
 
