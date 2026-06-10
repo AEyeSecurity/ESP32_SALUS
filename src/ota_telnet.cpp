@@ -48,8 +48,33 @@
 #define WIFI_STA_CONNECT_TIMEOUT_MS 10000
 #endif
 
+#ifndef WIFI_SUPERVISOR_INTERVAL_MS
+#define WIFI_SUPERVISOR_INTERVAL_MS 5000
+#endif
+
+#ifndef WIFI_STA_FAILOVER_MS
+#define WIFI_STA_FAILOVER_MS 15000
+#endif
+
+#ifndef WIFI_STA_RECOVERY_MS
+#define WIFI_STA_RECOVERY_MS 60000
+#endif
+
+#ifndef WIFI_STA_MIN_RSSI_DBM
+#define WIFI_STA_MIN_RSSI_DBM -85
+#endif
+
+#ifndef WIFI_STA_RECONNECT_INTERVAL_MS
+#define WIFI_STA_RECONNECT_INTERVAL_MS 10000
+#endif
+
 namespace {
 constexpr uint16_t kTelnetPort = 23;
+constexpr TickType_t kWifiSupervisorInterval = pdMS_TO_TICKS(WIFI_SUPERVISOR_INTERVAL_MS);
+constexpr TickType_t kWifiStaFailoverDelay = pdMS_TO_TICKS(WIFI_STA_FAILOVER_MS);
+constexpr TickType_t kWifiStaRecoveryDelay = pdMS_TO_TICKS(WIFI_STA_RECOVERY_MS);
+constexpr TickType_t kWifiStaReconnectInterval = pdMS_TO_TICKS(WIFI_STA_RECONNECT_INTERVAL_MS);
+constexpr int kWifiStaMinRssiDbm = WIFI_STA_MIN_RSSI_DBM;
 // STREAM config por dominio (periodos en ms).
 constexpr TickType_t kSpeedStreamDefaultPeriod = pdMS_TO_TICKS(200);
 constexpr int kSpeedStreamMinPeriodMs = 20;
@@ -80,6 +105,7 @@ enum class NetworkMode {
   kUnknown,
   kSta,
   kAp,
+  kStaAp,
 };
 
 struct TelnetLogMessage {
@@ -96,6 +122,12 @@ String g_telnetCommandBuffer;
 NetworkMode g_networkMode = NetworkMode::kUnknown;
 String g_networkSsid;
 IPAddress g_networkIp;
+bool g_rescueApActive = false;
+TickType_t g_wifiFailureSinceTick = 0;
+TickType_t g_wifiHealthySinceTick = 0;
+TickType_t g_lastStaReconnectTick = 0;
+uint32_t g_rescueApActivationCount = 0;
+uint32_t g_staReconnectAttemptCount = 0;
 // Estado runtime de streams Telnet.
 bool g_speedStreamEnabled = false;
 TickType_t g_speedStreamPeriod = kSpeedStreamDefaultPeriod;
@@ -119,6 +151,8 @@ const char* networkModeText(NetworkMode mode) {
       return "STA";
     case NetworkMode::kAp:
       return "AP";
+    case NetworkMode::kStaAp:
+      return "STA_AP";
     case NetworkMode::kUnknown:
     default:
       return "UNKNOWN";
@@ -129,6 +163,112 @@ void updateNetworkState(NetworkMode mode, const String& ssid, const IPAddress& i
   g_networkMode = mode;
   g_networkSsid = ssid;
   g_networkIp = ip;
+}
+
+bool isValidIp(const IPAddress& ip) {
+  const uint32_t raw = static_cast<uint32_t>(ip);
+  return raw != 0U && raw != 0xFFFFFFFFU;
+}
+
+bool isStaHealthy() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+  if (!isValidIp(WiFi.localIP())) {
+    return false;
+  }
+  return WiFi.RSSI() > kWifiStaMinRssiDbm;
+}
+
+NetworkMode currentNetworkMode() {
+  const wifi_mode_t mode = WiFi.getMode();
+  if (mode == WIFI_AP_STA) {
+    return NetworkMode::kStaAp;
+  }
+  if (mode == WIFI_AP) {
+    return NetworkMode::kAp;
+  }
+  if (mode == WIFI_STA && WiFi.status() == WL_CONNECTED && isValidIp(WiFi.localIP())) {
+    return NetworkMode::kSta;
+  }
+  return g_networkMode;
+}
+
+void refreshNetworkState() {
+  const NetworkMode mode = currentNetworkMode();
+  if (mode == NetworkMode::kAp) {
+    updateNetworkState(mode, WIFI_AP_SSID, WiFi.softAPIP());
+    return;
+  }
+  updateNetworkState(mode, WIFI_STA_SSID, WiFi.localIP());
+}
+
+void reconnectStaIfDue(TickType_t now) {
+  if (WiFi.status() == WL_CONNECTED && isValidIp(WiFi.localIP())) {
+    return;
+  }
+  if (g_lastStaReconnectTick != 0 && (now - g_lastStaReconnectTick) < kWifiStaReconnectInterval) {
+    return;
+  }
+  WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASS);
+  g_lastStaReconnectTick = now;
+  g_staReconnectAttemptCount++;
+}
+
+void startRescueAp(TickType_t now) {
+  if (!g_rescueApActive) {
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.setHostname(OTA_HOSTNAME);
+    const bool apStarted = (strlen(WIFI_AP_PASS) == 0) ? WiFi.softAP(WIFI_AP_SSID)
+                                                       : WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS);
+    if (apStarted) {
+      g_rescueApActive = true;
+      g_rescueApActivationCount++;
+    }
+  }
+  reconnectStaIfDue(now);
+  updateNetworkState(NetworkMode::kStaAp, WIFI_STA_SSID, WiFi.localIP());
+}
+
+void stopRescueAp() {
+  if (!g_rescueApActive) {
+    return;
+  }
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  g_rescueApActive = false;
+  g_wifiFailureSinceTick = 0;
+  g_wifiHealthySinceTick = 0;
+  updateNetworkState(NetworkMode::kSta, WIFI_STA_SSID, WiFi.localIP());
+}
+
+void superviseWifi(TickType_t now) {
+  const bool healthy = isStaHealthy();
+  if (healthy) {
+    g_wifiFailureSinceTick = 0;
+    if (g_rescueApActive) {
+      if (g_wifiHealthySinceTick == 0) {
+        g_wifiHealthySinceTick = now;
+      } else if ((now - g_wifiHealthySinceTick) >= kWifiStaRecoveryDelay) {
+        stopRescueAp();
+      }
+    } else {
+      g_wifiHealthySinceTick = now;
+      refreshNetworkState();
+    }
+    return;
+  }
+
+  g_wifiHealthySinceTick = 0;
+  if (g_wifiFailureSinceTick == 0) {
+    g_wifiFailureSinceTick = now;
+  }
+  reconnectStaIfDue(now);
+  if ((now - g_wifiFailureSinceTick) >= kWifiStaFailoverDelay) {
+    startRescueAp(now);
+  } else {
+    refreshNetworkState();
+  }
 }
 
 bool isCurrentTaskOtaTelnet() {
@@ -826,12 +966,30 @@ void reportDriveDirectionStatus() {
 }
 
 void reportNetworkStatus() {
+  const wl_status_t wifiStatus = WiFi.status();
+  const IPAddress staIp = WiFi.localIP();
+  const IPAddress apIp = WiFi.softAPIP();
+  const bool staConnected = wifiStatus == WL_CONNECTED;
   String msg = "[NET] mode=";
-  msg += networkModeText(g_networkMode);
+  msg += networkModeText(currentNetworkMode());
   msg += " ssid=";
   msg += g_networkSsid.length() > 0 ? g_networkSsid : "-";
-  msg += " ip=";
-  msg += g_networkIp.toString();
+  msg += " apSsid=";
+  msg += g_rescueApActive ? String(WIFI_AP_SSID) : String("-");
+  msg += " wifiStatus=";
+  msg += String(static_cast<int>(wifiStatus));
+  msg += " staIp=";
+  msg += staIp.toString();
+  msg += " apIp=";
+  msg += g_rescueApActive ? apIp.toString() : String("-");
+  msg += " rssi=";
+  msg += staConnected ? String(WiFi.RSSI()) : String("N/A");
+  msg += " rescueAp=";
+  msg += g_rescueApActive ? "ON" : "OFF";
+  msg += " rescueCount=";
+  msg += String(g_rescueApActivationCount);
+  msg += " reconnects=";
+  msg += String(g_staReconnectAttemptCount);
   msg += " hostname=";
   msg += OTA_HOSTNAME;
   msg += " telnetPort=";
@@ -2703,18 +2861,12 @@ void InicializaWiFi() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    g_wifiHealthySinceTick = xTaskGetTickCount();
     updateNetworkState(NetworkMode::kSta, WIFI_STA_SSID, WiFi.localIP());
     return;
   }
 
-  WiFi.disconnect(true, true);
-  WiFi.mode(WIFI_AP);
-  if (strlen(WIFI_AP_PASS) == 0) {
-    WiFi.softAP(WIFI_AP_SSID);
-  } else {
-    WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS);
-  }
-  updateNetworkState(NetworkMode::kAp, WIFI_AP_SSID, WiFi.softAPIP());
+  startRescueAp(xTaskGetTickCount());
 }
 
 /* ========= OTA ========= */
@@ -2797,6 +2949,7 @@ void taskOtaTelnet(void* parameter) {
   const bool logHeartbeat = (config != nullptr) ? config->logHeartbeat : false;
   TickType_t lastWake = xTaskGetTickCount();
   TickType_t lastHeartbeat = lastWake;
+  TickType_t lastWifiSupervisor = lastWake;
   int64_t lastIterationStartUs = esp_timer_get_time();
   for (;;) {
     const int64_t iterationStartUs = esp_timer_get_time();
@@ -2809,6 +2962,11 @@ void taskOtaTelnet(void* parameter) {
     handleTelnetClient();
     processTelnetInput();
     drainTelnetLogQueue(kTelnetDrainMaxMessagesPerCycle);
+    const TickType_t supervisorNow = xTaskGetTickCount();
+    if ((supervisorNow - lastWifiSupervisor) >= kWifiSupervisorInterval) {
+      superviseWifi(supervisorNow);
+      lastWifiSupervisor = supervisorNow;
+    }
     if (g_speedStreamEnabled && g_telnetClient && g_telnetClient.connected()) {
       const TickType_t now = xTaskGetTickCount();
       if (g_lastSpeedStreamTick == 0 || (now - g_lastSpeedStreamTick) >= g_speedStreamPeriod) {
