@@ -12,6 +12,7 @@ enum class SystemDiagTaskId : uint8_t {
   kDrive,
   kPiUartRx,
   kPiUartTx,
+  kBattery,
   kCount,
 };
 

@@ -19,6 +19,7 @@
 #include "quad_functions.h"
 #include "fs_ia6.h"
 #include "system_diag.h"
+#include "battery_monitor.h"
 
 #ifndef WIFI_STA_SSID
 #define WIFI_STA_SSID "TU_SSID"
@@ -397,7 +398,7 @@ void openTelnetSession(WiFiClient& incoming) {
   g_telnetClient.println("=== Servidor Telnet ESP32 ===");
   g_telnetClient.println("Conexion establecida correctamente");
   g_telnetClient.println(
-      "Comandos: steer.help | pid.help | spid.help | rc.raw | comms.status | speed.status | speed.reset | speed.stream | speed.uart | pid.stream | spid.stream | spid.target | drive.log | drive.pwm | drive.brake | drive.dir | drive.rc.status | drive.rc.stream | sys.rt | sys.stack | sys.jitter | sys.reset | net.status | exit");
+      "Comandos: steer.help | pid.help | spid.help | rc.raw | comms.status | speed.status | speed.reset | speed.stream | speed.uart | battery.status | pid.stream | spid.stream | spid.target | drive.log | drive.pwm | drive.brake | drive.dir | drive.rc.status | drive.rc.stream | sys.rt | sys.stack | sys.jitter | sys.reset | net.status | exit");
   reportNetworkStatus();
 }
 
@@ -1181,6 +1182,35 @@ String buildSpeedStatusMessage() {
   return msg;
 }
 
+String buildBatteryStatusMessage() {
+  BatterySnapshot snapshot{};
+  const bool ok = batteryMonitorGetSnapshot(snapshot);
+
+  String msg = "[BAT][STATUS] pin=";
+  msg += snapshot.pin;
+  msg += " driver=";
+  msg += (ok && snapshot.driverReady) ? "READY" : "NOT_READY";
+  msg += " adc=";
+  msg += String(snapshot.adcPinMv);
+  msg += "mV";
+  msg += " battery=";
+  msg += String(static_cast<float>(snapshot.batteryMv) / 1000.0f, 2);
+  msg += "V";
+  msg += " batteryMv=";
+  msg += String(snapshot.batteryMv);
+  msg += " age=";
+  if (snapshot.sampleTick == 0) {
+    msg += "NONE";
+  } else {
+    const TickType_t ageTicks = xTaskGetTickCount() - snapshot.sampleTick;
+    msg += String(static_cast<uint32_t>(ageTicks * portTICK_PERIOD_MS));
+    msg += "ms";
+  }
+  msg += " samples=";
+  msg += String(snapshot.sampleCount);
+  return msg;
+}
+
 void reportSystemRtStatus() {
   SystemDiagSnapshot snapshot{};
   if (!systemDiagGetSnapshot(snapshot)) {
@@ -1460,6 +1490,16 @@ bool handleSpeedCommand(const String& command, const String& args) {
 
   if (command.equalsIgnoreCase("speed.uart")) {
     sendTelnet("[SPD][UART] N/A source=hall");
+    return true;
+  }
+
+  return false;
+}
+
+bool handleBatteryCommand(const String& command, const String& args) {
+  (void)args;
+  if (command.equalsIgnoreCase("battery.status")) {
+    sendTelnet(buildBatteryStatusMessage());
     return true;
   }
 
@@ -2783,6 +2823,7 @@ void handleTelnetCommand(String line) {
       handlePidCommand(parsed.command, parsed.args) ||
       handleSpidCommand(parsed.command, parsed.args) || handleDriveCommand(parsed.command, parsed.args) ||
       handleCommsCommand(parsed.command, parsed.args) || handleSpeedCommand(parsed.command, parsed.args) ||
+      handleBatteryCommand(parsed.command, parsed.args) ||
       handleSysCommand(parsed.command, parsed.args) || handleNetCommand(parsed.command, parsed.args)) {
     return;
   }
