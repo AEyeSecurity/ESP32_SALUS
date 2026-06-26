@@ -63,7 +63,7 @@ Troubleshooting OTA rapido:
 | `taskRcMonitor`          | `src/fs_ia6.cpp`         | 2048 (~2 KB)         | 1    | 1      | 100 ms periodica (`vTaskDelay`)              | `debug::kEnableRcTask` (false) | Solo loguea el snapshot compartido; ideal para calibracion. |
 | `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~4 KB)         | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
 | `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~3 KB)         | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA` v2 (7 bytes), valida versión/CRC y mantiene `PiCommsRxSnapshot` con `speed_cmd` firmado (`speed_cmd` + `REV_REQ`). |
-| `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~2 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status speed steer brake crc]` (8 bytes) con velocidad Hall, ángulo centrado y flags de seguridad. |
+| `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~2 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status speed steer brake crc]` a 100 Hz y una trama `[0x56 battery adc age crc]` a 1 Hz. |
 | `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Supervisor liviano sin lógica de comunicaciones (solo `vTaskDelay`). |
 
 > Nota: en este target Arduino/ESP32 los tamanos pasados a `startTaskPinned`/`xTaskCreatePinnedToCore`
@@ -134,6 +134,11 @@ Troubleshooting OTA rapido:
   - `steer_meas_i16` (`deg x100` centrado; `-32768` si N/A),
   - `brake_applied_u8` real,
   - `status_flags` (`READY`, `ESTOP_ACTIVE`, `FAILSAFE_ACTIVE`, `PI_FRESH`, `CONTROL_SOURCE`, `OVERSPEED_ACTIVE`).
+- Además envía una trama de batería de 8 bytes (`0x56 ... crc`) a baja tasa con:
+  - `battery_cv_u16` (`V x100`, ya calibrado en la ESP32),
+  - `adc_mv_u16` (`mV` del pin ADC),
+  - `sample_age_ds_u8` (edad de muestra en decisegundos),
+  - `battery_flags` (`READY`, `FRESH`, `SUSPECT`, `CAL`).
 - `taskQuadDriveControl` consume el snapshot:  
   - `ESTOP` → freno completo y duty mínimo.  
   - `DRIVE_EN` + `speed_cmd_u16` + `REV_REQ` -> setpoint firmado (`m/s`) para PID Hall, clamp asimétrico `[-rev.max, +spid.max]` (default `rev.max=1.30 m/s`).  
@@ -141,7 +146,7 @@ Troubleshooting OTA rapido:
   - En REV clamped con error sostenido se activa anti-windup reforzado para descargar integrador más rápido.
   - con frame fresco de Pi, freno aplicado = `max(brake_u8_pi, brake_overspeed_auto)` (y `ESTOP` fuerza 100 %).  
 - `taskPidControl` usa `steer` de Pi cuando el frame está fresco (<=120 ms); si no, vuelve a steering RC.  
-- Para inspeccionar el estado usa Telnet (`comms.status`, `comms.reset`) o activa `debug::kLogPiComms`.  
+- Para inspeccionar el estado usa Telnet (`comms.status`, `comms.reset`) o activa `debug::kLogPiComms`. `comms.status` ahora también resume la última trama de batería enviada por UART.  
 - Documentación detallada, pasos de prueba y troubleshooting: **[PI_COMMS_README.md](PI_COMMS_README.md)**.
 
 ## Velocidad Hall (GPIO ISR IRAM)

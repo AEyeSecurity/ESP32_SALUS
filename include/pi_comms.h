@@ -15,6 +15,7 @@ struct PiCommsConfig {
   size_t txBufferSize;
   TickType_t rxTaskPeriod;
   TickType_t txTaskPeriod;
+  TickType_t batteryTxPeriod;
   TickType_t rxReadTimeout;
   bool logRx;
   bool logTx;
@@ -38,8 +39,20 @@ struct PiCommsRxSnapshot {
   uint32_t framesVersionError;
 };
 
+struct PiCommsBatteryTxSnapshot {
+  bool driverReady;
+  bool hasFrame;
+  TickType_t lastFrameTick;
+  uint8_t flags;
+  uint16_t batteryCentiVolts;
+  uint16_t adcPinMv;
+  uint8_t sampleAgeDs;
+  uint32_t framesSent;
+};
+
 bool piCommsInit(const PiCommsConfig& config);
 bool piCommsGetRxSnapshot(PiCommsRxSnapshot& snapshot);
+bool piCommsGetBatteryTxSnapshot(PiCommsBatteryTxSnapshot& snapshot);
 void piCommsResetStats();
 
 void taskPiCommsRx(void* parameter);

@@ -1380,7 +1380,9 @@ bool handleCommsCommand(const String& command, const String& args) {
   (void)args;
   if (command.equalsIgnoreCase("comms.status")) {
     PiCommsRxSnapshot snapshot{};
+    PiCommsBatteryTxSnapshot batterySnapshot{};
     piCommsGetRxSnapshot(snapshot);
+    piCommsGetBatteryTxSnapshot(batterySnapshot);
     String msg = "[PI][STATUS] driver=";
     msg += snapshot.driverReady ? "READY" : "NOT_READY";
     msg += " lastFrame=";
@@ -1418,6 +1420,24 @@ bool handleCommsCommand(const String& command, const String& args) {
     msg += snapshot.framesMalformed;
     msg += " verErr=";
     msg += snapshot.framesVersionError;
+    msg += " battTx=";
+    if (batterySnapshot.hasFrame) {
+      const TickType_t ageTicks = xTaskGetTickCount() - batterySnapshot.lastFrameTick;
+      const uint32_t ageMs = ageTicks * portTICK_PERIOD_MS;
+      msg += String(static_cast<float>(batterySnapshot.batteryCentiVolts) / 100.0f, 2);
+      msg += "V/";
+      msg += batterySnapshot.adcPinMv;
+      msg += "mV age=";
+      msg += ageMs;
+      msg += "ms sampleAge=";
+      msg += String(static_cast<float>(batterySnapshot.sampleAgeDs) / 10.0f, 1);
+      msg += "s flags=0x";
+      msg += String(batterySnapshot.flags, HEX);
+      msg += " sent=";
+      msg += batterySnapshot.framesSent;
+    } else {
+      msg += "NONE";
+    }
     sendTelnet(msg);
     return true;
   }

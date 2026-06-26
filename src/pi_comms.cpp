@@ -14,6 +14,7 @@
 #include "ota_telnet.h"
 #include "pid.h"
 #include "quad_functions.h"
+#include "battery_monitor.h"
 #include "steering_calibration.h"
 #include "system_diag.h"
 
@@ -21,13 +22,17 @@ namespace {
 
 constexpr uint8_t kHeaderRx = 0xAA;
 constexpr uint8_t kHeaderTx = 0x55;
+constexpr uint8_t kHeaderBatteryTx = 0x56;
 constexpr size_t kRxFrameSize = 7;
 constexpr size_t kTxFrameSize = 8;
+constexpr size_t kBatteryTxFrameSize = 8;
 constexpr uint8_t kProtocolVersion = 2;
 constexpr uint32_t kPiRxWakeTimeoutFactor = 4;
 constexpr uint8_t kPiRxWakeTimerIndex = 0;
 constexpr uint16_t kPiRxWakeTimerDivider = 80;  // 1 tick = 1 us (80 MHz / 80)
 constexpr size_t kPiRxReadChunkSize = 24;       // Bound RX parse work per 2ms cycle
+constexpr uint32_t kBatteryFreshFactor = 2;
+constexpr uint16_t kBatterySuspectAdcThresholdMv = 3200;
 
 PiCommsConfig g_config{};
 bool g_initialized = false;
@@ -51,6 +56,18 @@ struct PiRxState {
 
 PiRxState g_rxState{};
 
+struct PiBatteryTxState {
+  bool hasFrame = false;
+  TickType_t lastFrameTick = 0;
+  uint8_t flags = 0;
+  uint16_t batteryCentiVolts = 0;
+  uint16_t adcPinMv = 0;
+  uint8_t sampleAgeDs = 0;
+  uint32_t framesSent = 0;
+};
+
+PiBatteryTxState g_batteryTxState{};
+
 portMUX_TYPE g_stateMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE g_piRxWakeMux = portMUX_INITIALIZER_UNLOCKED;
 TaskHandle_t g_piRxWakeTaskHandle = nullptr;
@@ -67,6 +84,11 @@ constexpr uint8_t kStatusPiFresh = 1 << 3;
 constexpr uint8_t kStatusControlSourceShift = 4;
 constexpr uint8_t kStatusControlSourceMask = static_cast<uint8_t>(0x03u << kStatusControlSourceShift);
 constexpr uint8_t kStatusOverspeedActive = 1 << 6;
+
+constexpr uint8_t kBatteryStatusReady = 1 << 0;
+constexpr uint8_t kBatteryStatusFresh = 1 << 1;
+constexpr uint8_t kBatteryStatusSuspect = 1 << 2;
+constexpr uint8_t kBatteryStatusCalibrated = 1 << 3;
 
 constexpr uint16_t kSpeedTelemetryNotAvailable = 0xFFFFu;
 constexpr int16_t kSteerTelemetryNotAvailable = std::numeric_limits<int16_t>::min();
@@ -155,6 +177,20 @@ int16_t clampSignedCentiMps(int32_t value) {
   return static_cast<int16_t>(value);
 }
 
+uint16_t clampToU16(uint32_t value) {
+  if (value > static_cast<uint32_t>(std::numeric_limits<uint16_t>::max())) {
+    return std::numeric_limits<uint16_t>::max();
+  }
+  return static_cast<uint16_t>(value);
+}
+
+uint8_t clampToU8(uint32_t value) {
+  if (value > static_cast<uint32_t>(std::numeric_limits<uint8_t>::max())) {
+    return std::numeric_limits<uint8_t>::max();
+  }
+  return static_cast<uint8_t>(value);
+}
+
 const char* statusSourceText(uint8_t sourceCode) {
   switch (sourceCode) {
     case 1:
@@ -208,6 +244,61 @@ String describeSteerTelemetry(int16_t steerCentiDeg) {
   String msg = String(static_cast<float>(steerCentiDeg) / 100.0f, 2);
   msg += "deg";
   return msg;
+}
+
+String describeBatteryFlags(uint8_t flags) {
+  String msg;
+  appendFlag(msg, (flags & kBatteryStatusReady) != 0, "READY");
+  appendFlag(msg, (flags & kBatteryStatusFresh) != 0, "FRESH");
+  appendFlag(msg, (flags & kBatteryStatusSuspect) != 0, "SUSPECT");
+  appendFlag(msg, (flags & kBatteryStatusCalibrated) != 0, "CAL");
+
+  String out;
+  out.reserve(64);
+  out += "flags=0x";
+  out += String(flags, HEX);
+  out += " (";
+  out += (msg.length() > 0) ? msg : "none";
+  out += ")";
+  return out;
+}
+
+uint8_t encodeBatteryFlags(const BatterySnapshot& snapshot, TickType_t nowTick, TickType_t samplePeriod) {
+  uint8_t flags = 0;
+  if (snapshot.driverReady && snapshot.sampleCount > 0) {
+    flags |= kBatteryStatusReady;
+  }
+
+  if (snapshot.driverReady) {
+    flags |= kBatteryStatusCalibrated;
+  }
+
+  if (snapshot.sampleCount > 0) {
+    TickType_t freshnessWindow = samplePeriod;
+    if (freshnessWindow == 0) {
+      freshnessWindow = pdMS_TO_TICKS(5000);
+    }
+    freshnessWindow *= kBatteryFreshFactor;
+    const TickType_t ageTicks = nowTick - snapshot.sampleTick;
+    if (ageTicks <= freshnessWindow) {
+      flags |= kBatteryStatusFresh;
+    }
+  }
+
+  if (snapshot.adcPinMv >= kBatterySuspectAdcThresholdMv || snapshot.batteryMv == 0u) {
+    flags |= kBatteryStatusSuspect;
+  }
+
+  return flags;
+}
+
+uint8_t encodeBatterySampleAgeDs(const BatterySnapshot& snapshot, TickType_t nowTick) {
+  if (snapshot.sampleCount == 0) {
+    return std::numeric_limits<uint8_t>::max();
+  }
+  const TickType_t ageTicks = nowTick - snapshot.sampleTick;
+  const uint32_t ageMs = static_cast<uint32_t>(ageTicks * portTICK_PERIOD_MS);
+  return clampToU8((ageMs + 50u) / 100u);
 }
 
 uint16_t encodeSpeedTelemetryFromHall() {
@@ -412,6 +503,38 @@ void logTxFrame(const PiCommsConfig& cfg,
   s_lastLogTick = nowTick;
 }
 
+void logBatteryTxFrame(const PiCommsConfig& cfg,
+                       uint8_t flags,
+                       uint16_t batteryCentiVolts,
+                       uint16_t adcPinMv,
+                       uint8_t sampleAgeDs,
+                       TickType_t nowTick) {
+  if (!cfg.logTx) {
+    return;
+  }
+  static TickType_t s_lastLogTick = 0;
+  const TickType_t minInterval = pdMS_TO_TICKS(1000);
+  if (s_lastLogTick != 0 && (nowTick - s_lastLogTick) < minInterval) {
+    return;
+  }
+
+  String msg;
+  msg.reserve(176);
+  msg += "[PI][BAT][TX] ";
+  msg += describeBatteryFlags(flags);
+  msg += " battery=";
+  msg += String(static_cast<float>(batteryCentiVolts) / 100.0f, 2);
+  msg += "V";
+  msg += " adc=";
+  msg += adcPinMv;
+  msg += "mV";
+  msg += " age=";
+  msg += String(static_cast<float>(sampleAgeDs) / 10.0f, 1);
+  msg += "s";
+  broadcastIf(true, msg);
+  s_lastLogTick = nowTick;
+}
+
 void IRAM_ATTR onPiRxWakeTimer() {
   BaseType_t taskWoken = pdFALSE;
   TaskHandle_t task = nullptr;
@@ -459,6 +582,7 @@ bool piCommsInit(const PiCommsConfig& config) {
 
   portENTER_CRITICAL(&g_stateMux);
   g_rxState = PiRxState{};
+  g_batteryTxState = PiBatteryTxState{};
   portEXIT_CRITICAL(&g_stateMux);
 
   g_initialized = true;
@@ -486,12 +610,27 @@ bool piCommsGetRxSnapshot(PiCommsRxSnapshot& snapshot) {
   return snapshot.driverReady;
 }
 
+bool piCommsGetBatteryTxSnapshot(PiCommsBatteryTxSnapshot& snapshot) {
+  portENTER_CRITICAL(&g_stateMux);
+  snapshot.driverReady = g_initialized;
+  snapshot.hasFrame = g_batteryTxState.hasFrame;
+  snapshot.lastFrameTick = g_batteryTxState.lastFrameTick;
+  snapshot.flags = g_batteryTxState.flags;
+  snapshot.batteryCentiVolts = g_batteryTxState.batteryCentiVolts;
+  snapshot.adcPinMv = g_batteryTxState.adcPinMv;
+  snapshot.sampleAgeDs = g_batteryTxState.sampleAgeDs;
+  snapshot.framesSent = g_batteryTxState.framesSent;
+  portEXIT_CRITICAL(&g_stateMux);
+  return snapshot.driverReady;
+}
+
 void piCommsResetStats() {
   portENTER_CRITICAL(&g_stateMux);
   g_rxState.framesOk = 0;
   g_rxState.framesCrcError = 0;
   g_rxState.framesMalformed = 0;
   g_rxState.framesVersionError = 0;
+  g_batteryTxState.framesSent = 0;
   portEXIT_CRITICAL(&g_stateMux);
 }
 
@@ -645,6 +784,7 @@ void taskPiCommsTx(void* parameter) {
   const TickType_t period = (cfg->txTaskPeriod > 0) ? cfg->txTaskPeriod : pdMS_TO_TICKS(10);
   const uint32_t expectedPeriodUs = static_cast<uint32_t>(period * portTICK_PERIOD_MS * 1000U);
   TickType_t lastWake = xTaskGetTickCount();
+  TickType_t lastBatteryFrameTick = 0;
   int64_t lastIterationStartUs = esp_timer_get_time();
 
   while (true) {
@@ -672,7 +812,53 @@ void taskPiCommsTx(void* parameter) {
       frame[7] = crc8_maxim(frame, kTxFrameSize - 1);
 
       uart_write_bytes(cfg->uartNum, reinterpret_cast<const char*>(frame), sizeof(frame));
-      logTxFrame(*cfg, status, speedTelemetry, steerTelemetry, brakePercent, xTaskGetTickCount());
+      const TickType_t nowTick = xTaskGetTickCount();
+      logTxFrame(*cfg, status, speedTelemetry, steerTelemetry, brakePercent, nowTick);
+
+      const TickType_t batteryPeriod =
+          (cfg->batteryTxPeriod > 0) ? cfg->batteryTxPeriod : pdMS_TO_TICKS(1000);
+      const bool sendBatteryFrame =
+          (lastBatteryFrameTick == 0) || ((nowTick - lastBatteryFrameTick) >= batteryPeriod);
+
+      if (sendBatteryFrame) {
+        BatterySnapshot batterySnapshot{};
+        batteryMonitorGetSnapshot(batterySnapshot);
+
+        const uint8_t batteryFlags =
+            encodeBatteryFlags(batterySnapshot, nowTick, pdMS_TO_TICKS(5000));
+        const uint16_t batteryCentiVolts =
+            clampToU16((batterySnapshot.batteryMv + 5u) / 10u);
+        const uint16_t adcPinMv = clampToU16(batterySnapshot.adcPinMv);
+        const uint8_t sampleAgeDs = encodeBatterySampleAgeDs(batterySnapshot, nowTick);
+
+        uint8_t batteryFrame[kBatteryTxFrameSize];
+        batteryFrame[0] = kHeaderBatteryTx;
+        batteryFrame[1] = batteryFlags;
+        batteryFrame[2] = static_cast<uint8_t>(batteryCentiVolts & 0xFFu);
+        batteryFrame[3] = static_cast<uint8_t>((batteryCentiVolts >> 8) & 0xFFu);
+        batteryFrame[4] = static_cast<uint8_t>(adcPinMv & 0xFFu);
+        batteryFrame[5] = static_cast<uint8_t>((adcPinMv >> 8) & 0xFFu);
+        batteryFrame[6] = sampleAgeDs;
+        batteryFrame[7] = crc8_maxim(batteryFrame, kBatteryTxFrameSize - 1);
+
+        uart_write_bytes(
+            cfg->uartNum,
+            reinterpret_cast<const char*>(batteryFrame),
+            sizeof(batteryFrame));
+
+        portENTER_CRITICAL(&g_stateMux);
+        g_batteryTxState.hasFrame = true;
+        g_batteryTxState.lastFrameTick = nowTick;
+        g_batteryTxState.flags = batteryFlags;
+        g_batteryTxState.batteryCentiVolts = batteryCentiVolts;
+        g_batteryTxState.adcPinMv = adcPinMv;
+        g_batteryTxState.sampleAgeDs = sampleAgeDs;
+        g_batteryTxState.framesSent += 1;
+        portEXIT_CRITICAL(&g_stateMux);
+
+        logBatteryTxFrame(*cfg, batteryFlags, batteryCentiVolts, adcPinMv, sampleAgeDs, nowTick);
+        lastBatteryFrameTick = nowTick;
+      }
     }
 
     const bool overrun = cycleUs > expectedPeriodUs;

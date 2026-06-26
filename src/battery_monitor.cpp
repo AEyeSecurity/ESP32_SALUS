@@ -35,24 +35,36 @@ bool readAveragedPinMilliVolts(const BatteryMonitorConfig& config, uint32_t& pin
     samples[i] = readingMv;
   }
 
-  uint32_t minValue = samples[0];
-  uint32_t maxValue = samples[0];
-  uint64_t sum = 0;
-  for (uint8_t i = 0; i < boundedCount; ++i) {
-    const uint32_t value = samples[i];
-    if (value < minValue) {
-      minValue = value;
+  for (uint8_t i = 0; i + 1 < boundedCount; ++i) {
+    for (uint8_t j = i + 1; j < boundedCount; ++j) {
+      if (samples[j] < samples[i]) {
+        const uint32_t tmp = samples[i];
+        samples[i] = samples[j];
+        samples[j] = tmp;
+      }
     }
-    if (value > maxValue) {
-      maxValue = value;
-    }
-    sum += value;
   }
 
-  if (boundedCount > 2) {
-    sum -= minValue;
-    sum -= maxValue;
-    pinMvOut = static_cast<uint32_t>(sum / static_cast<uint64_t>(boundedCount - 2));
+  uint8_t trimCount = 1;
+  if (boundedCount >= 12) {
+    trimCount = 3;
+  } else if (boundedCount >= 8) {
+    trimCount = 2;
+  }
+
+  if ((trimCount * 2) >= boundedCount) {
+    trimCount = 1;
+  }
+
+  uint64_t sum = 0;
+  uint8_t usedCount = 0;
+  for (uint8_t i = trimCount; i < (boundedCount - trimCount); ++i) {
+    sum += samples[i];
+    ++usedCount;
+  }
+
+  if (usedCount > 0) {
+    pinMvOut = static_cast<uint32_t>(sum / static_cast<uint64_t>(usedCount));
     return true;
   }
 
@@ -63,7 +75,8 @@ bool readAveragedPinMilliVolts(const BatteryMonitorConfig& config, uint32_t& pin
 }  // namespace
 
 bool batteryMonitorInit(const BatteryMonitorConfig& config) {
-  if (config.pin == 0 || config.dividerLowerKOhm == 0 || config.period == 0) {
+  if (config.pin == 0 || config.dividerLowerOhm == 0 || config.period == 0 ||
+      !isfinite(config.calibrationGain) || config.calibrationGain <= 0.0f) {
     return false;
   }
 
@@ -112,9 +125,10 @@ void taskBatteryMonitor(void* parameter) {
     readAveragedPinMilliVolts(*cfg, adcPinMv);
 
     const float scale =
-        static_cast<float>(cfg->dividerUpperKOhm + cfg->dividerLowerKOhm) /
-        static_cast<float>(cfg->dividerLowerKOhm);
-    const uint32_t batteryMv = clampRoundToU32(static_cast<float>(adcPinMv) * scale);
+        static_cast<float>(cfg->dividerUpperOhm + cfg->dividerLowerOhm) /
+        static_cast<float>(cfg->dividerLowerOhm);
+    const uint32_t batteryMv =
+        clampRoundToU32(static_cast<float>(adcPinMv) * scale * cfg->calibrationGain);
 
     portENTER_CRITICAL(&g_batteryMux);
     g_snapshot.driverReady = g_initialized;

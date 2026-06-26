@@ -8,8 +8,9 @@
 struct BatteryMonitorConfig {
   uint8_t pin;
   uint8_t sampleCount;
-  uint16_t dividerUpperKOhm;
-  uint16_t dividerLowerKOhm;
+  uint32_t dividerUpperOhm;
+  uint32_t dividerLowerOhm;
+  float calibrationGain;
   TickType_t period;
 };
 

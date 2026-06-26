@@ -115,11 +115,13 @@ constexpr TickType_t PID_PERIOD = pdMS_TO_TICKS(30);
 constexpr TickType_t PID_LOG_INTERVAL = pdMS_TO_TICKS(200);
 constexpr TickType_t THROTTLE_PERIOD = pdMS_TO_TICKS(30);
 constexpr TickType_t BATTERY_PERIOD = pdMS_TO_TICKS(5000);
+constexpr TickType_t BATTERY_UART_PERIOD = pdMS_TO_TICKS(1000);
 
 constexpr uint8_t BATTERY_ADC_PIN = 34;
-constexpr uint8_t BATTERY_SAMPLE_COUNT = 8;
-constexpr uint16_t BATTERY_DIVIDER_UPPER_KOHM = 250;
-constexpr uint16_t BATTERY_DIVIDER_LOWER_KOHM = 10;
+constexpr uint8_t BATTERY_SAMPLE_COUNT = 16;
+constexpr uint32_t BATTERY_DIVIDER_UPPER_OHM = 240000;
+constexpr uint32_t BATTERY_DIVIDER_LOWER_OHM = 10000;
+constexpr float BATTERY_CALIBRATION_GAIN = 0.8930f;
 
 namespace debug {
 constexpr bool kLogSystem = false;
@@ -237,14 +239,16 @@ static PiCommsConfig g_piCommsConfig = {
     256,
     pdMS_TO_TICKS(2),
     pdMS_TO_TICKS(10),
+    BATTERY_UART_PERIOD,
     0,
     debug::kLogPiComms,
     debug::kLogPiComms};
 static BatteryMonitorConfig g_batteryMonitorConfig = {
     BATTERY_ADC_PIN,
     BATTERY_SAMPLE_COUNT,
-    BATTERY_DIVIDER_UPPER_KOHM,
-    BATTERY_DIVIDER_LOWER_KOHM,
+    BATTERY_DIVIDER_UPPER_OHM,
+    BATTERY_DIVIDER_LOWER_OHM,
+    BATTERY_CALIBRATION_GAIN,
     BATTERY_PERIOD,
 };
 static HallSpeedConfig g_hallSpeedConfig = {
