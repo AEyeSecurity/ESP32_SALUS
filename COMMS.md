@@ -39,6 +39,7 @@ Flags en `ver_flags` (nibble bajo):
 - Bit 0: `ESTOP`
 - Bit 1: `DRIVE_EN`
 - Bit 2: `REV_REQ`
+- Bit 3: `HAZARD`
 - Bit 3: reservado
 
 Semántica de velocidad firmada:
@@ -96,6 +97,7 @@ Snapshot RX expuesto (`PiCommsRxSnapshot`):
 - `speedCmdCentiMps`
 - `speedCmdSignedCentiMps`
 - `speedReverseRequest`
+- `hazardLightRequested`
 - `brake`
 - `driveEnabled`
 - `estop`
@@ -147,6 +149,7 @@ Al perder frescura de trama Pi, el firmware deja de usar comandos Pi y vuelve a 
 Telnet (`src/ota_telnet.cpp`):
 
 - `comms.status`: snapshot RX actual (edad frame, flags, `speedCmd`, `speedCmdSigned`, `revReq`, contadores)
+- `comms.status`: snapshot RX actual (edad frame, flags, `speedCmd`, `speedCmdSigned`, `revReq`, `hazard`, contadores)
 - `comms.reset`: resetea contadores RX
 
 ---

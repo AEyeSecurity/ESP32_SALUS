@@ -170,6 +170,9 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low), con dirección por s
 - `drive.pwm <0..100> | drive.pwm off`: override directo de PWM para pruebas de banco.
 - `drive.dir`: muestra estado de dirección del relé (`FWD/REV`, switching, relay, pin, activeLow).
 - `drive.dir fwd|rev`: solicita cambio de dirección (solo disponible con `drive.pwm` activo).
+- `hazard.status`: muestra estado efectivo de la baliza (`ON/OFF`), fuente (`UART/TELNET/FAILSAFE`), override, estado UART y pin.
+- `hazard.on | hazard.off`: fuerza la baliza por Telnet para debug.
+- `hazard.auto`: libera el override y devuelve el control a la UART.
 - `spid.save`: persiste configuración en NVS (`speed_pid`, incluyendo `thsup`, `thsdown`, `minspd`, `lwin`, `ffen`, `ffb0`, `ffbmx`, `ffdu`, `ffdd`, `ffmin`, `flgr`, `iunw`, `dfhz`, `brkcap`, `hys`, `brsu`, `brsd`, `brhms`, `brdb`).
 - NVS `speed_pid` versión actual: `ver=4` (migración automática desde `ver=3` preservando tunings y aplicando defaults nuevos).
 - `spid.reset`: restaura defaults y persiste en NVS.
@@ -213,6 +216,7 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low), con dirección por s
 ## Reversa (`PI` firmado + Telnet + RC CH5)
 
 - Pi (`comms`): `ver_flags bit2 = REV_REQ` define el signo del setpoint (`speed_cmd_u16` sigue siendo magnitud).
+- Pi (`comms`): `ver_flags bit3 = HAZARD` solicita encender la luz naranja de emergencia en `GPIO32`.
 - Telnet (`spid.target`): acepta setpoints firmados (`+` FWD, `-` REV) para simular pedidos Pi sin Raspy.
 - RC (`CH5/AUX1`): switch alto solicita `REV`, switch bajo solicita `FWD` (aplica histéresis y permite latch corto durante dropout RC).
 - Hardware: relé en `GPIO4`, activo en `HIGH` (`ON=FWD`, `OFF=REV`).

@@ -20,6 +20,7 @@
 #include "fs_ia6.h"
 #include "system_diag.h"
 #include "battery_monitor.h"
+#include "hazard_light.h"
 
 #ifndef WIFI_STA_SSID
 #define WIFI_STA_SSID "TU_SSID"
@@ -377,6 +378,7 @@ void resetTelnetSession() {
   quadDriveSetPwmOverride(false, 0);
   quadDriveSetBrakeOverride(false, 0);
   quadDriveSetDirectionOverride(QuadDriveDirection::kForward);
+  hazardLightSetOverride(false, false);
   g_telnetCommandBuffer = "";
   g_speedStreamEnabled = false;
   g_lastSpeedStreamTick = 0;
@@ -398,7 +400,7 @@ void openTelnetSession(WiFiClient& incoming) {
   g_telnetClient.println("=== Servidor Telnet ESP32 ===");
   g_telnetClient.println("Conexion establecida correctamente");
   g_telnetClient.println(
-      "Comandos: steer.help | pid.help | spid.help | rc.raw | comms.status | speed.status | speed.reset | speed.stream | speed.uart | battery.status | pid.stream | spid.stream | spid.target | drive.log | drive.pwm | drive.brake | drive.dir | drive.rc.status | drive.rc.stream | sys.rt | sys.stack | sys.jitter | sys.reset | net.status | exit");
+      "Comandos: steer.help | pid.help | spid.help | rc.raw | comms.status | speed.status | speed.reset | speed.stream | speed.uart | battery.status | pid.stream | spid.stream | spid.target | drive.log | drive.pwm | drive.brake | drive.dir | drive.rc.status | drive.rc.stream | hazard.help | hazard.status | sys.rt | sys.stack | sys.jitter | sys.reset | net.status | exit");
   reportNetworkStatus();
 }
 
@@ -931,6 +933,55 @@ const char* hallDirectionText(HallDirection direction) {
   }
 }
 
+const char* hazardSourceText(HazardLightSource source) {
+  switch (source) {
+    case HazardLightSource::kUart:
+      return "UART";
+    case HazardLightSource::kTelnet:
+      return "TELNET";
+    case HazardLightSource::kFailsafe:
+    default:
+      return "FAILSAFE";
+  }
+}
+
+void reportHazardStatus() {
+  HazardLightStatus snapshot{};
+  if (!hazardLightGetStatus(snapshot)) {
+    sendTelnet("[HAZARD] N/A");
+    return;
+  }
+
+  String msg = "[HAZARD] ";
+  msg += snapshot.effectiveOn ? "ON" : "OFF";
+  msg += " src=";
+  msg += hazardSourceText(snapshot.source);
+  msg += " override=";
+  msg += snapshot.overrideEnabled ? "ON" : "OFF";
+  if (snapshot.overrideEnabled) {
+    msg += "(";
+    msg += snapshot.overrideOn ? "ON" : "OFF";
+    msg += ")";
+  }
+  msg += " uart=";
+  msg += snapshot.uartRequestedOn ? "ON" : "OFF";
+  msg += " uartFresh=";
+  msg += snapshot.uartFresh ? "Y" : "N";
+  msg += " pin=";
+  msg += snapshot.relayPin;
+  msg += " activeLow=";
+  msg += snapshot.activeLow ? "Y" : "N";
+  msg += " lastFrame=";
+  if (snapshot.lastUartFrameTick != 0) {
+    const TickType_t ageTicks = xTaskGetTickCount() - snapshot.lastUartFrameTick;
+    msg += static_cast<uint32_t>(ageTicks * portTICK_PERIOD_MS);
+    msg += "ms";
+  } else {
+    msg += "NONE";
+  }
+  sendTelnet(msg);
+}
+
 void reportDriveDirectionStatus() {
   QuadDriveDirection direction = QuadDriveDirection::kForward;
   bool switching = false;
@@ -1406,6 +1457,8 @@ bool handleCommsCommand(const String& command, const String& args) {
     msg += "m/s";
     msg += " revReq=";
     msg += snapshot.speedReverseRequest ? "Y" : "N";
+    msg += " hazard=";
+    msg += snapshot.hazardLightRequested ? "Y" : "N";
     msg += " brake=";
     msg += snapshot.brake;
     msg += " estop=";
@@ -1620,6 +1673,51 @@ bool handleNetCommand(const String& command, const String& args) {
     reportNetworkStatus();
     return true;
   }
+  return false;
+}
+
+bool handleHazardCommand(const String& command, const String& args) {
+  (void)args;
+  if (command.equalsIgnoreCase("hazard.status")) {
+    reportHazardStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("hazard.help")) {
+    sendTelnet("Comandos: hazard.status | hazard.on | hazard.off | hazard.auto");
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("hazard.auto")) {
+    if (!hazardLightSetOverride(false, false)) {
+      sendTelnet("[HAZARD] No inicializado");
+      return true;
+    }
+    sendTelnet("[HAZARD] AUTO");
+    reportHazardStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("hazard.on")) {
+    if (!hazardLightSetOverride(true, true)) {
+      sendTelnet("[HAZARD] No inicializado");
+      return true;
+    }
+    sendTelnet("[HAZARD] OVERRIDE ON");
+    reportHazardStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("hazard.off")) {
+    if (!hazardLightSetOverride(true, false)) {
+      sendTelnet("[HAZARD] No inicializado");
+      return true;
+    }
+    sendTelnet("[HAZARD] OVERRIDE OFF");
+    reportHazardStatus();
+    return true;
+  }
+
   return false;
 }
 
@@ -2842,6 +2940,7 @@ void handleTelnetCommand(String line) {
   if (handleSessionCommand(parsed.command, parsed.args) || handleSteerCommand(parsed.command, parsed.args) ||
       handlePidCommand(parsed.command, parsed.args) ||
       handleSpidCommand(parsed.command, parsed.args) || handleDriveCommand(parsed.command, parsed.args) ||
+      handleHazardCommand(parsed.command, parsed.args) ||
       handleCommsCommand(parsed.command, parsed.args) || handleSpeedCommand(parsed.command, parsed.args) ||
       handleBatteryCommand(parsed.command, parsed.args) ||
       handleSysCommand(parsed.command, parsed.args) || handleNetCommand(parsed.command, parsed.args)) {

@@ -119,7 +119,7 @@ Observaciones:
 
 ## 5. Debug
 
-- `comms.status`: snapshot RX y última trama TX de batería (`lastFrame`, `speedCmd`, flags, contadores `ok/crcErr/malformed/verErr`, `battTx`)
+- `comms.status`: snapshot RX y última trama TX de batería (`lastFrame`, `speedCmd`, `hazard`, flags, contadores `ok/crcErr/malformed/verErr`, `battTx`)
 - `comms.reset`: resetea contadores RX
 - Activar `debug::kLogPiComms` para logs `[PI][RX]` y `[PI][TX]`
 
@@ -128,7 +128,8 @@ Observaciones:
 1. Verificar cableado y `115200 8N1`.
 2. Enviar frame Pi v2 válido (`ver=2`) y revisar `comms.status`.
 3. Confirmar que `speedCmd` refleja `m/s x100`.
-4. Observar telemetría UART de salida y validar:
+4. Si `ver_flags bit3` está en `1`, confirmar que `comms.status` muestra `hazard=Y` y que la baliza sigue la trama mientras esté fresca.
+5. Observar telemetría UART de salida y validar:
    - velocidad en `m/s x100`
    - ángulo centrado en `deg x100`
    - flags de estado coherentes

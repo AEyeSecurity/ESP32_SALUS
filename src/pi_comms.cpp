@@ -45,6 +45,7 @@ struct PiRxState {
   uint16_t speedCmdCentiMps = 0;
   int16_t speedCmdSignedCentiMps = 0;
   bool speedReverseRequest = false;
+  bool hazardLightRequested = false;
   bool driveEnabled = false;
   bool estop = false;
   uint8_t brake = 0;
@@ -76,6 +77,7 @@ hw_timer_t* g_piRxWakeTimer = nullptr;
 constexpr uint8_t kCmdFlagEstop = 1 << 0;
 constexpr uint8_t kCmdFlagDriveEnable = 1 << 1;
 constexpr uint8_t kCmdFlagReverseRequest = 1 << 2;
+constexpr uint8_t kCmdFlagHazardLight = 1 << 3;
 
 constexpr uint8_t kStatusReady = 1 << 0;
 constexpr uint8_t kStatusEstopActive = 1 << 1;
@@ -162,7 +164,7 @@ String describeCommandFlags(uint8_t verFlags) {
   appendFlag(flags, (verFlags & kCmdFlagEstop) != 0, "ESTOP");
   appendFlag(flags, (verFlags & kCmdFlagDriveEnable) != 0, "DRIVE_EN");
   appendFlag(flags, (verFlags & kCmdFlagReverseRequest) != 0, "REV_REQ");
-  appendFlag(flags, (verFlags & 0x08) != 0, "RESV3");
+  appendFlag(flags, (verFlags & kCmdFlagHazardLight) != 0, "HAZARD");
   msg += (flags.length() > 0) ? flags : "none";
   return msg;
 }
@@ -424,6 +426,8 @@ void logRxFrame(const PiCommsConfig& cfg, const PiRxState& state, TickType_t now
   msg += "m/s";
   msg += " revReq=";
   msg += state.speedReverseRequest ? "Y" : "N";
+  msg += " hazard=";
+  msg += state.hazardLightRequested ? "Y" : "N";
   msg += " brake=";
   msg += state.brake;
   msg += "%";
@@ -599,6 +603,7 @@ bool piCommsGetRxSnapshot(PiCommsRxSnapshot& snapshot) {
   snapshot.speedCmdCentiMps = g_rxState.speedCmdCentiMps;
   snapshot.speedCmdSignedCentiMps = g_rxState.speedCmdSignedCentiMps;
   snapshot.speedReverseRequest = g_rxState.speedReverseRequest;
+  snapshot.hazardLightRequested = g_rxState.hazardLightRequested;
   snapshot.brake = g_rxState.brake;
   snapshot.driveEnabled = g_rxState.driveEnabled;
   snapshot.estop = g_rxState.estop;
@@ -736,6 +741,7 @@ void taskPiCommsRx(void* parameter) {
         newState.speedCmdCentiMps =
             static_cast<uint16_t>(frame[3]) | static_cast<uint16_t>(frame[4]) << 8;
         newState.speedReverseRequest = (newState.verFlags & kCmdFlagReverseRequest) != 0;
+        newState.hazardLightRequested = (newState.verFlags & kCmdFlagHazardLight) != 0;
         const int32_t speedMagnitude = static_cast<int32_t>(newState.speedCmdCentiMps);
         const int32_t speedSigned = newState.speedReverseRequest ? -speedMagnitude : speedMagnitude;
         newState.speedCmdSignedCentiMps = clampSignedCentiMps(speedSigned);
@@ -751,6 +757,7 @@ void taskPiCommsRx(void* parameter) {
         g_rxState.speedCmdCentiMps = newState.speedCmdCentiMps;
         g_rxState.speedCmdSignedCentiMps = newState.speedCmdSignedCentiMps;
         g_rxState.speedReverseRequest = newState.speedReverseRequest;
+        g_rxState.hazardLightRequested = newState.hazardLightRequested;
         g_rxState.estop = newState.estop;
         g_rxState.driveEnabled = newState.driveEnabled;
         g_rxState.brake = newState.brake;

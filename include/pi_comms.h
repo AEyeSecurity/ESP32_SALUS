@@ -30,6 +30,7 @@ struct PiCommsRxSnapshot {
   uint16_t speedCmdCentiMps;
   int16_t speedCmdSignedCentiMps;
   bool speedReverseRequest;
+  bool hazardLightRequested;
   uint8_t brake;
   bool driveEnabled;
   bool estop;

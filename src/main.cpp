@@ -14,6 +14,7 @@
 #include "speed_pid.h"
 #include "system_diag.h"
 #include "battery_monitor.h"
+#include "hazard_light.h"
 
 constexpr uint16_t STACK_OTA = 8192;
 constexpr uint16_t STACK_BRIDGE = 4096;
@@ -24,6 +25,7 @@ constexpr uint16_t STACK_DRIVE = 4096;
 constexpr uint16_t STACK_PI_RX = 3072;
 constexpr uint16_t STACK_PI_TX = 2048;
 constexpr uint16_t STACK_BATTERY = 2048;
+constexpr uint16_t STACK_HAZARD = 2048;
 
 constexpr int AS5600_SDA_PIN = 25;
 constexpr int AS5600_SCL_PIN = 33;
@@ -122,6 +124,11 @@ constexpr uint8_t BATTERY_SAMPLE_COUNT = 16;
 constexpr uint32_t BATTERY_DIVIDER_UPPER_OHM = 240000;
 constexpr uint32_t BATTERY_DIVIDER_LOWER_OHM = 10000;
 constexpr float BATTERY_CALIBRATION_GAIN = 0.8930f;
+
+constexpr uint8_t HAZARD_RELAY_PIN = 32;
+constexpr bool HAZARD_RELAY_ACTIVE_LOW = true;
+constexpr TickType_t HAZARD_PERIOD = pdMS_TO_TICKS(30);
+constexpr TickType_t HAZARD_PI_FRESH_TIMEOUT = pdMS_TO_TICKS(120);
 
 namespace debug {
 constexpr bool kLogSystem = false;
@@ -251,6 +258,13 @@ static BatteryMonitorConfig g_batteryMonitorConfig = {
     BATTERY_CALIBRATION_GAIN,
     BATTERY_PERIOD,
 };
+static HazardLightConfig g_hazardLightConfig = {
+    HAZARD_RELAY_PIN,
+    HAZARD_RELAY_ACTIVE_LOW,
+    HAZARD_PERIOD,
+    HAZARD_PI_FRESH_TIMEOUT,
+    true,
+};
 static HallSpeedConfig g_hallSpeedConfig = {
     26,      // Hall A
     27,      // Hall B
@@ -270,6 +284,7 @@ static TaskHandle_t g_taskDriveHandle = nullptr;
 static TaskHandle_t g_taskPiRxHandle = nullptr;
 static TaskHandle_t g_taskPiTxHandle = nullptr;
 static TaskHandle_t g_taskBatteryHandle = nullptr;
+static TaskHandle_t g_taskHazardHandle = nullptr;
 
 void setup() {
   InicializaWiFi();
@@ -358,6 +373,18 @@ void setup() {
                              &g_taskBatteryHandle,
                              1)) {
     systemDiagRegisterTask(SystemDiagTaskId::kBattery, "Battery", g_taskBatteryHandle);
+  }
+
+  if (!hazardLightInit(g_hazardLightConfig)) {
+    broadcastIf(true, "[HAZARD] Error inicializando relé de emergencia");
+  } else if (startTaskPinned(taskHazardLightControl,
+                             "Hazard",
+                             STACK_HAZARD,
+                             &g_hazardLightConfig,
+                             2,
+                             &g_taskHazardHandle,
+                             1)) {
+    systemDiagRegisterTask(SystemDiagTaskId::kHazardLight, "Hazard", g_taskHazardHandle);
   }
 }
 
