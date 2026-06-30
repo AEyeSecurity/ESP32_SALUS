@@ -105,14 +105,9 @@ bool hazardLightInit(const HazardLightConfig& config) {
   if (g_initialized) {
     return true;
   }
-  if (!config.activeLow) {
-    broadcastIf(true, "[HAZARD] Config invalida: el relé debe ser active-low para open-drain");
-    return false;
-  }
 
   g_config = config;
   pinMode(g_config.relayPin, OUTPUT);
-  digitalWrite(g_config.relayPin, LOW);
 
   portENTER_CRITICAL(&g_hazardMux);
   g_effectiveOn = false;
@@ -124,6 +119,8 @@ bool hazardLightInit(const HazardLightConfig& config) {
   g_source = HazardLightSource::kFailsafe;
   g_initialized = true;
   portEXIT_CRITICAL(&g_hazardMux);
+
+  writeRelayOutput(false);
 
   return true;
 }

@@ -5,7 +5,7 @@ Documento canónico del protocolo UART entre ESP32 y Raspberry Pi para control y
 ## Estado de versión
 
 - Protocolo: `SALUS-UART-ESP32-RPI-V2`
-- Fecha de actualización: `2026-03-06`
+- Fecha de actualización: `2026-06-30`
 - Fuente de verdad: `/home/leo/codigo/aeye-ros-workspace/src/sensores/ESP32_UART_PROTOCOL.md`
 - Espejos obligatorios:
   - `/home/leo/codigo/ESP32_SALUS/ESP32_UART_PROTOCOL.md`
@@ -41,7 +41,7 @@ Estructura:
   - bit0: `ESTOP`
   - bit1: `DRIVE_EN`
   - bit2: `REV_REQ` (solicita reversa para comando de velocidad)
-  - bit3: reservado
+  - bit3: `HAZARD` (solicita luz naranja de emergencia)
 
 Codificación de `speed_cmd_u16`:
 
@@ -117,6 +117,7 @@ Codificación de campos:
 - `REV_REQ=1` con magnitud >0 solicita `REV`; sin solicitud efectiva (`target=0`, `DRIVE_EN=0`, stale) vuelve a `FWD`.
 - `ESTOP=1` -> throttle inhibido y freno 100%.
 - Dirección desde Pi usa `steer_i8` cuando frame Pi está fresco.
+- `HAZARD=1` -> solicitud de luz naranja de emergencia en `GPIO32`.
 - Sin frame fresco, el firmware vuelve a ruta RC/local.
 
 ## 6. Ejemplos

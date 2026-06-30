@@ -64,7 +64,7 @@ Troubleshooting OTA rapido:
 | `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~4 KB)         | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
 | `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~3 KB)         | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA` v2 (7 bytes), valida versión/CRC y mantiene `PiCommsRxSnapshot` con `speed_cmd` firmado (`speed_cmd` + `REV_REQ`). |
 | `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~2 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status speed steer brake crc]` a 100 Hz y una trama `[0x56 battery adc age crc]` a 1 Hz. |
-| `taskHazardLightControl` | `src/hazard_light.cpp`   | 2048 (~2 KB)         | 2    | 1      | 30 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Controla el relé de baliza en `GPIO32` (open-drain, active-low) con prioridad Telnet sobre UART y fail-safe OFF. |
+| `taskHazardLightControl` | `src/hazard_light.cpp`   | 2048 (~2 KB)         | 2    | 1      | 30 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Controla el relé de baliza en `GPIO32` como salida digital `HIGH/LOW`, con prioridad Telnet sobre UART y fail-safe OFF. |
 | `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Supervisor liviano sin lógica de comunicaciones (solo `vTaskDelay`). |
 
 > Nota: en este target Arduino/ESP32 los tamanos pasados a `startTaskPinned`/`xTaskCreatePinnedToCore`
@@ -237,7 +237,7 @@ Estos valores se inyectan en los `*_TaskConfig` y definen la cadencia con la que
 | Salida PWM acelerador    | 13         | LEDC 20 kHz, 8 bits hacia ESC o controlador de motor.                  |
 | Servo freno A / B        | 18 / 5     | LEDC 50 Hz, 16 bits para actuacion de freno.                           |
 | H-bridge enable / PWM    | 21 / 22 / 23 | Control de direccion; finales de carrera en GPIO15 y GPIO2.            |
-| Baliza emergencia (relé) | 32         | Relé 5 V active-low en open-drain; UART Pi/Orin + override Telnet.      |
+| Baliza emergencia (relé) | 32         | Relé controlado por salida digital `HIGH/LOW`; UART Pi/Orin + override Telnet. |
 
 ## Diagnostico y mejores practicas
 
