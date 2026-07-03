@@ -116,7 +116,7 @@ constexpr TickType_t AS5600_LOG_INTERVAL = pdMS_TO_TICKS(500);
 constexpr TickType_t PID_PERIOD = pdMS_TO_TICKS(30);
 constexpr TickType_t PID_LOG_INTERVAL = pdMS_TO_TICKS(200);
 constexpr TickType_t THROTTLE_PERIOD = pdMS_TO_TICKS(30);
-constexpr TickType_t BATTERY_PERIOD = pdMS_TO_TICKS(5000);
+constexpr TickType_t BATTERY_PERIOD = pdMS_TO_TICKS(1000);
 constexpr TickType_t BATTERY_UART_PERIOD = pdMS_TO_TICKS(1000);
 
 constexpr uint8_t BATTERY_ADC_PIN = 34;

@@ -88,8 +88,11 @@ Sentinels:
 Observaciones:
 
 - `battery_cv` viaja ya calibrado desde la ESP32 usando el divisor resistivo y `calibration_gain`.
+- La ESP32 calcula `battery_cv` con un `trimmed mean` de `16` lecturas ADC por ciclo; no aplica un filtro temporal largo ni calcula SOC.
 - `adc_mv` se conserva para diagnóstico y recalibración.
 - `sample_age_ds` permite detectar lecturas viejas sin deducirlo del ritmo UART.
+- El suavizado temporal y el cálculo final de porcentaje se hacen en ROS2 usando `battery_cv` como insumo.
+- La trama `0x56` mantiene tamaño, campos y versión; no hay bump de protocolo.
 - La trama `0x55` no cambia y sigue siendo compatible con el parser previo.
 
 ## 4. Flujo de control
