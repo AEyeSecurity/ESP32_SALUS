@@ -95,6 +95,12 @@ Troubleshooting OTA rapido:
 - Seguridad: si el sensor no responde, no se destruye la tarea; simplemente reporta desconexion y reintenta en el siguiente ciclo.
 - Disparador: temporizado via `vTaskDelayUntil`. No emplea interrupciones I2C ni callbacks.
 
+### `taskBatteryMonitor` (src/battery_monitor.cpp)
+- Configuracion: `BatteryMonitorConfig` usa `GPIO34`, divisor `240k/10k`, `calibration_gain=0.8930`, `16` muestras y periodo de `1000 ms`.
+- Muestreo: cada ciclo toma `16` lecturas con `analogReadMilliVolts`, ordena, descarta extremos y publica un `trimmed mean` calibrado.
+- Alcance: esta tarea entrega un voltaje estable por ciclo (`battery_cv`), pero no hace suavizado temporal de varios segundos ni calcula porcentaje de batería.
+- Contrato: el suavizado temporal y el modelo de SOC final viven en ROS2; la ESP32 mantiene la medición calibrada y la exporta sin cambiar el protocolo UART.
+
 ### `taskPidControl` (src/pid.cpp)
 - Calibracion: responde al comando Telnet `steer.calibrate` lanzando una FSM (mover izquierda → soltar → mover derecha → soltar) que barre los finales de carrera con un duty moderado y registra los angulos reales del AS5600.
 - Offset asimetrico: los limites y el centro ajustado se guardan en un estado compartido (`steering_calibration_*`). El comando `steer.offset <deg>` permite compensar mecanica con mas recorrido hacia un lado.
@@ -136,10 +142,11 @@ Troubleshooting OTA rapido:
   - `brake_applied_u8` real,
   - `status_flags` (`READY`, `ESTOP_ACTIVE`, `FAILSAFE_ACTIVE`, `PI_FRESH`, `CONTROL_SOURCE`, `OVERSPEED_ACTIVE`).
 - Además envía una trama de batería de 8 bytes (`0x56 ... crc`) a baja tasa con:
-  - `battery_cv_u16` (`V x100`, ya calibrado en la ESP32),
+  - `battery_cv_u16` (`V x100`, ya calibrado en la ESP32 con `trimmed mean`),
   - `adc_mv_u16` (`mV` del pin ADC),
   - `sample_age_ds_u8` (edad de muestra en decisegundos),
   - `battery_flags` (`READY`, `FRESH`, `SUSPECT`, `CAL`).
+  - El suavizado temporal y el cálculo final de SOC ocurren del lado ROS2; la semántica y tamaño de la trama no cambian.
 - `taskQuadDriveControl` consume el snapshot:  
   - `ESTOP` → freno completo y duty mínimo.  
   - `DRIVE_EN` + `speed_cmd_u16` + `REV_REQ` -> setpoint firmado (`m/s`) para PID Hall, clamp asimétrico `[-rev.max, +spid.max]` (default `rev.max=1.30 m/s`).  
