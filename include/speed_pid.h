@@ -8,6 +8,8 @@
 enum class SpeedPidMode : uint8_t {
   kNormal = 0,
   kOverspeed,
+  kStallAssist,
+  kStallLockout,
   kFailsafe,
 };
 
@@ -34,6 +36,8 @@ struct SpeedPidConfig {
   float throttleBasePidDeltaDownMaxPercent;
   float throttleBaseActivationMinMps;
   uint16_t feedbackLaunchGraceMs;
+  float stallAssistThrottlePercent;
+  uint16_t stallAssistWindowMs;
   float integratorUnwindGain;
   float derivativeFilterHz;
   float overspeedBrakeMaxPercent;
@@ -69,6 +73,9 @@ struct SpeedPidControlOutput {
   bool integratorClamped;
   bool launchAssistActive;
   uint16_t launchAssistRemainingMs;
+  bool stallAssistActive;
+  bool stallLockoutActive;
+  uint16_t stallAssistRemainingMs;
   bool overspeedHoldActive;
   uint16_t overspeedHoldRemainingMs;
   bool feedbackOk;
@@ -109,6 +116,9 @@ struct SpeedPidRuntimeSnapshot {
   bool integratorClamped;
   bool launchAssistActive;
   uint16_t launchAssistRemainingMs;
+  bool stallAssistActive;
+  bool stallLockoutActive;
+  uint16_t stallAssistRemainingMs;
   bool overspeedHoldActive;
   uint16_t overspeedHoldRemainingMs;
   SpeedPidTunings tunings;
@@ -119,6 +129,7 @@ bool speedPidInit(const SpeedPidTunings& defaultTunings, const SpeedPidConfig& d
 bool speedPidCompute(float targetRawMps,
                      float measuredMps,
                      bool feedbackOk,
+                     bool stallCandidate,
                      float dtSeconds,
                      SpeedPidControlOutput& output,
                      float antiWindupUnwindScale = 1.0f);
@@ -142,6 +153,8 @@ bool speedPidSetThrottleBasePidDeltaUpMaxPercent(float percent);
 bool speedPidSetThrottleBasePidDeltaDownMaxPercent(float percent);
 bool speedPidSetThrottleBaseActivationMinMps(float mps);
 bool speedPidSetFeedbackLaunchGraceMs(uint16_t graceMs);
+bool speedPidSetStallAssistThrottlePercent(float percent);
+bool speedPidSetStallAssistWindowMs(uint16_t windowMs);
 bool speedPidSetIntegratorUnwindGain(float unwindGain);
 bool speedPidSetDerivativeFilterHz(float cutoffHz);
 bool speedPidSetOverspeedBrakeMaxPercent(float brakeCapPercent);

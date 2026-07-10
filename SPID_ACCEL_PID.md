@@ -4,7 +4,7 @@ Esta guia documenta como funciona el PID de aceleracion del proyecto. En este fi
 
 ## Resumen rapido
 
-- Modos de control: `NORMAL`, `OVERSPEED`, `FAILSAFE`.
+- Modos de control: `NORMAL`, `OVERSPEED`, `STALL_ASSIST`, `STALL_LOCKOUT`, `FAILSAFE`.
 - Salidas principales:
   - `throttlePercent` (acelerador).
   - `brakePercent` (freno automatico en overspeed).
@@ -57,7 +57,7 @@ Se mantiene telemetria de:
 
 El control usa `measuredFilteredMps`.
 
-## 4) Seleccion de modo (`NORMAL`/`OVERSPEED`/`FAILSAFE`)
+## 4) Seleccion de modo (`NORMAL`/`OVERSPEED`/`STALL_ASSIST`/`STALL_LOCKOUT`/`FAILSAFE`)
 
 ### `FAILSAFE`
 
@@ -80,6 +80,14 @@ Accion:
 - throttle forzado a 0
 - freno automatico proporcional al exceso de velocidad
 - aplica hysteresis y hold para evitar chatter de entrada/salida
+
+### `STALL_ASSIST` y `STALL_LOCKOUT`
+
+Solo en avance, cuando el backend Hall está listo pero se agota la gracia sin transiciones, el firmware interpreta el caso como posible estancamiento bajo carga. No puede distinguirlo de un Hall desconectado.
+
+- `STALL_ASSIST`: aplica un único impulso con `stallAssistThrottlePercent` durante `stallAssistWindowMs`, respetando el slew de throttle. Si vuelve una transición Hall, regresa a `NORMAL` inmediatamente.
+- `STALL_LOCKOUT`: si vence el impulso sin Hall, corta throttle y marca failsafe hasta que la consigna vuelva a cero o cambie la fuente/dirección. No hay reintentos automáticos.
+- E-stop, freno, safety lock RC y conmutación de reversa tienen prioridad sobre el asistente.
 
 ### `NORMAL`
 
@@ -184,10 +192,16 @@ Defaults actuales definidos en `src/main.cpp` (pueden ser sobreescritos por NVS 
 - `spid.ff on|off` -> `throttleBaseEnable` (default `true`)
 - `spid.ff.base0` -> `throttleBaseAtZeroMpsPercent` (default `0`)
 - `spid.ff.basemax` -> `throttleBaseAtMaxSpeedPercent` (default `55`)
-- `spid.ff.du` -> `throttleBasePidDeltaUpMaxPercent` (default `35`)
+- `spid.ff.du` -> `throttleBasePidDeltaUpMaxPercent` (default `100`; permite que el PID alcance el límite absoluto de throttle)
 - `spid.ff.dd` -> `throttleBasePidDeltaDownMaxPercent` (default `45`)
 - `spid.ff.minspd` -> `throttleBaseActivationMinMps` (default `0.10`)
 - `spid.ff.grace` -> `feedbackLaunchGraceMs` (default `1200`)
+
+### Recuperación por estancamiento Hall
+
+- `spid.stall.throttle` -> `stallAssistThrottlePercent` (default `90`)
+- `spid.stall.window` -> `stallAssistWindowMs` (default `1200`)
+- Los cambios son runtime; `spid.save` los persiste. La migración NVS v4 -> v5 conserva el resto de tunings y eleva `spid.ff.du` a `100`.
 
 ### Robustez de integrador y derivativo
 
@@ -220,7 +234,7 @@ Campos de `spid.status` para tuning:
 - `ffBase`, `ffDelta`, `ffPre`, `ffAct`
 - `throttle`, `throttleRaw`, `throttleFilt`
 - `brake`, `brakeRaw`, `brakeFilt`
-- `sat`, `iclamp`, `launch`, `hold`, `mode`, `failsafe`, `overspeed`
+- `sat`, `iclamp`, `launch`, `stall`, `stallLock`, `stallMs`, `hold`, `mode`, `failsafe`, `overspeed`
 
 ## Escenarios de validacion sugeridos
 
@@ -244,9 +258,14 @@ Campos de `spid.status` para tuning:
 - Forzar `speed > target`.
 - Esperado: `mode=OVERSPEED`, `throttle=0`, `brake>0`; salida por `hys` + `brakehold`.
 
-6. Failsafe de feedback
-- Interrumpir feedback Hall.
-- Esperado: `mode=FAILSAFE`, `throttle=0`, `failsafe=Y`.
+6. Recuperación Hall estancado
+- Con consigna de avance, mantener Hall sin transiciones por más de las gracias de feedback.
+- Esperado: `mode=STALL_ASSIST` durante la ventana configurada y luego `mode=STALL_LOCKOUT`, `throttle=0`, `failsafe=Y`.
+- Al devolver Hall durante `STALL_ASSIST`, esperado: retorno a `NORMAL`. Tras `STALL_LOCKOUT`, soltar/reemitir la consigna para rearmar.
+
+## Limitación de patinaje
+
+Los tres Hall miden velocidad de motor/transmisión. Una rueda que patina puede dejar al controlador con RPM normal o alta aunque el robot no avance; el firmware no puede detectarlo ni garantizar desplazamiento real. Para diagnosticar diferencia entre ruedas se requieren encoders independientes por rueda. Para medir avance sobre suelo aun con patinaje, hace falta una referencia externa como IMU fusionada con GNSS, visión/LiDAR odometry o flujo óptico.
 
 ## Supuestos de esta guia
 

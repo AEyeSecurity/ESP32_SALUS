@@ -765,6 +765,12 @@ void reportSpeedPidStatus() {
   msg += snapshot.launchAssistActive ? "Y" : "N";
   msg += " launchMs=";
   msg += snapshot.launchAssistRemainingMs;
+  msg += " stall=";
+  msg += snapshot.stallAssistActive ? "Y" : "N";
+  msg += " stallLock=";
+  msg += snapshot.stallLockoutActive ? "Y" : "N";
+  msg += " stallMs=";
+  msg += snapshot.stallAssistRemainingMs;
   msg += " hold=";
   msg += snapshot.overspeedHoldActive ? "Y" : "N";
   msg += " holdMs=";
@@ -807,7 +813,11 @@ void reportSpeedPidStatus() {
   msg += String(snapshot.config.throttleBaseActivationMinMps, 2);
   msg += "m/s} flgr=";
   msg += snapshot.config.feedbackLaunchGraceMs;
-  msg += "ms iunw=";
+  msg += "ms stall{thr=";
+  msg += String(snapshot.config.stallAssistThrottlePercent, 1);
+  msg += "% win=";
+  msg += snapshot.config.stallAssistWindowMs;
+  msg += "ms} iunw=";
   msg += String(snapshot.config.integratorUnwindGain, 2);
   msg += " dfhz=";
   msg += String(snapshot.config.derivativeFilterHz, 2);
@@ -2247,6 +2257,42 @@ bool handleSpidCommand(const String& command, const String& args) {
     return true;
   }
 
+  if (command.equalsIgnoreCase("spid.stall.throttle")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    float value = 0.0f;
+    if (!parseFloatArg(args, value)) {
+      sendTelnet("[SPID] StallThrottle invalido (ej: spid.stall.throttle 90)");
+      return true;
+    }
+    if (!speedPidSetStallAssistThrottlePercent(value)) {
+      sendTelnet("[SPID] StallThrottle fuera de rango (0..100)");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("spid.stall.window")) {
+    if (args.isEmpty()) {
+      reportSpeedPidStatus();
+      return true;
+    }
+    int value = 0;
+    if (!parseIntArg(args, value) || value < 0 || value > 65535) {
+      sendTelnet("[SPID] StallWindow invalido (ej: spid.stall.window 1200)");
+      return true;
+    }
+    if (!speedPidSetStallAssistWindowMs(static_cast<uint16_t>(value))) {
+      sendTelnet("[SPID] StallWindow fuera de rango");
+      return true;
+    }
+    reportSpeedPidStatus();
+    return true;
+  }
+
   if (command.equalsIgnoreCase("spid.iunwind")) {
     if (args.isEmpty()) {
       reportSpeedPidStatus();
@@ -2563,7 +2609,7 @@ bool handleSpidCommand(const String& command, const String& args) {
 
   if (command.equalsIgnoreCase("spid.help")) {
     sendTelnet(
-        "Comandos: spid.set <kp> <ki> <kd> | spid.kp <v> | spid.ki <v> | spid.kd <v> | spid.ramp <mps2> | spid.minthrottle <pct> | spid.thslewup <pctps> | spid.thslewdown <pctps> | spid.minth.spd <mps> | spid.launchwin <ms> | spid.ff on|off | spid.ff.base0 <pct> | spid.ff.basemax <pct> | spid.ff.du <pct> | spid.ff.dd <pct> | spid.ff.minspd <mps> | spid.ff.grace <ms> | spid.iunwind <gain> | spid.dfilter <hz> | spid.max <mps> | spid.maxrev <mps> | spid.awx <scale> | spid.brakecap <pct> | spid.hys <mps> | spid.brakeslewup <pctps> | spid.brakeslewdown <pctps> | spid.brakehold <ms> | spid.brakedb <pct> | spid.target <signed_mps|off> | spid.save | spid.reset | spid.status | spid.stream on [ms] | spid.stream off");
+        "Comandos: spid.set <kp> <ki> <kd> | spid.kp <v> | spid.ki <v> | spid.kd <v> | spid.ramp <mps2> | spid.minthrottle <pct> | spid.thslewup <pctps> | spid.thslewdown <pctps> | spid.minth.spd <mps> | spid.launchwin <ms> | spid.ff on|off | spid.ff.base0 <pct> | spid.ff.basemax <pct> | spid.ff.du <pct> | spid.ff.dd <pct> | spid.ff.minspd <mps> | spid.ff.grace <ms> | spid.stall.throttle <pct> | spid.stall.window <ms> | spid.iunwind <gain> | spid.dfilter <hz> | spid.max <mps> | spid.maxrev <mps> | spid.awx <scale> | spid.brakecap <pct> | spid.hys <mps> | spid.brakeslewup <pctps> | spid.brakeslewdown <pctps> | spid.brakehold <ms> | spid.brakedb <pct> | spid.target <signed_mps|off> | spid.save | spid.reset | spid.status | spid.stream on [ms] | spid.stream off");
     return true;
   }
 

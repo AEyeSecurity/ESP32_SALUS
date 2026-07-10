@@ -1108,6 +1108,8 @@ void taskQuadDriveControl(void* parameter) {
   TickType_t lastPidTraceTick = 0;
   TickType_t lastFailsafeEventTick = 0;
   TickType_t lastOverspeedEventTick = 0;
+  TickType_t lastStallEventTick = 0;
+  TickType_t lastStallLockoutEventTick = 0;
   TickType_t lastInhibitEventTick = 0;
   TickType_t lastBrakeConfigEventTick = 0;
   TickType_t lastRcSourceEventTick = 0;
@@ -1134,6 +1136,8 @@ void taskQuadDriveControl(void* parameter) {
   bool speedPidWasActive = false;
   bool lastFailsafeState = false;
   bool lastOverspeedState = false;
+  bool lastStallAssistState = false;
+  bool lastStallLockoutState = false;
   DriveThrottleInhibitReason lastInhibitReason = DriveThrottleInhibitReason::kNone;
   bool lastRcUsingLatchState = false;
   bool lastRcReverseSwitchActive = false;
@@ -1144,6 +1148,7 @@ void taskQuadDriveControl(void* parameter) {
   float rcTargetShapedMps = 0.0f;
   float rcLastTargetRawMps = 0.0f;
   float lastSpeedTargetRawMps = 0.0f;
+  int8_t lastSpeedTargetDirection = 0;
   TickType_t rcBrakeReleaseReentryHoldUntilTick = 0;
   bool lastRcManualBrakeActive = false;
   bool lastRcAllowedWithPiPassive = false;
@@ -1427,6 +1432,9 @@ void taskQuadDriveControl(void* parameter) {
     bool speedPidIntegratorClamped = false;
     bool speedPidLaunchAssistActive = false;
     uint16_t speedPidLaunchAssistRemainingMs = 0;
+    bool speedPidStallAssistActive = false;
+    bool speedPidStallLockoutActive = false;
+    uint16_t speedPidStallAssistRemainingMs = 0;
     bool speedPidOverspeedHoldActive = false;
     uint16_t speedPidOverspeedHoldRemainingMs = 0;
     float rcTargetRawMpsDebug = 0.0f;
@@ -1453,6 +1461,7 @@ void taskQuadDriveControl(void* parameter) {
       speedLastTransitionsOk = 0;
       lastSpeedControlSource = SpeedControlSource::kNone;
       lastSpeedTargetRawMps = 0.0f;
+      lastSpeedTargetDirection = 0;
       rcTargetShapedMps = 0.0f;
       rcLastTargetRawMps = 0.0f;
       commandValue = pwmOverridePercent;
@@ -1523,6 +1532,17 @@ void taskQuadDriveControl(void* parameter) {
                                speedTargetWasClamped);
       speedTargetRawMps = speedTargetAbsMps;
       reverseTargetClampActive = speedTargetWasClamped && (speedTargetRequestedSignedMps < -0.05f);
+      const int8_t speedTargetDirection =
+          (speedTargetSignedMps > 0.05f) ? 1 : ((speedTargetSignedMps < -0.05f) ? -1 : 0);
+      const bool directionChanged = speedTargetDirection != 0 && lastSpeedTargetDirection != 0 &&
+                                    speedTargetDirection != lastSpeedTargetDirection;
+      if (directionChanged) {
+        // A STALL_LOCKOUT must not survive an explicit FWD/REV change.
+        speedPidReset();
+        speedFeedbackMissingTick = 0;
+        speedPidSeenTransition = false;
+        speedTransitionCounterPrimed = false;
+      }
 
       HallSpeedSnapshot speedSnapshot{};
       const bool speedOk = hallSpeedGetSnapshot(speedSnapshot) && speedSnapshot.driverReady;
@@ -1573,6 +1593,7 @@ void taskQuadDriveControl(void* parameter) {
       const bool transitionFresh = speedOk && validTransitionEvent &&
                                    speedSnapshot.hasTransition &&
                                    speedSnapshot.transitionAgeUs <= rpmTimeoutUs;
+      const bool forwardStallCandidate = speedOk && speedTargetSignedMps > 0.05f && transitionStale;
       speedMeasuredMps = speedAbsMps;
       if (reverseTargetClampActive &&
           speedMeasuredMps < (speedTargetRawMps - reverseAntiWindupErrThresholdMps)) {
@@ -1601,7 +1622,13 @@ void taskQuadDriveControl(void* parameter) {
       SpeedPidControlOutput speedOutput{};
       const bool speedComputed =
           speedPidCompute(
-              speedTargetRawMps, speedMeasuredMps, speedPidFeedbackOk, dtSeconds, speedOutput, speedPidAntiWindupScale);
+              speedTargetRawMps,
+              speedMeasuredMps,
+              speedPidFeedbackOk,
+              forwardStallCandidate,
+              dtSeconds,
+              speedOutput,
+              speedPidAntiWindupScale);
 
       if (!speedComputed) {
         speedPidFeedbackOk = false;
@@ -1632,6 +1659,9 @@ void taskQuadDriveControl(void* parameter) {
         speedPidIntegratorClamped = speedOutput.integratorClamped;
         speedPidLaunchAssistActive = speedOutput.launchAssistActive;
         speedPidLaunchAssistRemainingMs = speedOutput.launchAssistRemainingMs;
+        speedPidStallAssistActive = speedOutput.stallAssistActive;
+        speedPidStallLockoutActive = speedOutput.stallLockoutActive;
+        speedPidStallAssistRemainingMs = speedOutput.stallAssistRemainingMs;
         speedPidOverspeedHoldActive = speedOutput.overspeedHoldActive;
         speedPidOverspeedHoldRemainingMs = speedOutput.overspeedHoldRemainingMs;
         speedPidFeedbackOk = speedOutput.feedbackOk;
@@ -1640,7 +1670,8 @@ void taskQuadDriveControl(void* parameter) {
         speedPidMode = speedOutput.mode;
       }
 
-      const bool speedPidAllowsThrottle = speedPidFeedbackOk || speedPidLaunchAssistActive;
+      const bool speedPidAllowsThrottle =
+          speedPidFeedbackOk || speedPidLaunchAssistActive || speedPidStallAssistActive;
       if (!speedPidAllowsThrottle || speedPidFailsafe) {
         commandValue = 0;
         throttleInhibit = true;
@@ -1653,6 +1684,7 @@ void taskQuadDriveControl(void* parameter) {
       speedPidWasActive = true;
       lastSpeedControlSource = speedControlSource;
       lastSpeedTargetRawMps = speedTargetRawMps;
+      lastSpeedTargetDirection = speedTargetDirection;
     } else {
       if (speedPidWasActive) {
         speedPidReset();
@@ -1664,6 +1696,7 @@ void taskQuadDriveControl(void* parameter) {
       speedLastTransitionsOk = 0;
       lastSpeedControlSource = SpeedControlSource::kNone;
       lastSpeedTargetRawMps = 0.0f;
+      lastSpeedTargetDirection = 0;
       rcTargetShapedMps = 0.0f;
       rcLastTargetRawMps = 0.0f;
       if (piEstopActive) {
@@ -1708,7 +1741,7 @@ void taskQuadDriveControl(void* parameter) {
         resolveThrottleInhibitReason(rcSafetyLockActive,
                                      piEstopActive,
                                      speedControlSource,
-                                     speedPidFeedbackOk,
+                                     speedPidFeedbackOk || speedPidStallAssistActive,
                                      speedPidFailsafe,
                                      piBlocksRc,
                                      piBrakePercent,
@@ -1870,6 +1903,12 @@ void taskQuadDriveControl(void* parameter) {
         msg += "(";
         msg += speedPidLaunchAssistRemainingMs;
         msg += "ms)";
+        msg += " stall=";
+        msg += speedPidStallAssistActive ? "Y" : "N";
+        msg += "(";
+        msg += speedPidStallAssistRemainingMs;
+        msg += "ms) lock=";
+        msg += speedPidStallLockoutActive ? "Y" : "N";
         msg += " sat=";
         msg += speedPidThrottleSaturated ? "Y" : "N";
         msg += " iclamp=";
@@ -1929,6 +1968,33 @@ void taskQuadDriveControl(void* parameter) {
         lastOverspeedEventTick = sampleTick;
       }
       lastOverspeedState = speedPidOverspeed;
+
+      const bool stallAssistEntered = speedPidStallAssistActive && !lastStallAssistState;
+      const bool stallAssistRecovered = !speedPidStallAssistActive && lastStallAssistState &&
+                                        speedPidFeedbackOk && !speedPidStallLockoutActive;
+      if ((stallAssistEntered || stallAssistRecovered) &&
+          (sampleTick - lastStallEventTick) >= kDriveEventCooldown) {
+        String msg;
+        msg.reserve(88);
+        msg += "[DRIVE][EVENT] ";
+        msg += stallAssistEntered ? "STALL_ASSIST_ENTER" : "STALL_ASSIST_RECOVERED";
+        msg += " src=";
+        msg += speedControlSourceText(speedControlSource);
+        broadcastIf(true, msg);
+        lastStallEventTick = sampleTick;
+      }
+      lastStallAssistState = speedPidStallAssistActive;
+
+      if (speedPidStallLockoutActive != lastStallLockoutState && speedPidStallLockoutActive &&
+          (sampleTick - lastStallLockoutEventTick) >= kDriveEventCooldown) {
+        String msg;
+        msg.reserve(72);
+        msg += "[DRIVE][EVENT] STALL_LOCKOUT src=";
+        msg += speedControlSourceText(speedControlSource);
+        broadcastIf(true, msg);
+        lastStallLockoutEventTick = sampleTick;
+      }
+      lastStallLockoutState = speedPidStallLockoutActive;
 
       if (inhibitReason != lastInhibitReason &&
           (sampleTick - lastInhibitEventTick) >= kDriveEventCooldown) {
@@ -2100,6 +2166,12 @@ void taskQuadDriveControl(void* parameter) {
         msg += String(speedPidThrottlePreSlewPercent, 3);
         msg += " ffActive=";
         msg += speedPidThrottleBaseActive ? "Y" : "N";
+        msg += " stallActive=";
+        msg += speedPidStallAssistActive ? "Y" : "N";
+        msg += " stallLock=";
+        msg += speedPidStallLockoutActive ? "Y" : "N";
+        msg += " stallMs=";
+        msg += speedPidStallAssistRemainingMs;
         msg += " throttleRawPct=";
         msg += String(speedPidThrottleRawPercent, 3);
         msg += " throttleFiltPct=";

@@ -114,7 +114,8 @@ Troubleshooting OTA rapido:
 - Flujo: selecciona fuente de setpoint para `speed_pid` segun prioridad:
   - Pi fresca + `DRIVE_EN=1`: `speed_cmd_u16` (`m/s x100`) + `REV_REQ` -> objetivo firmado (`m/s`).
   - si Pi no esta fresca y RC esta fresco: `rc_throttle` -> objetivo `m/s` lineal (`0..100%` -> `0..4.17 m/s`).
-- En todos los casos ejecuta `speedPidCompute` con magnitud (`abs`) (modos `NORMAL/OVERSPEED/FAILSAFE`) y resuelve el sentido con el relé (`FWD/REV`).
+- En todos los casos ejecuta `speedPidCompute` con magnitud (`abs`) y resuelve el sentido con el relé (`FWD/REV`). Además de `NORMAL`, `OVERSPEED` y `FAILSAFE`, en avance puede usar `STALL_ASSIST` y `STALL_LOCKOUT` cuando el Hall queda stale bajo demanda.
+- Recuperación por estancamiento: tras las gracias Hall existentes, un candidato de estancamiento en avance entrega un único impulso limitado (`90 %`, `1200 ms` por defecto). Si Hall no vuelve, entra en `STALL_LOCKOUT` y corta tracción hasta soltar/reemitir la consigna o cambiar fuente/dirección. E-stop, freno y safety lock siempre tienen prioridad.
 - Overspeed: cuando `speed > target`, corta throttle (`0`) y aplica freno automático proporcional limitado por `overspeedBrakeMaxPercent`, con `deadband + hold + slew` para reducir chatter del servo de freno.
 - Arbitraje de freno: con Pi fresca aplica `max(brake_u8_pi, brake_overspeed_auto)`; en RC aplica `max(brake_rc_manual, brake_overspeed_auto)`; con `ESTOP` fuerza `100%`.
 - Datos viejos: si el snapshot supera 50 ms sin actualizar, fuerza 0 como entrada y cada 500 ms emite `[DRIVE] sin datos frescos` cuando el logging esta habilitado.
@@ -163,6 +164,7 @@ Troubleshooting OTA rapido:
 - Backend activo: lectura Hall por ISR en IRAM sobre `GPIO26`, `GPIO27`, `GPIO14` (active-low), con detección de sentido por secuencia Hall.
 - Parámetros actuales: `motorPoles=8`, `gearReduction=10.0`, `wheelDiameterM=0.45`, `rpmTimeoutUs=500000`, `directionInverted=true`.
 - `speed.status` reporta velocidad Hall firmada (`+` FWD, `-` REV) y en stale fuerza `0` con `dir=UNK`.
+- Limitación física: los Hall observan el giro de motor/transmisión, no el desplazamiento sobre el suelo. Una desconexión Hall y un motor mecánicamente trabado son indistinguibles durante el impulso de recuperación; patinaje de una o ambas ruedas tampoco puede detectarse con este hardware. Para confirmar avance real se necesita una referencia externa (IMU fusionada con GNSS/visión/LiDAR/flujo óptico); encoders por rueda sólo permitirían detectar discrepancia entre ruedas.
 - La telemetría UART a Pi se mantiene en magnitud (`speed_meas_u16` en `m/s x100` absoluto) en esta fase.
 - Comandos Telnet:
   - `speed.status` muestra snapshot Hall firmado (`dir`, `km/h`, `m/s`, `speedAbs`) y contadores ISR/validación.
@@ -171,7 +173,7 @@ Troubleshooting OTA rapido:
   - `speed.uart` responde `N/A source=hall` (ya no existe backend UART de velocidad).
   - `sys.rt`, `sys.stack`, `sys.jitter on [ms]|off`, `sys.reset [keep|full]` exponen métricas RT/stack y permiten resetear acumulados por etapa.
   - `pid.status`, `pid.deadband`, `pid.minactive`, `pid.stream on [ms]` / `pid.stream off` permiten debug/tuning del PID de direccion en vivo.
-  - `spid.status`, `spid.set`, `spid.kp/ki/kd`, `spid.ramp`, `spid.minthrottle`, `spid.thslewup`, `spid.thslewdown`, `spid.minth.spd`, `spid.launchwin`, `spid.iunwind`, `spid.dfilter`, `spid.max`, `spid.maxrev`, `spid.awx`, `spid.brakecap`, `spid.hys`, `spid.brakeslewup`, `spid.brakeslewdown`, `spid.brakehold`, `spid.brakedb`, `spid.target`, `spid.save`, `spid.reset` ajustan PID de velocidad (incluye `spid.target` firmado con clamp asimétrico `[-rev.max,+max]`, salida saturada/no saturada, launch-assist controlado y persistencia NVS `speed_pid` `ver=4`).
+  - `spid.status`, `spid.set`, `spid.kp/ki/kd`, `spid.ramp`, `spid.minthrottle`, `spid.thslewup`, `spid.thslewdown`, `spid.minth.spd`, `spid.launchwin`, `spid.stall.throttle`, `spid.stall.window`, `spid.iunwind`, `spid.dfilter`, `spid.max`, `spid.maxrev`, `spid.awx`, `spid.brakecap`, `spid.hys`, `spid.brakeslewup`, `spid.brakeslewdown`, `spid.brakehold`, `spid.brakedb`, `spid.target`, `spid.save`, `spid.reset` ajustan PID de velocidad (incluye `spid.target` firmado con clamp asimétrico `[-rev.max,+max]`, stall-assist acotado y persistencia NVS `speed_pid` `ver=5`).
   - `spid.stream on [ms]` / `spid.stream off` permite monitoreo continuo de estado/tuning PID.
   - `drive.log on|off` habilita/deshabilita logs `[DRIVE]` base.
   - `drive.log pid on [ms] | drive.log pid off` habilita/deshabilita trace forense periódico `[DRIVE][PIDTRACE]` para analizar estabilidad de velocidad y autofrenado (`target`, `speed`, `PWM`, `P/I/D`, `throttleRaw/Filt`, `launchAssistActive`, `throttleSaturated`, `integratorClamped`, `brakeA_pct`, `brakeB_pct`, `failsafe/overspeed/inhibit`).
