@@ -22,12 +22,13 @@ Nota operacional: la UI web de Telnet fue removida del repositorio para reducir 
 
 - El firmware usa build flags para credenciales y parametros de red:
   - `WIFI_STA_SSID`, `WIFI_STA_PASS`
+  - `WIFI_STA_SSID_2`, `WIFI_STA_PASS_2` (segunda red opcional)
   - `WIFI_AP_SSID`, `WIFI_AP_PASS`
   - `OTA_HOSTNAME`, `OTA_PASSWORD`
   - `WIFI_STA_CONNECT_TIMEOUT_MS`
 - Flujo de arranque:
-  1. Intenta conectar como cliente WiFi (STA).
-  2. Si no conecta dentro del timeout, activa AP fallback.
+  1. Intenta conectar como cliente WiFi (STA) a la mejor de las redes configuradas.
+  2. Si ninguna conecta con IP y señal suficiente dentro del timeout, activa AP fallback.
   3. OTA queda disponible en cualquiera de los dos modos.
 - Entornos PlatformIO:
   - `esp32dev`: compilacion base.

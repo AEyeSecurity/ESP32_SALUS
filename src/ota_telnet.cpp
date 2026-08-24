@@ -1,6 +1,7 @@
 #include "ota_telnet.h"
 
 #include <WiFi.h>
+#include <WiFiMulti.h>
 #include <ArduinoOTA.h>
 #include <esp_timer.h>
 
@@ -28,6 +29,14 @@
 
 #ifndef WIFI_STA_PASS
 #define WIFI_STA_PASS "TU_PASSWORD"
+#endif
+
+#ifndef WIFI_STA_SSID_2
+#define WIFI_STA_SSID_2 ""
+#endif
+
+#ifndef WIFI_STA_PASS_2
+#define WIFI_STA_PASS_2 ""
 #endif
 
 #ifndef WIFI_AP_SSID
@@ -116,6 +125,7 @@ struct TelnetLogMessage {
 
 WiFiServer g_telnetServer(kTelnetPort);
 WiFiClient g_telnetClient;
+WiFiMulti g_wifiMulti;
 QueueHandle_t g_telnetLogQueue = nullptr;
 TaskHandle_t g_otaTaskHandleRuntime = nullptr;
 portMUX_TYPE g_telnetStatsMux = portMUX_INITIALIZER_UNLOCKED;
@@ -202,17 +212,21 @@ void refreshNetworkState() {
     updateNetworkState(mode, WIFI_AP_SSID, WiFi.softAPIP());
     return;
   }
-  updateNetworkState(mode, WIFI_STA_SSID, WiFi.localIP());
+  const String connectedSsid = WiFi.status() == WL_CONNECTED ? WiFi.SSID() : String();
+  updateNetworkState(mode, connectedSsid, WiFi.localIP());
 }
 
 void reconnectStaIfDue(TickType_t now) {
-  if (WiFi.status() == WL_CONNECTED && isValidIp(WiFi.localIP())) {
+  if (isStaHealthy()) {
     return;
   }
   if (g_lastStaReconnectTick != 0 && (now - g_lastStaReconnectTick) < kWifiStaReconnectInterval) {
     return;
   }
-  WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASS);
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFi.disconnect(false, false);
+  }
+  (void)g_wifiMulti.run(1000);
   g_lastStaReconnectTick = now;
   g_staReconnectAttemptCount++;
 }
@@ -229,7 +243,7 @@ void startRescueAp(TickType_t now) {
     }
   }
   reconnectStaIfDue(now);
-  updateNetworkState(NetworkMode::kStaAp, WIFI_STA_SSID, WiFi.localIP());
+  refreshNetworkState();
 }
 
 void stopRescueAp() {
@@ -241,7 +255,7 @@ void stopRescueAp() {
   g_rescueApActive = false;
   g_wifiFailureSinceTick = 0;
   g_wifiHealthySinceTick = 0;
-  updateNetworkState(NetworkMode::kSta, WIFI_STA_SSID, WiFi.localIP());
+  refreshNetworkState();
 }
 
 void superviseWifi(TickType_t now) {
@@ -3058,17 +3072,15 @@ void processTelnetInput() {
 void InicializaWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(OTA_HOSTNAME);
-  WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASS);
-
-  const uint32_t timeoutMs = static_cast<uint32_t>(WIFI_STA_CONNECT_TIMEOUT_MS);
-  const uint32_t startMs = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - startMs) < timeoutMs) {
-    delay(250);
+  g_wifiMulti.addAP(WIFI_STA_SSID, WIFI_STA_PASS);
+  if (strlen(WIFI_STA_SSID_2) > 0) {
+    g_wifiMulti.addAP(WIFI_STA_SSID_2, WIFI_STA_PASS_2);
   }
+  (void)g_wifiMulti.run(static_cast<uint32_t>(WIFI_STA_CONNECT_TIMEOUT_MS));
 
-  if (WiFi.status() == WL_CONNECTED) {
+  if (isStaHealthy()) {
     g_wifiHealthySinceTick = xTaskGetTickCount();
-    updateNetworkState(NetworkMode::kSta, WIFI_STA_SSID, WiFi.localIP());
+    updateNetworkState(NetworkMode::kSta, WiFi.SSID(), WiFi.localIP());
     return;
   }
 
