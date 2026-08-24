@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 RE_DRIVE_TOKENS = re.compile(r"([A-Za-z]+)=([^\s]+)")
 RE_SPID_STATE = re.compile(
     r"state\{init=(?P<init>[YN]) en=(?P<en>[YN]) fb=(?P<fb>[YN]) "
-    r"failsafe=(?P<failsafe>[YN]) overspeed=(?P<overspeed>[YN]) mode=(?P<mode>[A-Z]+)\}"
+    r"failsafe=(?P<failsafe>[YN]) overspeed=(?P<overspeed>[YN]) mode=(?P<mode>[A-Z_]+)\}"
 )
 RE_COMMS_LAST_FRAME = re.compile(r"lastFrame=(NONE|\d+ms)")
 
@@ -722,57 +722,64 @@ def run(args: argparse.Namespace) -> int:
         report.cases.append(t3)
 
         # T4
-        t4 = TestCaseResult("T4", "Fail-safe Hall")
+        t4 = TestCaseResult("T4", "Recuperacion Hall estancado")
         if interactive:
             ans = prompt_step(
-                "T4: Ajusta RC throttle a 5-10% y manten rueda sin transiciones Hall (si es posible) por 3s.",
+                "T4: Ajusta RC throttle a 5-10% y manten rueda sin transiciones Hall por 5s. Debe verse STALL_ASSIST y luego STALL_LOCKOUT.",
                 allow_skip=True,
             )
             if ans == "abort":
                 raise KeyboardInterrupt
             if ans == "ok":
-                cap = tn.collect(3.2)
+                cap = tn.collect(5.0)
                 all_captured_lines.extend(cap)
                 drives = collect_drive(cap)
                 spids = collect_spid(cap)
 
-                saw_fs_drive = any((d.get("fb") is False and d.get("fs") is True) for d in drives)
-                saw_fs_spid = any((s.get("fb") is False and s.get("failsafe") is True and s.get("mode") == "FAILSAFE") for s in spids)
-                saw_zero_out = any(((d.get("pidOut") or 0.0) <= 0.1) for d in drives if d.get("fs") is True)
+                saw_assist = any(s.get("mode") == "STALL_ASSIST" for s in spids)
+                saw_lockout = any(
+                    s.get("failsafe") is True and s.get("mode") == "STALL_LOCKOUT" for s in spids
+                )
+                saw_zero_out = any(
+                    ((d.get("pidOut") or 0.0) <= 0.1)
+                    for d in drives
+                    if d.get("mode") == "STALL_LOCKOUT"
+                )
 
-                t4.checks.append({"name": "Failsafe asserted (drive/spid)", "status": "pass" if (saw_fs_drive or saw_fs_spid) else "fail"})
-                t4.checks.append({"name": "Throttle goes to zero in failsafe", "status": "pass" if saw_zero_out else "fail"})
+                t4.checks.append({"name": "STALL_ASSIST observed", "status": "pass" if saw_assist else "fail"})
+                t4.checks.append({"name": "STALL_LOCKOUT asserted", "status": "pass" if saw_lockout else "fail"})
+                t4.checks.append({"name": "Throttle goes to zero in lockout", "status": "pass" if saw_zero_out else "fail"})
                 t4.evidence.extend([ln for ln in cap if ln.startswith("[DRIVE]") or ln.startswith("[SPID]")][-8:])
 
                 if any(chk["status"] == "fail" for chk in t4.checks):
                     t4.status = "fail"
-                    t4.summary = "No se evidenció fail-safe Hall completo bajo la condición ejecutada."
+                    t4.summary = "No se evidenció la secuencia completa STALL_ASSIST -> STALL_LOCKOUT."
                 else:
                     t4.status = "pass"
-                    t4.summary = "Fail-safe Hall verificado con salida segura."
+                    t4.summary = "Recuperacion Hall acotada y lockout seguro verificados."
             else:
                 t4.status = "skip"
                 t4.summary = "Caso omitido: no se pudo forzar condición de feedback Hall inválido."
         elif quick_auto and has_target_cmd:
             # Best-effort automated attempt: request modest speed while wheels should remain mostly static.
             tn.send("spid.target 1.00", wait_s=0.5)
-            cap = tn.collect(3.0)
+            cap = tn.collect(4.5)
             all_captured_lines.extend(cap)
             tn.send("spid.target off", wait_s=0.4)
             drives = collect_drive(cap)
             spids = collect_spid(cap)
 
-            saw_fs_drive = any((d.get("fb") is False and d.get("fs") is True) for d in drives)
-            saw_fs_spid = any((s.get("fb") is False and s.get("failsafe") is True and s.get("mode") == "FAILSAFE") for s in spids)
+            saw_assist = any(s.get("mode") == "STALL_ASSIST" for s in spids)
+            saw_lockout = any(s.get("mode") == "STALL_LOCKOUT" for s in spids)
             t4.evidence.extend([ln for ln in cap if ln.startswith("[DRIVE]") or ln.startswith("[SPID]")][-8:])
-            if saw_fs_drive or saw_fs_spid:
+            if saw_assist and saw_lockout:
                 t4.status = "pass"
-                t4.summary = "Fail-safe observado automáticamente bajo setpoint inyectado."
-                t4.checks.append({"name": "Failsafe asserted", "status": "pass"})
+                t4.summary = "STALL_ASSIST y STALL_LOCKOUT observados automáticamente."
+                t4.checks.append({"name": "Stall sequence asserted", "status": "pass"})
             else:
                 t4.status = "skip"
-                t4.summary = "No se pudo forzar fail-safe automáticamente sin manipular feedback Hall."
-                t4.checks.append({"name": "Failsafe asserted", "status": "skip"})
+                t4.summary = "No se pudo forzar la secuencia de estancamiento automáticamente."
+                t4.checks.append({"name": "Stall sequence asserted", "status": "skip"})
         else:
             t4.status = "skip"
             t4.summary = "Modo no interactivo: caso de fail-safe omitido."

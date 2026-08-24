@@ -26,7 +26,7 @@ RE_SPD = re.compile(
     r".*?ageUs=(?P<ageUs>\d+).*?ok=(?P<ok>\d+).*?invState=(?P<invState>\d+).*?invJump=(?P<invJump>\d+).*?isr=(?P<isr>\d+)"
 )
 RE_SPID = re.compile(
-    r"state\{init=(?P<init>[YN]) en=(?P<en>[YN]) fb=(?P<fb>[YN]) failsafe=(?P<fs>[YN]) overspeed=(?P<ovs>[YN]) mode=(?P<mode>[A-Z]+)\}"
+    r"state\{init=(?P<init>[YN]) en=(?P<en>[YN]) fb=(?P<fb>[YN]) failsafe=(?P<fs>[YN]) overspeed=(?P<ovs>[YN]) mode=(?P<mode>[A-Z_]+)\}"
 )
 RE_TOKENS = re.compile(r"([A-Za-z_]+)=([^\s]+)")
 RE_COMMS_LAST_FRAME = re.compile(r"lastFrame=(NONE|\d+ms)")

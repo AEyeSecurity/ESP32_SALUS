@@ -41,6 +41,10 @@ constexpr float kMinThrottleBaseDeltaMaxPercent = 0.0f;
 constexpr float kMaxThrottleBaseDeltaMaxPercent = 100.0f;
 constexpr uint16_t kMinFeedbackLaunchGraceMs = 0u;
 constexpr uint16_t kMaxFeedbackLaunchGraceMs = 5000u;
+constexpr float kMinStallAssistThrottlePercent = 0.0f;
+constexpr float kMaxStallAssistThrottlePercent = 100.0f;
+constexpr uint16_t kMinStallAssistWindowMs = 0u;
+constexpr uint16_t kMaxStallAssistWindowMs = 5000u;
 constexpr float kMinIntegratorUnwindGain = 0.0f;
 constexpr float kMaxIntegratorUnwindGain = 10.0f;
 constexpr float kMinDerivativeFilterHz = 0.1f;
@@ -62,7 +66,8 @@ constexpr float kMeasuredSpeedFilterTauSec = 0.045f;          // EMA corta (~45 
 constexpr float kMeasuredSpeedFilterMaxDeltaMpsPerSec = 20.0f;  // limitador de salto
 
 constexpr const char* kPrefsNamespace = "speed_pid";
-constexpr uint32_t kPrefsVersion = 4;
+constexpr uint32_t kPrefsVersion = 5;
+constexpr uint32_t kPrefsVersionV4 = 4;
 constexpr uint32_t kPrefsVersionV3 = 3;
 constexpr uint32_t kPrefsVersionV2 = 2;
 constexpr uint32_t kPrefsVersionLegacy = 1;
@@ -92,6 +97,8 @@ constexpr const char* kPrefsKeyThrottleBaseDeltaUp = "ffdu";
 constexpr const char* kPrefsKeyThrottleBaseDeltaDown = "ffdd";
 constexpr const char* kPrefsKeyThrottleBaseMinSpeed = "ffmin";
 constexpr const char* kPrefsKeyFeedbackLaunchGraceMs = "flgr";
+constexpr const char* kPrefsKeyStallAssistThrottle = "sthr";
+constexpr const char* kPrefsKeyStallAssistWindowMs = "swin";
 constexpr const char* kPrefsKeyIntegratorUnwindGain = "iunw";
 constexpr const char* kPrefsKeyDerivativeFilterHz = "dfhz";
 
@@ -137,9 +144,12 @@ struct SpeedPidState {
   bool throttleSaturated = false;
   bool integratorClamped = false;
   bool launchAssistActive = false;
+  bool stallAssistActive = false;
+  bool stallLockoutActive = false;
   bool controlActive = false;
   float launchAssistRemainingSec = 0.0f;
   float feedbackLaunchGraceRemainingSec = 0.0f;
+  float stallAssistRemainingSec = 0.0f;
   float overspeedHoldRemainingSec = 0.0f;
   float prevMeasuredMpsForDerivative = 0.0f;
   float derivativeFiltered = 0.0f;
@@ -240,6 +250,15 @@ bool validateConfig(const SpeedPidConfig& config) {
       config.feedbackLaunchGraceMs > kMaxFeedbackLaunchGraceMs) {
     return false;
   }
+  if (!isFiniteInRange(config.stallAssistThrottlePercent,
+                       kMinStallAssistThrottlePercent,
+                       kMaxStallAssistThrottlePercent)) {
+    return false;
+  }
+  if (config.stallAssistWindowMs < kMinStallAssistWindowMs ||
+      config.stallAssistWindowMs > kMaxStallAssistWindowMs) {
+    return false;
+  }
   if (!isFiniteInRange(config.integratorUnwindGain,
                        kMinIntegratorUnwindGain,
                        kMaxIntegratorUnwindGain)) {
@@ -320,9 +339,12 @@ void resetControllerLocked() {
   g_state.throttleSaturated = false;
   g_state.integratorClamped = false;
   g_state.launchAssistActive = false;
+  g_state.stallAssistActive = false;
+  g_state.stallLockoutActive = false;
   g_state.controlActive = false;
   g_state.launchAssistRemainingSec = 0.0f;
   g_state.feedbackLaunchGraceRemainingSec = 0.0f;
+  g_state.stallAssistRemainingSec = 0.0f;
   g_state.overspeedHoldRemainingSec = 0.0f;
 }
 
@@ -333,7 +355,7 @@ bool loadFromNvs(SpeedPidTunings& tuningsOut, SpeedPidConfig& configOut, bool* n
   }
 
   const uint32_t version = g_prefs.getUInt(kPrefsKeyVersion, 0);
-  if (version != kPrefsVersion && version != kPrefsVersionV3 &&
+  if (version != kPrefsVersion && version != kPrefsVersionV4 && version != kPrefsVersionV3 &&
       version != kPrefsVersionV2 && version != kPrefsVersionLegacy) {
     g_prefs.end();
     return false;
@@ -383,7 +405,7 @@ bool loadFromNvs(SpeedPidTunings& tuningsOut, SpeedPidConfig& configOut, bool* n
   } else {
     needsPersist = true;
   }
-  if (version >= kPrefsVersion) {
+  if (version >= kPrefsVersionV4) {
     loadedConfig.throttleBaseEnable =
         g_prefs.getBool(kPrefsKeyThrottleBaseEnable, loadedConfig.throttleBaseEnable);
     loadedConfig.throttleBaseAtZeroMpsPercent =
@@ -400,6 +422,17 @@ bool loadFromNvs(SpeedPidTunings& tuningsOut, SpeedPidConfig& configOut, bool* n
         static_cast<uint16_t>(g_prefs.getUShort(kPrefsKeyFeedbackLaunchGraceMs,
                                                 loadedConfig.feedbackLaunchGraceMs));
   } else {
+    needsPersist = true;
+  }
+  if (version >= kPrefsVersion) {
+    loadedConfig.stallAssistThrottlePercent =
+        g_prefs.getFloat(kPrefsKeyStallAssistThrottle, loadedConfig.stallAssistThrottlePercent);
+    loadedConfig.stallAssistWindowMs = static_cast<uint16_t>(
+        g_prefs.getUShort(kPrefsKeyStallAssistWindowMs, loadedConfig.stallAssistWindowMs));
+  } else {
+    // v4 did not know about stall assist. Preserve every existing tuning, but
+    // lift the old FF delta ceiling so the speed PID can request full throttle.
+    loadedConfig.throttleBasePidDeltaUpMaxPercent = 100.0f;
     needsPersist = true;
   }
 
@@ -447,6 +480,8 @@ bool persistToNvs(const SpeedPidTunings& tunings, const SpeedPidConfig& config) 
   g_prefs.putFloat(kPrefsKeyThrottleBaseDeltaDown, config.throttleBasePidDeltaDownMaxPercent);
   g_prefs.putFloat(kPrefsKeyThrottleBaseMinSpeed, config.throttleBaseActivationMinMps);
   g_prefs.putUShort(kPrefsKeyFeedbackLaunchGraceMs, config.feedbackLaunchGraceMs);
+  g_prefs.putFloat(kPrefsKeyStallAssistThrottle, config.stallAssistThrottlePercent);
+  g_prefs.putUShort(kPrefsKeyStallAssistWindowMs, config.stallAssistWindowMs);
   g_prefs.putFloat(kPrefsKeyIntegratorUnwindGain, config.integratorUnwindGain);
   g_prefs.putFloat(kPrefsKeyDerivativeFilterHz, config.derivativeFilterHz);
   g_prefs.putFloat(kPrefsKeyBrakeCap, config.overspeedBrakeMaxPercent);
@@ -467,6 +502,10 @@ const char* speedPidModeText(SpeedPidMode mode) {
       return "NORMAL";
     case SpeedPidMode::kOverspeed:
       return "OVERSPEED";
+    case SpeedPidMode::kStallAssist:
+      return "STALL_ASSIST";
+    case SpeedPidMode::kStallLockout:
+      return "STALL_LOCKOUT";
     case SpeedPidMode::kFailsafe:
       return "FAILSAFE";
     default:
@@ -517,6 +556,7 @@ bool speedPidInit(const SpeedPidTunings& defaultTunings, const SpeedPidConfig& d
 bool speedPidCompute(float targetRawMps,
                      float measuredMps,
                      bool feedbackOk,
+                     bool stallCandidate,
                      float dtSeconds,
                      SpeedPidControlOutput& output,
                      float antiWindupUnwindScale) {
@@ -536,6 +576,7 @@ bool speedPidCompute(float targetRawMps,
   bool prevControlActive = false;
   float prevLaunchAssistRemainingSec = 0.0f;
   float prevFeedbackLaunchGraceRemainingSec = 0.0f;
+  float prevStallAssistRemainingSec = 0.0f;
   float prevMeasuredForDerivative = 0.0f;
   float prevDerivativeFiltered = 0.0f;
   bool prevDerivativePrimed = false;
@@ -560,6 +601,7 @@ bool speedPidCompute(float targetRawMps,
   prevControlActive = g_state.controlActive;
   prevLaunchAssistRemainingSec = g_state.launchAssistRemainingSec;
   prevFeedbackLaunchGraceRemainingSec = g_state.feedbackLaunchGraceRemainingSec;
+  prevStallAssistRemainingSec = g_state.stallAssistRemainingSec;
   prevMeasuredForDerivative = g_state.prevMeasuredMpsForDerivative;
   prevDerivativeFiltered = g_state.derivativeFiltered;
   prevDerivativePrimed = g_state.derivativePrimed;
@@ -607,6 +649,7 @@ bool speedPidCompute(float targetRawMps,
   bool measuredFilterPrimed = prevMeasuredFilterPrimed;
   float launchAssistRemainingSec = prevLaunchAssistRemainingSec;
   float feedbackLaunchGraceRemainingSec = prevFeedbackLaunchGraceRemainingSec;
+  float stallAssistRemainingSec = prevStallAssistRemainingSec;
   bool controlActive = prevControlActive;
 
   float throttleRawPercent = 0.0f;
@@ -636,6 +679,7 @@ bool speedPidCompute(float targetRawMps,
   const float launchAssistWindowSec = static_cast<float>(config.launchAssistWindowMs) * 0.001f;
   const float feedbackLaunchGraceSec =
       static_cast<float>(config.feedbackLaunchGraceMs) * 0.001f;
+  const float stallAssistWindowSec = static_cast<float>(config.stallAssistWindowMs) * 0.001f;
   // Filtro de medicion: limitador de salto + EMA corta.
   // Mantiene el dato raw para logs/diagnostico; el control usa el filtrado.
   if (!measuredFilterPrimed || !isfinite(measuredFilteredMps)) {
@@ -658,6 +702,7 @@ bool speedPidCompute(float targetRawMps,
   } else if (!requestActiveNow) {
     launchAssistRemainingSec = 0.0f;
     feedbackLaunchGraceRemainingSec = 0.0f;
+    stallAssistRemainingSec = 0.0f;
     controlActive = false;
     // En reposo de consigna, limpiar memoria del controlador para evitar residuo al frenar.
     integral = 0.0f;
@@ -668,10 +713,53 @@ bool speedPidCompute(float targetRawMps,
     derivativePrimed = false;
   }
 
-  const bool feedbackGraceActive =
-      (!feedbackOk) && requestActiveNow && (feedbackLaunchGraceRemainingSec > 0.0f);
+  bool stallAssistActive = false;
+  bool stallLockoutActive = false;
+  if (requestActiveNow && prevMode == SpeedPidMode::kStallLockout) {
+    stallLockoutActive = true;
+  } else if (requestActiveNow && !feedbackOk && stallCandidate && feedbackLaunchGraceRemainingSec <= 0.0f) {
+    if (prevMode != SpeedPidMode::kStallAssist) {
+      stallAssistRemainingSec = stallAssistWindowSec;
+    }
+    if (stallAssistRemainingSec > 0.0f && config.stallAssistThrottlePercent > 0.0f) {
+      stallAssistActive = true;
+      stallAssistRemainingSec -= dtSeconds;
+      if (stallAssistRemainingSec < 0.0f) {
+        stallAssistRemainingSec = 0.0f;
+      }
+    } else {
+      stallLockoutActive = true;
+    }
+  } else if (feedbackOk) {
+    stallAssistRemainingSec = 0.0f;
+  }
 
-  if (!feedbackOk && !feedbackGraceActive) {
+  const bool feedbackGraceActive =
+      ((!feedbackOk) && requestActiveNow && (feedbackLaunchGraceRemainingSec > 0.0f)) || stallAssistActive;
+
+  if (stallLockoutActive) {
+    mode = SpeedPidMode::kStallLockout;
+    targetRampedMps = 0.0f;
+    integral = 0.0f;
+    pidPrevError = 0.0f;
+    firstRun = true;
+    overspeedBrakeRawPercent = 0.0f;
+    overspeedBrakeFilteredPercent = 0.0f;
+    overspeedHoldRemainingSec = 0.0f;
+    pTerm = 0.0f;
+    iTerm = 0.0f;
+    dTerm = 0.0f;
+    pidUnsatOutput = 0.0f;
+    pidSatOutput = 0.0f;
+    throttleRawPercent = 0.0f;
+    throttleFilteredPercent = 0.0f;
+    launchAssistRemainingSec = 0.0f;
+    feedbackLaunchGraceRemainingSec = 0.0f;
+    controlActive = false;
+    derivativeFiltered = 0.0f;
+    measuredForDerivative = measuredFilteredMps;
+    derivativePrimed = false;
+  } else if (!feedbackOk && !feedbackGraceActive) {
     mode = SpeedPidMode::kFailsafe;
     targetRampedMps = 0.0f;
     integral = 0.0f;
@@ -698,7 +786,10 @@ bool speedPidCompute(float targetRawMps,
     const bool overspeedExitByHysteresis =
         measuredFilteredMps <= (targetRampedMps + config.overspeedReleaseHysteresisMps);
 
-    if (prevMode == SpeedPidMode::kOverspeed) {
+    if (stallAssistActive) {
+      mode = SpeedPidMode::kStallAssist;
+      overspeedHoldRemainingSec = 0.0f;
+    } else if (prevMode == SpeedPidMode::kOverspeed) {
       if (overspeedHoldRemainingSec > 0.0f) {
         overspeedHoldRemainingSec -= dtSeconds;
         if (overspeedHoldRemainingSec < 0.0f) {
@@ -723,7 +814,7 @@ bool speedPidCompute(float targetRawMps,
       derivativeFiltered = 0.0f;
       measuredForDerivative = measuredFilteredMps;
       derivativePrimed = false;
-      if (mode != SpeedPidMode::kNormal) {
+      if (mode != SpeedPidMode::kNormal && mode != SpeedPidMode::kStallAssist) {
         launchAssistRemainingSec = 0.0f;
         controlActive = false;
       }
@@ -867,7 +958,27 @@ bool speedPidCompute(float targetRawMps,
           }
         }
       }
-      if (feedbackGraceActive && !launchAssistActive) {
+      if (stallAssistActive) {
+        // Hall stale under an active forward request: apply one bounded recovery
+        // pulse. The final slew still limits how quickly this reaches the ESC.
+        integral = 0.0f;
+        pidPrevError = 0.0f;
+        firstRun = true;
+        pTerm = 0.0f;
+        iTerm = 0.0f;
+        dTerm = 0.0f;
+        pidUnsatOutput = 0.0f;
+        pidSatOutput = 0.0f;
+        throttleBasePercent = 0.0f;
+        throttlePidDeltaPercent = 0.0f;
+        throttleBaseActive = false;
+        throttleRawPercent = clampf(config.stallAssistThrottlePercent, 0.0f, 100.0f);
+        throttleCmdPreSlewPercent = throttleRawPercent;
+        throttleSaturated = false;
+        integratorClamped = true;
+        launchAssistActive = false;
+      }
+      if (feedbackGraceActive && !launchAssistActive && !stallAssistActive) {
         // Reuse existing launch fields for observability of startup grace.
         launchAssistActive = true;
       }
@@ -941,6 +1052,10 @@ bool speedPidCompute(float targetRawMps,
           clampf(fmaxf(launchAssistRemainingSec, feedbackLaunchGraceRemainingSec) * 1000.0f,
                  0.0f,
                  65535.0f));
+  output.stallAssistActive = (mode == SpeedPidMode::kStallAssist);
+  output.stallLockoutActive = (mode == SpeedPidMode::kStallLockout);
+  output.stallAssistRemainingMs = static_cast<uint16_t>(
+      clampf(stallAssistRemainingSec * 1000.0f, 0.0f, 65535.0f));
   output.overspeedErrorMps = overspeedErrorMps;
   output.overspeedBrakeRawPercent = overspeedBrakeRawPercent;
   output.overspeedBrakeFilteredPercent = overspeedBrakeFilteredPercent;
@@ -949,7 +1064,7 @@ bool speedPidCompute(float targetRawMps,
   output.overspeedHoldRemainingMs =
       static_cast<uint16_t>(clampf(overspeedHoldRemainingSec * 1000.0f, 0.0f, 65535.0f));
   output.feedbackOk = feedbackOk;
-  output.failsafeActive = (mode == SpeedPidMode::kFailsafe);
+  output.failsafeActive = (mode == SpeedPidMode::kFailsafe || mode == SpeedPidMode::kStallLockout);
   output.overspeedActive = (mode == SpeedPidMode::kOverspeed);
   output.mode = mode;
 
@@ -986,9 +1101,12 @@ bool speedPidCompute(float targetRawMps,
   g_state.throttleSaturated = throttleSaturated;
   g_state.integratorClamped = integratorClamped;
   g_state.launchAssistActive = launchAssistActive;
+  g_state.stallAssistActive = output.stallAssistActive;
+  g_state.stallLockoutActive = output.stallLockoutActive;
   g_state.controlActive = controlActive;
   g_state.launchAssistRemainingSec = launchAssistRemainingSec;
   g_state.feedbackLaunchGraceRemainingSec = feedbackLaunchGraceRemainingSec;
+  g_state.stallAssistRemainingSec = stallAssistRemainingSec;
   g_state.overspeedHoldRemainingSec = overspeedHoldRemainingSec;
   g_state.integralTerm = integral;
   g_state.prevError = pidPrevError;
@@ -1155,6 +1273,20 @@ bool speedPidSetFeedbackLaunchGraceMs(uint16_t graceMs) {
   return mutateInitializedState([&]() { g_state.config.feedbackLaunchGraceMs = graceMs; });
 }
 
+bool speedPidSetStallAssistThrottlePercent(float percent) {
+  if (!isFiniteInRange(percent, kMinStallAssistThrottlePercent, kMaxStallAssistThrottlePercent)) {
+    return false;
+  }
+  return mutateInitializedState([&]() { g_state.config.stallAssistThrottlePercent = percent; });
+}
+
+bool speedPidSetStallAssistWindowMs(uint16_t windowMs) {
+  if (windowMs < kMinStallAssistWindowMs || windowMs > kMaxStallAssistWindowMs) {
+    return false;
+  }
+  return mutateInitializedState([&]() { g_state.config.stallAssistWindowMs = windowMs; });
+}
+
 bool speedPidSetIntegratorUnwindGain(float unwindGain) {
   if (!isFiniteInRange(unwindGain, kMinIntegratorUnwindGain, kMaxIntegratorUnwindGain)) {
     return false;
@@ -1289,6 +1421,10 @@ bool speedPidGetSnapshot(SpeedPidRuntimeSnapshot& snapshot) {
   snapshot.launchAssistActive = g_state.launchAssistActive;
   snapshot.launchAssistRemainingMs =
       static_cast<uint16_t>(clampf(g_state.launchAssistRemainingSec * 1000.0f, 0.0f, 65535.0f));
+  snapshot.stallAssistActive = g_state.stallAssistActive;
+  snapshot.stallLockoutActive = g_state.stallLockoutActive;
+  snapshot.stallAssistRemainingMs =
+      static_cast<uint16_t>(clampf(g_state.stallAssistRemainingSec * 1000.0f, 0.0f, 65535.0f));
   snapshot.overspeedHoldActive =
       (g_state.mode == SpeedPidMode::kOverspeed) && (g_state.overspeedHoldRemainingSec > 0.0f);
   snapshot.overspeedHoldRemainingMs =
