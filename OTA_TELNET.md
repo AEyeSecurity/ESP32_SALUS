@@ -170,9 +170,9 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low), con dirección por s
 - `drive.pwm <0..100> | drive.pwm off`: override directo de PWM para pruebas de banco.
 - `drive.dir`: muestra estado de dirección del relé (`FWD/REV`, switching, relay, pin, activeLow).
 - `drive.dir fwd|rev`: solicita cambio de dirección (solo disponible con `drive.pwm` activo).
-- `hazard.status`: muestra estado efectivo de la baliza (`ON/OFF`), fuente (`UART/TELNET/FAILSAFE`), override, estado UART y pin.
-- `hazard.on | hazard.off`: fuerza la baliza por Telnet para debug.
-- `hazard.auto`: libera el override y devuelve el control a la UART.
+- `hazard.status`: informa `[HAZARD] Deshabilitado/no inicializado; sin control de GPIO` en la configuración actual.
+- `hazard.on | hazard.off | hazard.auto`: conservados, pero responden lo mismo sin actuar sobre GPIO. `hazard.help` lista comandos e informa el estado.
+- La baliza está deshabilitada (`HAZARD_ENABLED=false`); no se inicializa ni se crea su tarea. GPIO32 pertenece exclusivamente a FWD/REV.
 - `spid.save`: persiste configuración en NVS (`speed_pid`, incluyendo `thsup`, `thsdown`, `minspd`, `lwin`, `ffen`, `ffb0`, `ffbmx`, `ffdu`, `ffdd`, `ffmin`, `flgr`, `iunw`, `dfhz`, `brkcap`, `hys`, `brsu`, `brsd`, `brhms`, `brdb`).
 - NVS `speed_pid` versión actual: `ver=4` (migración automática desde `ver=3` preservando tunings y aplicando defaults nuevos).
 - `spid.reset`: restaura defaults y persiste en NVS.
@@ -213,13 +213,43 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low), con dirección por s
 - `drive.brake range <relA> <applyA> <relB> <applyB>`: ajusta start/end de ambos servos en una sola linea.
 - Los ajustes son runtime para debug: no se guardan en NVS ni sobreviven reinicio.
 
+## Prueba de banco del cambio a GPIO32
+
+Pendiente de ejecución: requiere autorización del operador, E-stop accesible y
+tracción físicamente inhabilitada. No confiar únicamente en PWM cero ni enviar
+setpoints de velocidad para esta prueba. Registrar commit/firmware instalado y
+medir GPIO32 con multímetro o analizador lógico; Telnet por sí solo no verifica
+el nivel eléctrico ni los contactos del relé.
+
+1. Tras cargar el firmware autorizado, arrancar sin solicitudes de marcha
+   (RC neutro/FWD, UART sin demanda). Comprobar `drive.dir`: `FWD`, `relay=OFF`,
+   `pin=32`, `activeLow=Y`; medir HIGH tras la inicialización. La tarea `Hazard`
+   no debe aparecer registrada en `sys.rt`/`sys.stack`.
+2. Con la tracción físicamente aislada, ejecutar `drive.pwm on 0` y
+   `drive.dir rev`. Comprobar LOW/`REV`/`relay=ON` después de la transición;
+   luego `drive.dir fwd` debe devolver HIGH/`FWD`/`relay=OFF`. Verificar con
+   captura los retardos de 300 ms antes y 300 ms después (más la resolución del
+   ciclo de control), y la inhibición de acelerador durante la conmutación.
+3. Repetir en FWD y REV `hazard.status`, `hazard.help`, `hazard.on`,
+   `hazard.off`, `hazard.auto`: deben informar deshabilitado/no inicializado,
+   sin cambiar GPIO32. En una prueba UART autorizada, alternar únicamente
+   `HAZARD` en tramas válidas manteniendo iguales los demás campos y la
+   cadencia; confirmar que se decodifica pero no cambia la salida de sentido.
+4. Al cerrar Telnet, verificar que no haya actuación de baliza. El cierre sí
+   retira el override PWM y puede devolver FWD por la lógica de control
+   existente; no confundir esa transición con una escritura de baliza.
+5. Finalizar con `drive.dir fwd` y `drive.pwm off`, manteniendo RC/UART sin
+   demanda. Comprobar FWD/HIGH y dejar la tracción aislada hasta terminar la
+   validación del operador. GPIO4 no debe usarse para baliza ni recibir
+   escrituras del firmware.
+
 ## Reversa (`PI` firmado + Telnet + RC CH5)
 
 - Pi (`comms`): `ver_flags bit2 = REV_REQ` define el signo del setpoint (`speed_cmd_u16` sigue siendo magnitud).
-- Pi (`comms`): `ver_flags bit3 = HAZARD` solicita encender la luz naranja de emergencia en `GPIO32`.
+- Pi (`comms`): `ver_flags bit3 = HAZARD` se conserva y decodifica, pero no tiene efecto físico con la baliza deshabilitada.
 - Telnet (`spid.target`): acepta setpoints firmados (`+` FWD, `-` REV) para simular pedidos Pi sin Raspy.
 - RC (`CH5/AUX1`): switch alto solicita `REV`, switch bajo solicita `FWD` (aplica histéresis y permite latch corto durante dropout RC).
-- Hardware: relé en `GPIO4`, activo en `HIGH` (`ON=FWD`, `OFF=REV`).
+- Hardware: relé en `GPIO32`, activo en `LOW` (`ON=REV`, `OFF=FWD`; `LOW=REV`, `HIGH=FWD`). GPIO4 queda sin uso por transistor reportado defectuoso; no recibe la baliza.
 - Seguridad:
   - Cambio de dirección con secuencia `pre=300ms`, conmutación relé, `post=300ms`.
   - Durante `switching` se inhibe tracción.

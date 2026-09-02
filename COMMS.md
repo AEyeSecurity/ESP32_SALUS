@@ -119,7 +119,7 @@ Un frame de Pi es fresco si edad `<= 120 ms`.
 
 - Con Pi fresca y `ESTOP=1`: throttle inhibido + freno `100%`.
 - Con Pi fresca y `DRIVE_EN=1`: setpoint PI firmado vía `speed_cmd_u16 + REV_REQ`, clamp asimétrico `[-rev.max, +spid.max]` (default `rev.max=1.35 m/s`).
-- Con Pi fresca y `HAZARD=1`: solicitud de luz naranja de emergencia en `GPIO32`.
+- `HAZARD=1` sigue decodificándose en el snapshot, sin efecto físico: la baliza está deshabilitada. GPIO32 se usa exclusivamente para FWD/REV (`HIGH=FWD`, `LOW=REV`); GPIO4 queda sin uso.
 - Si el pedido REV queda clamped y persiste error positivo, se aplica anti-windup reforzado (`iunwind` escalado) para descargar integrador más rápido.
 - Dirección automática: `target< -0.05 m/s => REV`; sin solicitud efectiva (`target=0`, `DRIVE_EN=0` o stale) => `FWD`.
 - Si falla feedback Hall en speed PID: modo failsafe (`throttle=0`).

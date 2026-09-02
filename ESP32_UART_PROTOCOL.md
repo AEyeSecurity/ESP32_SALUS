@@ -41,7 +41,7 @@ Estructura:
   - bit0: `ESTOP`
   - bit1: `DRIVE_EN`
   - bit2: `REV_REQ` (solicita reversa para comando de velocidad)
-  - bit3: `HAZARD` (solicita luz naranja de emergencia)
+  - bit3: `HAZARD` (solicita luz naranja de emergencia; actualmente se decodifica sin efecto físico porque la baliza está deshabilitada)
 
 Codificación de `speed_cmd_u16`:
 
@@ -117,7 +117,8 @@ Codificación de campos:
 - `REV_REQ=1` con magnitud >0 solicita `REV`; sin solicitud efectiva (`target=0`, `DRIVE_EN=0`, stale) vuelve a `FWD`.
 - `ESTOP=1` -> throttle inhibido y freno 100%.
 - Dirección desde Pi usa `steer_i8` cuando frame Pi está fresco.
-- `HAZARD=1` -> solicitud de luz naranja de emergencia en `GPIO32`.
+- `HAZARD=1` -> se decodifica, pero no actúa sobre GPIO: baliza deshabilitada (`HAZARD_ENABLED=false`). El formato, CRC y versión UART no cambian.
+- Salida de sentido en `GPIO32`: `LOW=REV`, `HIGH=FWD`. GPIO4 queda sin uso por transistor reportado defectuoso; no se reasigna a baliza.
 - Sin frame fresco, el firmware vuelve a ruta RC/local.
 
 ## 6. Ejemplos

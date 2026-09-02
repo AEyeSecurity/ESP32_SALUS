@@ -4,6 +4,13 @@ Firmware para ESP32 centrado en el control de direccion de un quad con sensor ma
 
 Nota operacional: la UI web de Telnet fue removida del repositorio para reducir complejidad y evitar cargas de sondeo/streaming desde host. El control y diagnóstico host se realiza por CLI Telnet y scripts HIL en `tools/tests`.
 
+Cambio de cableado (2026-08-26): FWD/REV usa ahora `GPIO32`, con `HIGH=FWD` y
+`LOW=REV` tras corregir la polaridad indicada por el operador. `GPIO4` queda sin uso: su transistor fue
+reportado defectuoso. La baliza no se traslada a GPIO4; su código se conserva con
+`HAZARD_ENABLED=false`, sin inicialización ni tarea y sin escrituras GPIO.
+Una comprobación de compilación impide habilitarla mientras comparta pin con
+reversa. La validación física y la carga del firmware están pendientes.
+
 ## Guias recomendadas
 
 - [OTA_TELNET.md](OTA_TELNET.md): comandos operativos por Telnet/OTA y debugging.
@@ -65,7 +72,7 @@ Troubleshooting OTA rapido:
 | `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~4 KB)         | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
 | `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~3 KB)         | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA` v2 (7 bytes), valida versión/CRC y mantiene `PiCommsRxSnapshot` con `speed_cmd` firmado (`speed_cmd` + `REV_REQ`). |
 | `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~2 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status speed steer brake crc]` a 100 Hz y una trama `[0x56 battery adc age crc]` a 1 Hz. |
-| `taskHazardLightControl` | `src/hazard_light.cpp`   | 2048 (~2 KB)         | 2    | 1      | 30 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Controla el relé de baliza en `GPIO32` como salida digital `HIGH/LOW`, con prioridad Telnet sobre UART y fail-safe OFF. |
+| `taskHazardLightControl` | `src/hazard_light.cpp`   | 2048 (~2 KB)         | 2    | 1      | 30 ms periodica (`vTaskDelayUntil`)          | Deshabilitada (`HAZARD_ENABLED=false`) | Código conservado; no se inicializa ni se crea la tarea. GPIO32 pertenece a FWD/REV. |
 | `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Supervisor liviano sin lógica de comunicaciones (solo `vTaskDelay`). |
 
 > Nota: en este target Arduino/ESP32 los tamanos pasados a `startTaskPinned`/`xTaskCreatePinnedToCore`
@@ -152,7 +159,7 @@ Troubleshooting OTA rapido:
 - `taskQuadDriveControl` consume el snapshot:  
   - `ESTOP` → freno completo y duty mínimo.  
   - `DRIVE_EN` + `speed_cmd_u16` + `REV_REQ` -> setpoint firmado (`m/s`) para PID Hall, clamp asimétrico `[-rev.max, +spid.max]` (default `rev.max=1.30 m/s`).  
-  - `HAZARD` (`ver_flags bit3`) -> orden de luz naranja de emergencia; si la trama deja de estar fresca, la baliza pasa a OFF.  
+  - `HAZARD` (`ver_flags bit3`) -> se decodifica para compatibilidad, sin efecto físico mientras la baliza esté deshabilitada.
   - `target< -0.05` solicita `REV`; `target=0`, `DRIVE_EN=0` o stale fuerzan `FWD`.
   - En REV clamped con error sostenido se activa anti-windup reforzado para descargar integrador más rápido.
   - con frame fresco de Pi, freno aplicado = `max(brake_u8_pi, brake_overspeed_auto)` (y `ESTOP` fuerza 100 %).  
@@ -180,11 +187,11 @@ Troubleshooting OTA rapido:
   - `drive.log pid on [ms] | drive.log pid off` habilita/deshabilita trace forense periódico `[DRIVE][PIDTRACE]` para analizar estabilidad de velocidad y autofrenado (`target`, `speed`, `PWM`, `P/I/D`, `throttleRaw/Filt`, `launchAssistActive`, `throttleSaturated`, `integratorClamped`, `brakeA_pct`, `brakeB_pct`, `failsafe/overspeed/inhibit`).
     Operación normal recomendada: mantener `drive.log pid off` (el trace se reinicia a OFF al cerrar sesión Telnet).
   - `drive.brake on [pct] | drive.brake off | drive.brake status` permite aplicar freno manual por Telnet para debug.
-  - `hazard.status | hazard.on | hazard.off | hazard.auto` permite probar la baliza de emergencia y devolver el control a UART.
+  - `hazard.status | hazard.on | hazard.off | hazard.auto`: comandos conservados; informan baliza deshabilitada/no inicializada y no actúan sobre GPIO.
   - `drive.brake release A B`, `drive.brake apply A B` y `drive.brake range relA applyA relB applyB` ajustan angulos start/end runtime de los servos de freno.
   - Reversa por setpoint firmado (Pi/Telnet): `spid.target +v` (FWD), `spid.target -v` (REV), `spid.target 0|off` (FWD).
   - Reversa manual de banco: `drive.pwm on 0`, `drive.dir rev|fwd`, `drive.pwm <0..100>`, `drive.pwm off`.
-    - Relé de reversa en `GPIO4`, activo en `HIGH` (`ON=FWD`, `OFF=REV`).
+    - Relé de reversa en `GPIO32`, activo en `LOW` (`ON=REV`, `OFF=FWD`; `LOW=REV`, `HIGH=FWD`).
     - Conmutación segura con retardos `300ms + 300ms`; durante switching se inhibe tracción.
     - Al salir de `drive.pwm` o cerrar Telnet, fuerza automáticamente `FWD`.
     - RC usa `CH5` (AUX1) como solicitud de dirección: switch alto `REV`, switch bajo `FWD` (con histéresis y el mismo interlock de conmutación).
@@ -247,7 +254,9 @@ Estos valores se inyectan en los `*_TaskConfig` y definen la cadencia con la que
 | Salida PWM acelerador    | 13         | LEDC 20 kHz, 8 bits hacia ESC o controlador de motor.                  |
 | Servo freno A / B        | 18 / 5     | LEDC 50 Hz, 16 bits para actuacion de freno.                           |
 | H-bridge enable / PWM    | 21 / 22 / 23 | Control de direccion; finales de carrera en GPIO15 y GPIO2.            |
-| Baliza emergencia (relé) | 32         | Relé controlado por salida digital `HIGH/LOW`; UART Pi/Orin + override Telnet. |
+| Relé FWD/REV            | 32         | `LOW=REV`, `HIGH=FWD`; control RC/UART/Telnet con interlock existente. |
+| Transistor anterior FWD/REV | 4       | Sin uso; reportado defectuoso por el operador. |
+| Baliza emergencia       | —          | Deshabilitada; código conservado sin inicializar salida ni tarea. |
 
 ## Diagnostico y mejores practicas
 

@@ -131,7 +131,7 @@ Observaciones:
 1. Verificar cableado y `115200 8N1`.
 2. Enviar frame Pi v2 válido (`ver=2`) y revisar `comms.status`.
 3. Confirmar que `speedCmd` refleja `m/s x100`.
-4. Si `ver_flags bit3` está en `1`, confirmar que `comms.status` muestra `hazard=Y` y que la baliza sigue la trama mientras esté fresca.
+4. Si `ver_flags bit3` está en `1`, confirmar que `comms.status` muestra `hazard=Y`. La baliza está deshabilitada: ese bit no debe cambiar GPIO32 ni el sentido FWD/REV; GPIO32 pertenece exclusivamente al control de sentido.
 5. Observar telemetría UART de salida y validar:
    - velocidad en `m/s x100`
    - ángulo centrado en `deg x100`

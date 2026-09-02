@@ -101,8 +101,10 @@ constexpr int BRAKE_RELEASE_ANGLE_SERVO_B = 120;
 constexpr int BRAKE_APPLY_ANGLE_SERVO_B = 90;
 constexpr int BRAKE_THRESHOLD = -15;
 
-constexpr uint8_t REVERSE_RELAY_PIN = 4;
-constexpr bool REVERSE_RELAY_ACTIVE_LOW = false;
+// GPIO4's transistor was reported faulty; direction wiring moved to GPIO32.
+constexpr uint8_t REVERSE_RELAY_PIN = 32;
+// Operator-corrected polarity: LOW = REV, HIGH = FWD.
+constexpr bool REVERSE_RELAY_ACTIVE_LOW = true;
 constexpr TickType_t REVERSE_PRE_DELAY = pdMS_TO_TICKS(300);
 constexpr TickType_t REVERSE_POST_DELAY = pdMS_TO_TICKS(300);
 constexpr bool REVERSE_FORCE_FORWARD_WHEN_PWM_OFF = true;
@@ -127,10 +129,14 @@ constexpr uint32_t BATTERY_DIVIDER_UPPER_OHM = 240000;
 constexpr uint32_t BATTERY_DIVIDER_LOWER_OHM = 10000;
 constexpr float BATTERY_CALIBRATION_GAIN = 0.8930f;
 
+// Preserve the baliza implementation, but do not initialize or drive its former pin.
+constexpr bool HAZARD_ENABLED = false;
 constexpr uint8_t HAZARD_RELAY_PIN = 32;
 constexpr bool HAZARD_RELAY_ACTIVE_LOW = true;
 constexpr TickType_t HAZARD_PERIOD = pdMS_TO_TICKS(30);
 constexpr TickType_t HAZARD_PI_FRESH_TIMEOUT = pdMS_TO_TICKS(120);
+static_assert(!HAZARD_ENABLED || HAZARD_RELAY_PIN != REVERSE_RELAY_PIN,
+              "Hazard and reverse outputs must not share a GPIO when hazard is enabled");
 
 namespace debug {
 constexpr bool kLogSystem = false;
@@ -379,16 +385,20 @@ void setup() {
     systemDiagRegisterTask(SystemDiagTaskId::kBattery, "Battery", g_taskBatteryHandle);
   }
 
-  if (!hazardLightInit(g_hazardLightConfig)) {
-    broadcastIf(true, "[HAZARD] Error inicializando relé de emergencia");
-  } else if (startTaskPinned(taskHazardLightControl,
-                             "Hazard",
-                             STACK_HAZARD,
-                             &g_hazardLightConfig,
-                             2,
-                             &g_taskHazardHandle,
-                             1)) {
-    systemDiagRegisterTask(SystemDiagTaskId::kHazardLight, "Hazard", g_taskHazardHandle);
+  if (HAZARD_ENABLED) {
+    if (!hazardLightInit(g_hazardLightConfig)) {
+      broadcastIf(true, "[HAZARD] Error inicializando relé de emergencia");
+    } else if (startTaskPinned(taskHazardLightControl,
+                               "Hazard",
+                               STACK_HAZARD,
+                               &g_hazardLightConfig,
+                               2,
+                               &g_taskHazardHandle,
+                               1)) {
+      systemDiagRegisterTask(SystemDiagTaskId::kHazardLight, "Hazard", g_taskHazardHandle);
+    }
+  } else {
+    broadcastIf(true, "[HAZARD] Deshabilitado: GPIO32 reservado para FWD/REV");
   }
 }
 

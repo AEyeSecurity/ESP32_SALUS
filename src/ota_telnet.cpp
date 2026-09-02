@@ -972,7 +972,7 @@ const char* hazardSourceText(HazardLightSource source) {
 void reportHazardStatus() {
   HazardLightStatus snapshot{};
   if (!hazardLightGetStatus(snapshot)) {
-    sendTelnet("[HAZARD] N/A");
+    sendTelnet("[HAZARD] Deshabilitado/no inicializado; sin control de GPIO");
     return;
   }
 
@@ -1709,12 +1709,13 @@ bool handleHazardCommand(const String& command, const String& args) {
 
   if (command.equalsIgnoreCase("hazard.help")) {
     sendTelnet("Comandos: hazard.status | hazard.on | hazard.off | hazard.auto");
+    reportHazardStatus();
     return true;
   }
 
   if (command.equalsIgnoreCase("hazard.auto")) {
     if (!hazardLightSetOverride(false, false)) {
-      sendTelnet("[HAZARD] No inicializado");
+      sendTelnet("[HAZARD] Deshabilitado/no inicializado; sin control de GPIO");
       return true;
     }
     sendTelnet("[HAZARD] AUTO");
@@ -1724,7 +1725,7 @@ bool handleHazardCommand(const String& command, const String& args) {
 
   if (command.equalsIgnoreCase("hazard.on")) {
     if (!hazardLightSetOverride(true, true)) {
-      sendTelnet("[HAZARD] No inicializado");
+      sendTelnet("[HAZARD] Deshabilitado/no inicializado; sin control de GPIO");
       return true;
     }
     sendTelnet("[HAZARD] OVERRIDE ON");
@@ -1734,7 +1735,7 @@ bool handleHazardCommand(const String& command, const String& args) {
 
   if (command.equalsIgnoreCase("hazard.off")) {
     if (!hazardLightSetOverride(true, false)) {
-      sendTelnet("[HAZARD] No inicializado");
+      sendTelnet("[HAZARD] Deshabilitado/no inicializado; sin control de GPIO");
       return true;
     }
     sendTelnet("[HAZARD] OVERRIDE OFF");
