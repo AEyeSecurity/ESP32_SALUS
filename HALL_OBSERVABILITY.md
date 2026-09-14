@@ -40,9 +40,14 @@ y después comparar por orden (`seq`) y por `speedCenti` (`m/s = speedCenti /`
 `100`). El `rx_monotonic` del host sirve para ordenar la recepción; `txUs` es
 un reloj local ESP32 y no debe compararse como si fuera tiempo Unix.
 
-La instrumentación usa la cola de logs Telnet existente. Si el diagnóstico
-produce pérdida de líneas, el contador de drops de esa cola debe considerarse
-parte del resultado y la captura no permite una correlación completa.
+La instrumentación usa la cola de logs Telnet existente: el productor sólo hace
+un `xQueueSend(..., 0)` y no espera al consumidor. `comms.halltrace` sin
+argumentos muestra `logQ` (profundidad actual) y `logDrop` (drops acumulados de
+la cola; también disponibles en `net.status`). Si el diagnóstico produce
+pérdida de líneas, ese contador debe considerarse parte del resultado y la
+captura no permite una correlación completa. `logDrop` es global para la cola
+de logs Telnet, por lo que incluye otros mensajes que coincidan durante la
+sesión, no sólo HALLTRACE.
 
 ## Cálculo de plausibilidad, sin umbral implementado
 

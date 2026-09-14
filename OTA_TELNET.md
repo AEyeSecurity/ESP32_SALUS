@@ -128,6 +128,7 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low), con dirección por s
 ## Trace diagnóstico Hall/UART (`comms.halltrace`)
 
 - `comms.halltrace` muestra si está activo.
+- `comms.halltrace` sin argumentos también muestra `logQ` y `logDrop` de la cola Telnet; `logDrop` es el contador acumulado de drops de todos los logs de esa cola.
 - `comms.halltrace on | comms.halltrace off` habilita/deshabilita una línea de texto por cada TX UART `0x55`, con `seq`, `txUs`, `speedCenti`, `periodUs`, `lastTransitionUs`, `eventAgeUs`, estado Hall y contadores ISR/validación.
 - Es una instrumentación sideband sólo para correlación; no cambia la trama binaria, el control ni el filtrado Hall. Se apaga automáticamente al cerrar Telnet.
 - Procedimiento y semántica de los campos: [HALL_OBSERVABILITY.md](HALL_OBSERVABILITY.md).

@@ -1522,7 +1522,9 @@ bool handleCommsCommand(const String& command, const String& args) {
   if (command.equalsIgnoreCase("comms.halltrace")) {
     if (args.isEmpty()) {
       sendTelnet(String("[PI][HALLTRACE] ") +
-                 (piCommsGetHallTelemetryTraceEnabled() ? "ON" : "OFF"));
+                 (piCommsGetHallTelemetryTraceEnabled() ? "ON" : "OFF") +
+                 " logQ=" + String(static_cast<uint32_t>(telnetQueueDepth())) +
+                 " logDrop=" + String(telnetLogDropCount()));
       return true;
     }
     if (args.equalsIgnoreCase("on")) {

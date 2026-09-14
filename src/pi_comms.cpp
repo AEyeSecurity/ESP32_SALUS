@@ -359,7 +359,9 @@ void logHallTelemetryTrace(const HallSpeedSnapshot& hall,
   msg += (hallSnapshotOk ? hall.transitionsInvalidJump : 0U);
   msg += " isr=";
   msg += (hallSnapshotOk ? hall.isrCount : 0U);
-  broadcastIf(true, msg);
+  // HALLTRACE is a Telnet-only sideband; keep it off the Serial/control log path.
+  // EnviarMensajeTelnet enqueues with zero wait so this 100 Hz TX task never blocks.
+  EnviarMensajeTelnet(msg);
 }
 
 int16_t encodeSteerTelemetryCentered() {
