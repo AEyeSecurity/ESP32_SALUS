@@ -211,7 +211,8 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low), con dirección por s
 - `drive.brake release <servoA_deg> <servoB_deg>`: ajusta el angulo start/release runtime de ambos servos (`0..180`).
 - `drive.brake apply <servoA_deg> <servoB_deg>`: ajusta el angulo end/apply runtime de ambos servos (`0..180`).
 - `drive.brake range <relA> <applyA> <relB> <applyB>`: ajusta start/end de ambos servos en una sola linea.
-- Los ajustes son runtime para debug: no se guardan en NVS ni sobreviven reinicio.
+- Valores por defecto del firmware: A reposo `25°` / freno `110°`; B reposo `130°` / freno `80°`.
+- Los ajustes Telnet son runtime para debug: no se guardan en NVS y al reiniciar vuelven a los valores por defecto del firmware.
 
 ## Prueba de banco del cambio a GPIO32
 
