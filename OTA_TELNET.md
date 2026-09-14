@@ -86,6 +86,7 @@ pid.status
 spid.status
 steer.status
 comms.status
+comms.halltrace
 speed.status
 speed.reset
 speed.stream
@@ -123,6 +124,13 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low), con dirección por s
 - `speed.uart`: responde `N/A source=hall` (sin backend UART de velocidad).
 - En `stale` (sin transiciones frescas), `speed=0` y `dir=UNK`.
 - La telemetría UART a Pi sigue enviando magnitud (`speed_meas_u16` absoluto) en esta fase.
+
+## Trace diagnóstico Hall/UART (`comms.halltrace`)
+
+- `comms.halltrace` muestra si está activo.
+- `comms.halltrace on | comms.halltrace off` habilita/deshabilita una línea de texto por cada TX UART `0x55`, con `seq`, `txUs`, `speedCenti`, `periodUs`, `lastTransitionUs`, `eventAgeUs`, estado Hall y contadores ISR/validación.
+- Es una instrumentación sideband sólo para correlación; no cambia la trama binaria, el control ni el filtrado Hall. Se apaga automáticamente al cerrar Telnet.
+- Procedimiento y semántica de los campos: [HALL_OBSERVABILITY.md](HALL_OBSERVABILITY.md).
 
 ## Diagnóstico de sistema (`sys.*`)
 

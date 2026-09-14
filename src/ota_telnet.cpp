@@ -385,6 +385,7 @@ void resetTelnetSession() {
   if (g_telnetClient) {
     g_telnetClient.stop();
   }
+  piCommsSetHallTelemetryTraceEnabled(false);
   clearTelnetLogQueue();
   // Return to low-noise operation when a Telnet session ends.
   quadDriveSetLogEnabled(false);
@@ -414,7 +415,7 @@ void openTelnetSession(WiFiClient& incoming) {
   g_telnetClient.println("=== Servidor Telnet ESP32 ===");
   g_telnetClient.println("Conexion establecida correctamente");
   g_telnetClient.println(
-      "Comandos: steer.help | pid.help | spid.help | rc.raw | comms.status | speed.status | speed.reset | speed.stream | speed.uart | battery.status | pid.stream | spid.stream | spid.target | drive.log | drive.pwm | drive.brake | drive.dir | drive.rc.status | drive.rc.stream | hazard.help | hazard.status | sys.rt | sys.stack | sys.jitter | sys.reset | net.status | exit");
+      "Comandos: steer.help | pid.help | spid.help | rc.raw | comms.status | comms.halltrace | speed.status | speed.reset | speed.stream | speed.uart | battery.status | pid.stream | spid.stream | spid.target | drive.log | drive.pwm | drive.brake | drive.dir | drive.rc.status | drive.rc.stream | hazard.help | hazard.status | sys.rt | sys.stack | sys.jitter | sys.reset | net.status | exit");
   reportNetworkStatus();
 }
 
@@ -1452,7 +1453,6 @@ bool handleSessionCommand(const String& command, const String& args) {
 }
 
 bool handleCommsCommand(const String& command, const String& args) {
-  (void)args;
   if (command.equalsIgnoreCase("comms.status")) {
     PiCommsRxSnapshot snapshot{};
     PiCommsBatteryTxSnapshot batterySnapshot{};
@@ -1516,6 +1516,26 @@ bool handleCommsCommand(const String& command, const String& args) {
       msg += "NONE";
     }
     sendTelnet(msg);
+    return true;
+  }
+
+  if (command.equalsIgnoreCase("comms.halltrace")) {
+    if (args.isEmpty()) {
+      sendTelnet(String("[PI][HALLTRACE] ") +
+                 (piCommsGetHallTelemetryTraceEnabled() ? "ON" : "OFF"));
+      return true;
+    }
+    if (args.equalsIgnoreCase("on")) {
+      piCommsSetHallTelemetryTraceEnabled(true);
+      sendTelnet("[PI][HALLTRACE] ON (una linea por TX UART; solo diagnostico)");
+      return true;
+    }
+    if (args.equalsIgnoreCase("off")) {
+      piCommsSetHallTelemetryTraceEnabled(false);
+      sendTelnet("[PI][HALLTRACE] OFF");
+      return true;
+    }
+    sendTelnet("[PI][HALLTRACE] Uso: comms.halltrace on | comms.halltrace off");
     return true;
   }
 

@@ -56,6 +56,10 @@ bool piCommsGetRxSnapshot(PiCommsRxSnapshot& snapshot);
 bool piCommsGetBatteryTxSnapshot(PiCommsBatteryTxSnapshot& snapshot);
 void piCommsResetStats();
 
+// Diagnostic-only sideband. It never changes the binary UART protocol or drive control.
+void piCommsSetHallTelemetryTraceEnabled(bool enabled);
+bool piCommsGetHallTelemetryTraceEnabled();
+
 void taskPiCommsRx(void* parameter);
 void taskPiCommsTx(void* parameter);
 

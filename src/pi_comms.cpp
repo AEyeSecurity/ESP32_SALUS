@@ -68,6 +68,7 @@ struct PiBatteryTxState {
 };
 
 PiBatteryTxState g_batteryTxState{};
+bool g_hallTelemetryTraceEnabled = false;
 
 portMUX_TYPE g_stateMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE g_piRxWakeMux = portMUX_INITIALIZER_UNLOCKED;
@@ -303,9 +304,8 @@ uint8_t encodeBatterySampleAgeDs(const BatterySnapshot& snapshot, TickType_t now
   return clampToU8((ageMs + 50u) / 100u);
 }
 
-uint16_t encodeSpeedTelemetryFromHall() {
-  HallSpeedSnapshot speed{};
-  if (!hallSpeedGetSnapshot(speed) || !speed.driverReady || !isfinite(speed.speedMps)) {
+uint16_t encodeSpeedTelemetryFromHall(const HallSpeedSnapshot& speed, bool snapshotOk) {
+  if (!snapshotOk || !speed.driverReady || !isfinite(speed.speedMps)) {
     return kSpeedTelemetryNotAvailable;
   }
 
@@ -318,6 +318,48 @@ uint16_t encodeSpeedTelemetryFromHall() {
     speedCenti = 65534L;
   }
   return static_cast<uint16_t>(speedCenti);
+}
+
+void logHallTelemetryTrace(const HallSpeedSnapshot& hall,
+                           bool hallSnapshotOk,
+                           uint32_t txSequence,
+                           uint32_t txTimestampUs,
+                           uint16_t speedCentiMps) {
+  if (!piCommsGetHallTelemetryTraceEnabled()) {
+    return;
+  }
+
+  const uint32_t transitionAgeUs =
+      (hallSnapshotOk && hall.lastTransitionUs != 0U) ? txTimestampUs - hall.lastTransitionUs : 0U;
+  String msg;
+  msg.reserve(224);
+  msg += "[PI][HALLTRACE] seq=";
+  msg += txSequence;
+  msg += " txUs=";
+  msg += txTimestampUs;
+  msg += " speedCenti=";
+  msg += speedCentiMps;
+  msg += " periodUs=";
+  msg += (hallSnapshotOk ? hall.transitionPeriodUs : 0U);
+  msg += " lastTransitionUs=";
+  msg += (hallSnapshotOk ? hall.lastTransitionUs : 0U);
+  msg += " eventAgeUs=";
+  msg += transitionAgeUs;
+  msg += " hall=0b";
+  msg += (hallSnapshotOk && (hall.hallMask & (1U << 2))) ? '1' : '0';
+  msg += (hallSnapshotOk && (hall.hallMask & (1U << 1))) ? '1' : '0';
+  msg += (hallSnapshotOk && (hall.hallMask & (1U << 0))) ? '1' : '0';
+  msg += " hasTransition=";
+  msg += (hallSnapshotOk && hall.hasTransition) ? "Y" : "N";
+  msg += " ok=";
+  msg += (hallSnapshotOk ? hall.transitionsOk : 0U);
+  msg += " invState=";
+  msg += (hallSnapshotOk ? hall.transitionsInvalidState : 0U);
+  msg += " invJump=";
+  msg += (hallSnapshotOk ? hall.transitionsInvalidJump : 0U);
+  msg += " isr=";
+  msg += (hallSnapshotOk ? hall.isrCount : 0U);
+  broadcastIf(true, msg);
 }
 
 int16_t encodeSteerTelemetryCentered() {
@@ -639,6 +681,21 @@ void piCommsResetStats() {
   portEXIT_CRITICAL(&g_stateMux);
 }
 
+void piCommsSetHallTelemetryTraceEnabled(bool enabled) {
+  // This flag only gates diagnostic text emitted through Telnet.
+  portENTER_CRITICAL(&g_stateMux);
+  g_hallTelemetryTraceEnabled = enabled;
+  portEXIT_CRITICAL(&g_stateMux);
+}
+
+bool piCommsGetHallTelemetryTraceEnabled() {
+  bool enabled = false;
+  portENTER_CRITICAL(&g_stateMux);
+  enabled = g_hallTelemetryTraceEnabled;
+  portEXIT_CRITICAL(&g_stateMux);
+  return enabled;
+}
+
 void taskPiCommsRx(void* parameter) {
   PiCommsConfig* cfg = static_cast<PiCommsConfig*>(parameter);
   if (cfg == nullptr) {
@@ -792,6 +849,7 @@ void taskPiCommsTx(void* parameter) {
   const uint32_t expectedPeriodUs = static_cast<uint32_t>(period * portTICK_PERIOD_MS * 1000U);
   TickType_t lastWake = xTaskGetTickCount();
   TickType_t lastBatteryFrameTick = 0;
+  uint32_t telemetryTxSequence = 0;
   int64_t lastIterationStartUs = esp_timer_get_time();
 
   while (true) {
@@ -803,7 +861,9 @@ void taskPiCommsTx(void* parameter) {
     lastIterationStartUs = iterationStartUs;
     if (g_initialized) {
       const uint8_t status = encodeStatusFlags();
-      const uint16_t speedTelemetry = encodeSpeedTelemetryFromHall();
+      HallSpeedSnapshot hallSnapshot{};
+      const bool hallSnapshotOk = hallSpeedGetSnapshot(hallSnapshot);
+      const uint16_t speedTelemetry = encodeSpeedTelemetryFromHall(hallSnapshot, hallSnapshotOk);
       const int16_t steerTelemetry = encodeSteerTelemetryCentered();
       const uint8_t brakePercent = encodeAppliedBrakePercent();
 
@@ -820,6 +880,10 @@ void taskPiCommsTx(void* parameter) {
 
       uart_write_bytes(cfg->uartNum, reinterpret_cast<const char*>(frame), sizeof(frame));
       const TickType_t nowTick = xTaskGetTickCount();
+      const uint32_t txTimestampUs = micros();
+      telemetryTxSequence++;
+      logHallTelemetryTrace(
+          hallSnapshot, hallSnapshotOk, telemetryTxSequence, txTimestampUs, speedTelemetry);
       logTxFrame(*cfg, status, speedTelemetry, steerTelemetry, brakePercent, nowTick);
 
       const TickType_t batteryPeriod =
