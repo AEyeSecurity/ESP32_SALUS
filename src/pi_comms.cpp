@@ -68,8 +68,30 @@ struct PiBatteryTxState {
 };
 
 PiBatteryTxState g_batteryTxState{};
+bool g_hallTelemetryTraceEnabled = false;
+
+constexpr size_t kHallCaptureCapacity = 300;
+constexpr uint16_t kHallCaptureTriggerCentiMps = 1000;  // Diagnostic trigger only (10.00 m/s).
+constexpr uint16_t kHallCapturePostTriggerSamples = 50;
+constexpr uint8_t kHallCaptureFlagSnapshotOk = 1 << 0;
+constexpr uint8_t kHallCaptureFlagHasTransition = 1 << 1;
+
+struct HallCaptureState {
+  bool armed = false;
+  bool triggered = false;
+  bool frozen = false;
+  uint16_t count = 0;
+  uint16_t writeIndex = 0;
+  uint16_t postTriggerRemaining = 0;
+  uint32_t triggerSequence = 0;
+  uint16_t triggerSpeedCentiMps = 0;
+};
+
+std::array<PiHallTelemetryCaptureRecord, kHallCaptureCapacity> g_hallCaptureRecords{};
+HallCaptureState g_hallCaptureState{};
 
 portMUX_TYPE g_stateMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE g_hallCaptureMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE g_piRxWakeMux = portMUX_INITIALIZER_UNLOCKED;
 TaskHandle_t g_piRxWakeTaskHandle = nullptr;
 hw_timer_t* g_piRxWakeTimer = nullptr;
@@ -303,9 +325,8 @@ uint8_t encodeBatterySampleAgeDs(const BatterySnapshot& snapshot, TickType_t now
   return clampToU8((ageMs + 50u) / 100u);
 }
 
-uint16_t encodeSpeedTelemetryFromHall() {
-  HallSpeedSnapshot speed{};
-  if (!hallSpeedGetSnapshot(speed) || !speed.driverReady || !isfinite(speed.speedMps)) {
+uint16_t encodeSpeedTelemetryFromHall(const HallSpeedSnapshot& speed, bool snapshotOk) {
+  if (!snapshotOk || !speed.driverReady || !isfinite(speed.speedMps)) {
     return kSpeedTelemetryNotAvailable;
   }
 
@@ -318,6 +339,103 @@ uint16_t encodeSpeedTelemetryFromHall() {
     speedCenti = 65534L;
   }
   return static_cast<uint16_t>(speedCenti);
+}
+
+void recordHallTelemetryCapture(const HallSpeedSnapshot& hall,
+                                bool hallSnapshotOk,
+                                uint32_t txSequence,
+                                uint32_t txTimestampUs,
+                                uint16_t speedCentiMps) {
+  PiHallTelemetryCaptureRecord record{};
+  record.sequence = txSequence;
+  record.txTimestampUs = txTimestampUs;
+  record.speedCentiMps = speedCentiMps;
+  if (hallSnapshotOk) {
+    record.transitionPeriodUs = hall.transitionPeriodUs;
+    record.lastTransitionUs = hall.lastTransitionUs;
+    record.eventAgeUs = (hall.lastTransitionUs != 0U) ? txTimestampUs - hall.lastTransitionUs : 0U;
+    record.transitionsOk = hall.transitionsOk;
+    record.transitionsInvalidState = hall.transitionsInvalidState;
+    record.transitionsInvalidJump = hall.transitionsInvalidJump;
+    record.isrCount = hall.isrCount;
+    record.hallMask = hall.hallMask;
+    record.flags |= kHallCaptureFlagSnapshotOk;
+    if (hall.hasTransition) {
+      record.flags |= kHallCaptureFlagHasTransition;
+    }
+  }
+
+  portENTER_CRITICAL(&g_hallCaptureMux);
+  if (!g_hallCaptureState.armed || g_hallCaptureState.frozen) {
+    portEXIT_CRITICAL(&g_hallCaptureMux);
+    return;
+  }
+
+  g_hallCaptureRecords[g_hallCaptureState.writeIndex] = record;
+  g_hallCaptureState.writeIndex =
+      static_cast<uint16_t>((g_hallCaptureState.writeIndex + 1U) % kHallCaptureCapacity);
+  if (g_hallCaptureState.count < kHallCaptureCapacity) {
+    g_hallCaptureState.count++;
+  }
+
+  if (!g_hallCaptureState.triggered && speedCentiMps != kSpeedTelemetryNotAvailable &&
+      speedCentiMps >= kHallCaptureTriggerCentiMps) {
+    g_hallCaptureState.triggered = true;
+    g_hallCaptureState.triggerSequence = txSequence;
+    g_hallCaptureState.triggerSpeedCentiMps = speedCentiMps;
+    g_hallCaptureState.postTriggerRemaining = kHallCapturePostTriggerSamples;
+  } else if (g_hallCaptureState.triggered && g_hallCaptureState.postTriggerRemaining > 0U) {
+    g_hallCaptureState.postTriggerRemaining--;
+    if (g_hallCaptureState.postTriggerRemaining == 0U) {
+      g_hallCaptureState.frozen = true;
+      g_hallCaptureState.armed = false;
+    }
+  }
+  portEXIT_CRITICAL(&g_hallCaptureMux);
+}
+
+void logHallTelemetryTrace(const HallSpeedSnapshot& hall,
+                           bool hallSnapshotOk,
+                           uint32_t txSequence,
+                           uint32_t txTimestampUs,
+                           uint16_t speedCentiMps) {
+  if (!piCommsGetHallTelemetryTraceEnabled()) {
+    return;
+  }
+
+  const uint32_t transitionAgeUs =
+      (hallSnapshotOk && hall.lastTransitionUs != 0U) ? txTimestampUs - hall.lastTransitionUs : 0U;
+  String msg;
+  msg.reserve(224);
+  msg += "[PI][HALLTRACE] seq=";
+  msg += txSequence;
+  msg += " txUs=";
+  msg += txTimestampUs;
+  msg += " speedCenti=";
+  msg += speedCentiMps;
+  msg += " periodUs=";
+  msg += (hallSnapshotOk ? hall.transitionPeriodUs : 0U);
+  msg += " lastTransitionUs=";
+  msg += (hallSnapshotOk ? hall.lastTransitionUs : 0U);
+  msg += " eventAgeUs=";
+  msg += transitionAgeUs;
+  msg += " hall=0b";
+  msg += (hallSnapshotOk && (hall.hallMask & (1U << 2))) ? '1' : '0';
+  msg += (hallSnapshotOk && (hall.hallMask & (1U << 1))) ? '1' : '0';
+  msg += (hallSnapshotOk && (hall.hallMask & (1U << 0))) ? '1' : '0';
+  msg += " hasTransition=";
+  msg += (hallSnapshotOk && hall.hasTransition) ? "Y" : "N";
+  msg += " ok=";
+  msg += (hallSnapshotOk ? hall.transitionsOk : 0U);
+  msg += " invState=";
+  msg += (hallSnapshotOk ? hall.transitionsInvalidState : 0U);
+  msg += " invJump=";
+  msg += (hallSnapshotOk ? hall.transitionsInvalidJump : 0U);
+  msg += " isr=";
+  msg += (hallSnapshotOk ? hall.isrCount : 0U);
+  // HALLTRACE is a Telnet-only sideband; keep it off the Serial/control log path.
+  // EnviarMensajeTelnet enqueues with zero wait so this 100 Hz TX task never blocks.
+  EnviarMensajeTelnet(msg);
 }
 
 int16_t encodeSteerTelemetryCentered() {
@@ -589,6 +707,7 @@ bool piCommsInit(const PiCommsConfig& config) {
   g_batteryTxState = PiBatteryTxState{};
   portEXIT_CRITICAL(&g_stateMux);
 
+  piCommsArmHallTelemetryCapture();
   g_initialized = true;
   return true;
 }
@@ -637,6 +756,64 @@ void piCommsResetStats() {
   g_rxState.framesVersionError = 0;
   g_batteryTxState.framesSent = 0;
   portEXIT_CRITICAL(&g_stateMux);
+}
+
+void piCommsSetHallTelemetryTraceEnabled(bool enabled) {
+  // This flag only gates diagnostic text emitted through Telnet.
+  portENTER_CRITICAL(&g_stateMux);
+  g_hallTelemetryTraceEnabled = enabled;
+  portEXIT_CRITICAL(&g_stateMux);
+}
+
+bool piCommsGetHallTelemetryTraceEnabled() {
+  bool enabled = false;
+  portENTER_CRITICAL(&g_stateMux);
+  enabled = g_hallTelemetryTraceEnabled;
+  portEXIT_CRITICAL(&g_stateMux);
+  return enabled;
+}
+
+void piCommsArmHallTelemetryCapture() {
+  portENTER_CRITICAL(&g_hallCaptureMux);
+  g_hallCaptureState = HallCaptureState{};
+  g_hallCaptureState.armed = true;
+  portEXIT_CRITICAL(&g_hallCaptureMux);
+}
+
+void piCommsClearHallTelemetryCapture() {
+  portENTER_CRITICAL(&g_hallCaptureMux);
+  g_hallCaptureState = HallCaptureState{};
+  portEXIT_CRITICAL(&g_hallCaptureMux);
+}
+
+bool piCommsGetHallTelemetryCaptureStatus(PiHallTelemetryCaptureStatus& status) {
+  portENTER_CRITICAL(&g_hallCaptureMux);
+  status.armed = g_hallCaptureState.armed;
+  status.triggered = g_hallCaptureState.triggered;
+  status.frozen = g_hallCaptureState.frozen;
+  status.count = g_hallCaptureState.count;
+  status.capacity = static_cast<uint16_t>(kHallCaptureCapacity);
+  status.postTriggerRemaining = g_hallCaptureState.postTriggerRemaining;
+  status.triggerSequence = g_hallCaptureState.triggerSequence;
+  status.triggerSpeedCentiMps = g_hallCaptureState.triggerSpeedCentiMps;
+  portEXIT_CRITICAL(&g_hallCaptureMux);
+  return true;
+}
+
+bool piCommsReadHallTelemetryCaptureRecord(size_t oldestIndex,
+                                           PiHallTelemetryCaptureRecord& record) {
+  bool found = false;
+  portENTER_CRITICAL(&g_hallCaptureMux);
+  if (oldestIndex < g_hallCaptureState.count) {
+    const size_t oldest =
+        (g_hallCaptureState.writeIndex + kHallCaptureCapacity - g_hallCaptureState.count) %
+        kHallCaptureCapacity;
+    const size_t recordIndex = (oldest + oldestIndex) % kHallCaptureCapacity;
+    record = g_hallCaptureRecords[recordIndex];
+    found = true;
+  }
+  portEXIT_CRITICAL(&g_hallCaptureMux);
+  return found;
 }
 
 void taskPiCommsRx(void* parameter) {
@@ -792,6 +969,7 @@ void taskPiCommsTx(void* parameter) {
   const uint32_t expectedPeriodUs = static_cast<uint32_t>(period * portTICK_PERIOD_MS * 1000U);
   TickType_t lastWake = xTaskGetTickCount();
   TickType_t lastBatteryFrameTick = 0;
+  uint32_t telemetryTxSequence = 0;
   int64_t lastIterationStartUs = esp_timer_get_time();
 
   while (true) {
@@ -803,7 +981,9 @@ void taskPiCommsTx(void* parameter) {
     lastIterationStartUs = iterationStartUs;
     if (g_initialized) {
       const uint8_t status = encodeStatusFlags();
-      const uint16_t speedTelemetry = encodeSpeedTelemetryFromHall();
+      HallSpeedSnapshot hallSnapshot{};
+      const bool hallSnapshotOk = hallSpeedGetSnapshot(hallSnapshot);
+      const uint16_t speedTelemetry = encodeSpeedTelemetryFromHall(hallSnapshot, hallSnapshotOk);
       const int16_t steerTelemetry = encodeSteerTelemetryCentered();
       const uint8_t brakePercent = encodeAppliedBrakePercent();
 
@@ -820,6 +1000,12 @@ void taskPiCommsTx(void* parameter) {
 
       uart_write_bytes(cfg->uartNum, reinterpret_cast<const char*>(frame), sizeof(frame));
       const TickType_t nowTick = xTaskGetTickCount();
+      const uint32_t txTimestampUs = micros();
+      telemetryTxSequence++;
+      recordHallTelemetryCapture(
+          hallSnapshot, hallSnapshotOk, telemetryTxSequence, txTimestampUs, speedTelemetry);
+      logHallTelemetryTrace(
+          hallSnapshot, hallSnapshotOk, telemetryTxSequence, txTimestampUs, speedTelemetry);
       logTxFrame(*cfg, status, speedTelemetry, steerTelemetry, brakePercent, nowTick);
 
       const TickType_t batteryPeriod =

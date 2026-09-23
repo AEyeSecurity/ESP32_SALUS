@@ -86,6 +86,7 @@ pid.status
 spid.status
 steer.status
 comms.status
+comms.halltrace
 speed.status
 speed.reset
 speed.stream
@@ -123,6 +124,16 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low), con dirección por s
 - `speed.uart`: responde `N/A source=hall` (sin backend UART de velocidad).
 - En `stale` (sin transiciones frescas), `speed=0` y `dir=UNK`.
 - La telemetría UART a Pi sigue enviando magnitud (`speed_meas_u16` absoluto) en esta fase.
+
+## Trace diagnóstico Hall/UART (`comms.halltrace`)
+
+- `comms.halltrace` muestra si está activo.
+- `comms.halltrace` o `comms.halltrace status` muestra el stream live, estado de la captura RAM autónoma, cantidad de muestras, trigger, `logQ` y `logDrop`.
+- `comms.halltrace on | comms.halltrace off` habilita/deshabilita una línea de texto por cada TX UART `0x55`, con `seq`, `txUs`, `speedCenti`, `periodUs`, `lastTransitionUs`, `eventAgeUs`, estado Hall y contadores ISR/validación.
+- `comms.halltrace arm | clear` rearma o borra la captura circular autónoma; `comms.halltrace dump [start] [count<=64]` la descarga por páginas después de que se congela.
+- El stream live se apaga automáticamente al cerrar Telnet. La captura RAM sigue funcionando sin Telnet y se congela tras un trigger diagnóstico de 10,00 m/s, conservando contexto previo y 50 muestras posteriores.
+- Ambos mecanismos son sideband sólo para correlación; no cambian la trama binaria, el control ni el filtrado Hall. La captura se pierde si la ESP32 se reinicia o queda sin alimentación.
+- Procedimiento y semántica de los campos: [HALL_OBSERVABILITY.md](HALL_OBSERVABILITY.md).
 
 ## Diagnóstico de sistema (`sys.*`)
 
