@@ -1520,24 +1520,125 @@ bool handleCommsCommand(const String& command, const String& args) {
   }
 
   if (command.equalsIgnoreCase("comms.halltrace")) {
-    if (args.isEmpty()) {
-      sendTelnet(String("[PI][HALLTRACE] ") +
-                 (piCommsGetHallTelemetryTraceEnabled() ? "ON" : "OFF") +
-                 " logQ=" + String(static_cast<uint32_t>(telnetQueueDepth())) +
-                 " logDrop=" + String(telnetLogDropCount()));
+    String operation = args;
+    operation.trim();
+    String operationLower = operation;
+    operationLower.toLowerCase();
+    if (operation.isEmpty() || operationLower == "status") {
+      PiHallTelemetryCaptureStatus capture{};
+      piCommsGetHallTelemetryCaptureStatus(capture);
+      String msg;
+      msg.reserve(224);
+      msg += "[PI][HALLTRACE] live=";
+      msg += piCommsGetHallTelemetryTraceEnabled() ? "ON" : "OFF";
+      msg += " capture=";
+      msg += capture.frozen ? "FROZEN" : (capture.triggered ? "TRIGGERED" :
+                                          (capture.armed ? "ARMED" : "CLEAR"));
+      msg += " samples=";
+      msg += capture.count;
+      msg += "/";
+      msg += capture.capacity;
+      msg += " post=";
+      msg += capture.postTriggerRemaining;
+      msg += " triggerSeq=";
+      msg += capture.triggerSequence;
+      msg += " triggerSpeedCenti=";
+      msg += capture.triggerSpeedCentiMps;
+      msg += " logQ=";
+      msg += static_cast<uint32_t>(telnetQueueDepth());
+      msg += " logDrop=";
+      msg += telnetLogDropCount();
+      sendTelnet(msg);
       return true;
     }
-    if (args.equalsIgnoreCase("on")) {
+    if (operationLower == "on") {
       piCommsSetHallTelemetryTraceEnabled(true);
       sendTelnet("[PI][HALLTRACE] ON (una linea por TX UART; solo diagnostico)");
       return true;
     }
-    if (args.equalsIgnoreCase("off")) {
+    if (operationLower == "off") {
       piCommsSetHallTelemetryTraceEnabled(false);
       sendTelnet("[PI][HALLTRACE] OFF");
       return true;
     }
-    sendTelnet("[PI][HALLTRACE] Uso: comms.halltrace on | comms.halltrace off");
+    if (operationLower == "arm") {
+      piCommsArmHallTelemetryCapture();
+      sendTelnet("[PI][HALLTRACE] capture ARMED (RAM circular; trigger diagnostico 10.00m/s)");
+      return true;
+    }
+    if (operationLower == "clear") {
+      piCommsClearHallTelemetryCapture();
+      sendTelnet("[PI][HALLTRACE] capture CLEAR (desarmada)");
+      return true;
+    }
+    if (operationLower.startsWith("dump")) {
+      PiHallTelemetryCaptureStatus capture{};
+      piCommsGetHallTelemetryCaptureStatus(capture);
+      if (!capture.frozen) {
+        sendTelnet("[PI][HALLTRACE] dump requiere capture=FROZEN; use status");
+        return true;
+      }
+
+      unsigned int start = 0;
+      unsigned int count = 64;
+      String dumpArgs = operation.substring(4);
+      dumpArgs.trim();
+      const int parsed = dumpArgs.isEmpty() ? 0 : sscanf(dumpArgs.c_str(), "%u %u", &start, &count);
+      if (parsed < 0 || parsed > 2 || count == 0U || count > 64U || start >= capture.count) {
+        sendTelnet("[PI][HALLTRACE] Uso: comms.halltrace dump [start] [count<=64]");
+        return true;
+      }
+      const size_t requestedEnd = static_cast<size_t>(start) + static_cast<size_t>(count);
+      const size_t end = (requestedEnd < capture.count) ? requestedEnd : capture.count;
+      String header = "[PI][HALLDUMP] start=" + String(start) +
+                      " end=" + String(static_cast<unsigned long>(end)) +
+                      " total=" + String(capture.count);
+      sendTelnet(header);
+      for (size_t index = start; index < end; ++index) {
+        PiHallTelemetryCaptureRecord record{};
+        if (!piCommsReadHallTelemetryCaptureRecord(index, record)) {
+          sendTelnet("[PI][HALLDUMP] ERROR indice no disponible");
+          break;
+        }
+        String msg;
+        msg.reserve(224);
+        msg += "[PI][HALLDUMP] i=";
+        msg += index;
+        msg += " seq=";
+        msg += record.sequence;
+        msg += " txUs=";
+        msg += record.txTimestampUs;
+        msg += " speedCenti=";
+        msg += record.speedCentiMps;
+        msg += " periodUs=";
+        msg += record.transitionPeriodUs;
+        msg += " lastTransitionUs=";
+        msg += record.lastTransitionUs;
+        msg += " eventAgeUs=";
+        msg += record.eventAgeUs;
+        msg += " hall=";
+        msg += record.hallMask;
+        msg += " flags=";
+        msg += record.flags;
+        msg += " ok=";
+        msg += record.transitionsOk;
+        msg += " invState=";
+        msg += record.transitionsInvalidState;
+        msg += " invJump=";
+        msg += record.transitionsInvalidJump;
+        msg += " isr=";
+        msg += record.isrCount;
+        sendTelnet(msg);
+      }
+      if (end < capture.count) {
+        sendTelnet("[PI][HALLDUMP] NEXT: comms.halltrace dump " +
+                   String(static_cast<unsigned long>(end)) + " 64");
+      } else {
+        sendTelnet("[PI][HALLDUMP] END");
+      }
+      return true;
+    }
+    sendTelnet("[PI][HALLTRACE] Uso: status | on | off | arm | clear | dump [start] [count<=64]");
     return true;
   }
 

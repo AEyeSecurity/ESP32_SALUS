@@ -70,7 +70,28 @@ struct PiBatteryTxState {
 PiBatteryTxState g_batteryTxState{};
 bool g_hallTelemetryTraceEnabled = false;
 
+constexpr size_t kHallCaptureCapacity = 300;
+constexpr uint16_t kHallCaptureTriggerCentiMps = 1000;  // Diagnostic trigger only (10.00 m/s).
+constexpr uint16_t kHallCapturePostTriggerSamples = 50;
+constexpr uint8_t kHallCaptureFlagSnapshotOk = 1 << 0;
+constexpr uint8_t kHallCaptureFlagHasTransition = 1 << 1;
+
+struct HallCaptureState {
+  bool armed = false;
+  bool triggered = false;
+  bool frozen = false;
+  uint16_t count = 0;
+  uint16_t writeIndex = 0;
+  uint16_t postTriggerRemaining = 0;
+  uint32_t triggerSequence = 0;
+  uint16_t triggerSpeedCentiMps = 0;
+};
+
+std::array<PiHallTelemetryCaptureRecord, kHallCaptureCapacity> g_hallCaptureRecords{};
+HallCaptureState g_hallCaptureState{};
+
 portMUX_TYPE g_stateMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE g_hallCaptureMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE g_piRxWakeMux = portMUX_INITIALIZER_UNLOCKED;
 TaskHandle_t g_piRxWakeTaskHandle = nullptr;
 hw_timer_t* g_piRxWakeTimer = nullptr;
@@ -318,6 +339,59 @@ uint16_t encodeSpeedTelemetryFromHall(const HallSpeedSnapshot& speed, bool snaps
     speedCenti = 65534L;
   }
   return static_cast<uint16_t>(speedCenti);
+}
+
+void recordHallTelemetryCapture(const HallSpeedSnapshot& hall,
+                                bool hallSnapshotOk,
+                                uint32_t txSequence,
+                                uint32_t txTimestampUs,
+                                uint16_t speedCentiMps) {
+  PiHallTelemetryCaptureRecord record{};
+  record.sequence = txSequence;
+  record.txTimestampUs = txTimestampUs;
+  record.speedCentiMps = speedCentiMps;
+  if (hallSnapshotOk) {
+    record.transitionPeriodUs = hall.transitionPeriodUs;
+    record.lastTransitionUs = hall.lastTransitionUs;
+    record.eventAgeUs = (hall.lastTransitionUs != 0U) ? txTimestampUs - hall.lastTransitionUs : 0U;
+    record.transitionsOk = hall.transitionsOk;
+    record.transitionsInvalidState = hall.transitionsInvalidState;
+    record.transitionsInvalidJump = hall.transitionsInvalidJump;
+    record.isrCount = hall.isrCount;
+    record.hallMask = hall.hallMask;
+    record.flags |= kHallCaptureFlagSnapshotOk;
+    if (hall.hasTransition) {
+      record.flags |= kHallCaptureFlagHasTransition;
+    }
+  }
+
+  portENTER_CRITICAL(&g_hallCaptureMux);
+  if (!g_hallCaptureState.armed || g_hallCaptureState.frozen) {
+    portEXIT_CRITICAL(&g_hallCaptureMux);
+    return;
+  }
+
+  g_hallCaptureRecords[g_hallCaptureState.writeIndex] = record;
+  g_hallCaptureState.writeIndex =
+      static_cast<uint16_t>((g_hallCaptureState.writeIndex + 1U) % kHallCaptureCapacity);
+  if (g_hallCaptureState.count < kHallCaptureCapacity) {
+    g_hallCaptureState.count++;
+  }
+
+  if (!g_hallCaptureState.triggered && speedCentiMps != kSpeedTelemetryNotAvailable &&
+      speedCentiMps >= kHallCaptureTriggerCentiMps) {
+    g_hallCaptureState.triggered = true;
+    g_hallCaptureState.triggerSequence = txSequence;
+    g_hallCaptureState.triggerSpeedCentiMps = speedCentiMps;
+    g_hallCaptureState.postTriggerRemaining = kHallCapturePostTriggerSamples;
+  } else if (g_hallCaptureState.triggered && g_hallCaptureState.postTriggerRemaining > 0U) {
+    g_hallCaptureState.postTriggerRemaining--;
+    if (g_hallCaptureState.postTriggerRemaining == 0U) {
+      g_hallCaptureState.frozen = true;
+      g_hallCaptureState.armed = false;
+    }
+  }
+  portEXIT_CRITICAL(&g_hallCaptureMux);
 }
 
 void logHallTelemetryTrace(const HallSpeedSnapshot& hall,
@@ -633,6 +707,7 @@ bool piCommsInit(const PiCommsConfig& config) {
   g_batteryTxState = PiBatteryTxState{};
   portEXIT_CRITICAL(&g_stateMux);
 
+  piCommsArmHallTelemetryCapture();
   g_initialized = true;
   return true;
 }
@@ -696,6 +771,49 @@ bool piCommsGetHallTelemetryTraceEnabled() {
   enabled = g_hallTelemetryTraceEnabled;
   portEXIT_CRITICAL(&g_stateMux);
   return enabled;
+}
+
+void piCommsArmHallTelemetryCapture() {
+  portENTER_CRITICAL(&g_hallCaptureMux);
+  g_hallCaptureState = HallCaptureState{};
+  g_hallCaptureState.armed = true;
+  portEXIT_CRITICAL(&g_hallCaptureMux);
+}
+
+void piCommsClearHallTelemetryCapture() {
+  portENTER_CRITICAL(&g_hallCaptureMux);
+  g_hallCaptureState = HallCaptureState{};
+  portEXIT_CRITICAL(&g_hallCaptureMux);
+}
+
+bool piCommsGetHallTelemetryCaptureStatus(PiHallTelemetryCaptureStatus& status) {
+  portENTER_CRITICAL(&g_hallCaptureMux);
+  status.armed = g_hallCaptureState.armed;
+  status.triggered = g_hallCaptureState.triggered;
+  status.frozen = g_hallCaptureState.frozen;
+  status.count = g_hallCaptureState.count;
+  status.capacity = static_cast<uint16_t>(kHallCaptureCapacity);
+  status.postTriggerRemaining = g_hallCaptureState.postTriggerRemaining;
+  status.triggerSequence = g_hallCaptureState.triggerSequence;
+  status.triggerSpeedCentiMps = g_hallCaptureState.triggerSpeedCentiMps;
+  portEXIT_CRITICAL(&g_hallCaptureMux);
+  return true;
+}
+
+bool piCommsReadHallTelemetryCaptureRecord(size_t oldestIndex,
+                                           PiHallTelemetryCaptureRecord& record) {
+  bool found = false;
+  portENTER_CRITICAL(&g_hallCaptureMux);
+  if (oldestIndex < g_hallCaptureState.count) {
+    const size_t oldest =
+        (g_hallCaptureState.writeIndex + kHallCaptureCapacity - g_hallCaptureState.count) %
+        kHallCaptureCapacity;
+    const size_t recordIndex = (oldest + oldestIndex) % kHallCaptureCapacity;
+    record = g_hallCaptureRecords[recordIndex];
+    found = true;
+  }
+  portEXIT_CRITICAL(&g_hallCaptureMux);
+  return found;
 }
 
 void taskPiCommsRx(void* parameter) {
@@ -884,6 +1002,8 @@ void taskPiCommsTx(void* parameter) {
       const TickType_t nowTick = xTaskGetTickCount();
       const uint32_t txTimestampUs = micros();
       telemetryTxSequence++;
+      recordHallTelemetryCapture(
+          hallSnapshot, hallSnapshotOk, telemetryTxSequence, txTimestampUs, speedTelemetry);
       logHallTelemetryTrace(
           hallSnapshot, hallSnapshotOk, telemetryTxSequence, txTimestampUs, speedTelemetry);
       logTxFrame(*cfg, status, speedTelemetry, steerTelemetry, brakePercent, nowTick);

@@ -1,9 +1,11 @@
 # Diagnóstico Hall ↔ telemetría UART
 
-Esta instrumentación es opt-in y sólo agrega texto al canal Telnet. No cambia
-la trama binaria `0x55`, el cálculo usado por el control, el PID, el ISR Hall,
-los estados de transición ni los filtros. La opción queda desactivada cuando
-se cierra la sesión Telnet.
+Esta instrumentación tiene dos modos sideband. El stream de texto es opt-in y
+sólo usa Telnet. Además, una captura binaria circular en RAM queda armada al
+arrancar y puede conservar un evento mientras el robot circula sin conexión
+Telnet. Ningún modo cambia la trama binaria `0x55`, el cálculo usado por el
+control, el PID, el ISR Hall, los estados de transición ni los filtros. Sólo el
+stream de texto se desactiva cuando se cierra Telnet.
 
 ## Lectura exacta
 
@@ -48,6 +50,41 @@ pérdida de líneas, ese contador debe considerarse parte del resultado y la
 captura no permite una correlación completa. `logDrop` es global para la cola
 de logs Telnet, por lo que incluye otros mensajes que coincidan durante la
 sesión, no sólo HALLTRACE.
+
+## Captura autónoma para una prueba en movimiento
+
+La captura RAM guarda 300 muestras binarias tomadas del mismo snapshot Hall que
+produce cada trama `0x55` (unos 3 s a 100 Hz). No necesita Wi-Fi ni Telnet
+durante la prueba. Al observar `speedCenti >= 1000` (10,00 m/s), conserva esa
+muestra y 50 muestras posteriores, y después se congela. El umbral es solamente
+un trigger diagnóstico para preservar un outlier incompatible con la operación
+normal; **no** valida, limita, filtra ni cambia la velocidad enviada/controlada.
+
+Flujo recomendado:
+
+1. arrancar el firmware; la captura queda `ARMED` automáticamente;
+2. ejecutar la prueba sin Telnet;
+3. al terminar, reconectar y consultar `comms.halltrace status`;
+4. si aparece `FROZEN`, descargar páginas con
+   `comms.halltrace dump 0 64`, luego seguir el comando `NEXT`;
+5. guardar el texto en la PC y ejecutar `comms.halltrace arm` antes de otra
+   prueba.
+
+Comandos:
+
+```text
+comms.halltrace status
+comms.halltrace arm
+comms.halltrace clear
+comms.halltrace dump [start] [count<=64]
+```
+
+`arm` borra la captura anterior y vuelve a armarla; `clear` la borra y deja
+desarmada. El dump sólo se habilita cuando la captura está congelada, para no
+mezclar índices de un ring que todavía se está escribiendo. Los registros
+incluyen `seq`, `txUs`, `speedCenti`, período/edad Hall, estado Hall y contadores
+de transición/ISR. La captura vive sólo en RAM: se pierde al reiniciar o cortar
+alimentación, por lo que hay que descargarla antes de apagar la ESP32.
 
 ## Cálculo de plausibilidad, sin umbral implementado
 

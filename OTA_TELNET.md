@@ -128,9 +128,11 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low), con dirección por s
 ## Trace diagnóstico Hall/UART (`comms.halltrace`)
 
 - `comms.halltrace` muestra si está activo.
-- `comms.halltrace` sin argumentos también muestra `logQ` y `logDrop` de la cola Telnet; `logDrop` es el contador acumulado de drops de todos los logs de esa cola.
+- `comms.halltrace` o `comms.halltrace status` muestra el stream live, estado de la captura RAM autónoma, cantidad de muestras, trigger, `logQ` y `logDrop`.
 - `comms.halltrace on | comms.halltrace off` habilita/deshabilita una línea de texto por cada TX UART `0x55`, con `seq`, `txUs`, `speedCenti`, `periodUs`, `lastTransitionUs`, `eventAgeUs`, estado Hall y contadores ISR/validación.
-- Es una instrumentación sideband sólo para correlación; no cambia la trama binaria, el control ni el filtrado Hall. Se apaga automáticamente al cerrar Telnet.
+- `comms.halltrace arm | clear` rearma o borra la captura circular autónoma; `comms.halltrace dump [start] [count<=64]` la descarga por páginas después de que se congela.
+- El stream live se apaga automáticamente al cerrar Telnet. La captura RAM sigue funcionando sin Telnet y se congela tras un trigger diagnóstico de 10,00 m/s, conservando contexto previo y 50 muestras posteriores.
+- Ambos mecanismos son sideband sólo para correlación; no cambian la trama binaria, el control ni el filtrado Hall. La captura se pierde si la ESP32 se reinicia o queda sin alimentación.
 - Procedimiento y semántica de los campos: [HALL_OBSERVABILITY.md](HALL_OBSERVABILITY.md).
 
 ## Diagnóstico de sistema (`sys.*`)
