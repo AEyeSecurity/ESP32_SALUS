@@ -158,3 +158,11 @@ Ejemplo:
 2. Copia textual exacta a los espejos.
 3. Actualizar fecha en cada cambio.
 4. Validar `diff` entre canónico y espejos antes de commit.
+
+## Retiro de la medición de batería (2026-10-01)
+
+El firmware ya no muestrea GPIO34 ni emite la antigua trama de batería `0x56`.
+El UART mantiene exclusivamente los contratos de comando `0xAA` y telemetría de
+control `0x55`, sin cambio de versión, tamaños, CRC ni unidades. La Jetson mide
+la batería con su backend BMS RS485/USB. Los consumidores ADC antiguos quedan
+sin mediciones; deben usar la nueva fuente externa.

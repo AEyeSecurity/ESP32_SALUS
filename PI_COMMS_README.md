@@ -1,6 +1,6 @@
 # ESP32 ↔ Raspberry Pi UART Link
 
-Guía operativa del enlace UART entre ESP32 y Raspberry Pi/Jetson con el protocolo actual v2 extendido para batería.
+Guía operativa del enlace UART entre ESP32 y Raspberry Pi/Jetson con el protocolo de control v2; la batería se mide externamente en Jetson.
 
 > Referencia de protocolo (espejo): `ESP32_UART_PROTOCOL.md`  
 > Fuente de verdad documental: `aeye-ros-workspace/src/sensores/ESP32_UART_PROTOCOL.md`.
@@ -21,7 +21,7 @@ Guía operativa del enlace UART entre ESP32 y Raspberry Pi/Jetson con el protoco
 | Tarea      | Archivo             | Cadencia | Rol |
 |------------|---------------------|----------|-----|
 | `PiUartRx` | `src/pi_comms.cpp`  | ~1 kHz   | Parser `0xAA`, validación CRC + versión, snapshot RX |
-| `PiUartTx` | `src/pi_comms.cpp`  | 100 Hz   | Emisión `0x55` de control y `0x56` de batería |
+| `PiUartTx` | `src/pi_comms.cpp`  | 100 Hz   | Emisión `0x55` de control; batería externa |
 
 ## 3. Protocolo v2 extendido
 
@@ -64,36 +64,16 @@ Sentinels:
 - bit4-5 `CONTROL_SOURCE` (`00 NONE`, `01 PI`, `10 RC`, `11 TEL`)
 - bit6 `OVERSPEED_ACTIVE`
 
-### ESP32 → Pi batería (8 bytes)
+### Retiro de telemetría de batería (2026-10-01)
 
-```text
-0: 0x56
-1: battery_flags
-2: battery_cv_lsb    (u16 LE, V x100)
-3: battery_cv_msb
-4: adc_mv_lsb        (u16 LE, mV en pin ADC)
-5: adc_mv_msb
-6: sample_age_ds_u8  (edad de muestra en decisegundos)
-7: CRC-8 Dallas/Maxim (bytes 0..6)
-```
+La trama histórica de 8 bytes con cabecera `0x56` ya no se transmite. Se retiraron
+el muestreo ADC GPIO34, el divisor configurado, la tarea y el estado de TX de batería.
+La Jetson lee el BMS Pylontech mediante un enlace RS485/USB independiente del UART
+ESP32. `0xAA`/`0x55` mantienen versión 2, campos, unidades y CRC.
 
-`battery_flags`:
-
-- bit0 `READY`
-- bit1 `FRESH`
-- bit2 `SUSPECT`
-- bit3 `CAL`
-- bit4-7 reservados
-
-Observaciones:
-
-- `battery_cv` viaja ya calibrado desde la ESP32 usando el divisor resistivo y `calibration_gain`.
-- La ESP32 calcula `battery_cv` con un `trimmed mean` de `16` lecturas ADC por ciclo; no aplica un filtro temporal largo ni calcula SOC.
-- `adc_mv` se conserva para diagnóstico y recalibración.
-- `sample_age_ds` permite detectar lecturas viejas sin deducirlo del ritmo UART.
-- El suavizado temporal y el cálculo final de porcentaje se hacen en ROS2 usando `battery_cv` como insumo.
-- La trama `0x56` mantiene tamaño, campos y versión; no hay bump de protocolo.
-- La trama `0x55` no cambia y sigue siendo compatible con el parser previo.
+El backend de batería de `salus_robot` debe configurarse como externo; los parsers
+pueden conservar soporte para `0x56` por compatibilidad con firmware anterior,
+pero no deben esperar esa trama de este firmware ni inventar mediciones si falta.
 
 ## 4. Flujo de control
 
@@ -116,15 +96,14 @@ Observaciones:
 - `steer_meas`: `measuredDeg - adjustedCenterDeg` en `deg x100`
 - `brake_applied`: porcentaje realmente aplicado
 - `status_flags`: derivados de estado runtime de drive
-- `battery_cv`: voltaje calibrado de batería en `V x100`
-- `adc_mv`: voltaje del pin ADC en `mV`
-- `sample_age_ds`: antigüedad de la última medición de batería
 
 ## 5. Debug
 
-- `comms.status`: snapshot RX y última trama TX de batería (`lastFrame`, `speedCmd`, `hazard`, flags, contadores `ok/crcErr/malformed/verErr`, `battTx`)
+- `comms.status`: snapshot RX y estado `battTx=DISABLED source=EXTERNAL_BMS` (`lastFrame`, `speedCmd`, `hazard`, flags, contadores `ok/crcErr/malformed/verErr`, `battTx`)
 - `comms.reset`: resetea contadores RX
 - Activar `debug::kLogPiComms` para logs `[PI][RX]` y `[PI][TX]`
+
+- `battery.status`: indica medición externa (`adc=DISABLED uart=DISABLED`), sin tocar GPIO34.
 
 ## 6. Prueba rápida
 

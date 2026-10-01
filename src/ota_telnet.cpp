@@ -20,7 +20,6 @@
 #include "quad_functions.h"
 #include "fs_ia6.h"
 #include "system_diag.h"
-#include "battery_monitor.h"
 #include "hazard_light.h"
 
 #ifndef WIFI_STA_SSID
@@ -1258,35 +1257,6 @@ String buildSpeedStatusMessage() {
   return msg;
 }
 
-String buildBatteryStatusMessage() {
-  BatterySnapshot snapshot{};
-  const bool ok = batteryMonitorGetSnapshot(snapshot);
-
-  String msg = "[BAT][STATUS] pin=";
-  msg += snapshot.pin;
-  msg += " driver=";
-  msg += (ok && snapshot.driverReady) ? "READY" : "NOT_READY";
-  msg += " adc=";
-  msg += String(snapshot.adcPinMv);
-  msg += "mV";
-  msg += " battery=";
-  msg += String(static_cast<float>(snapshot.batteryMv) / 1000.0f, 2);
-  msg += "V";
-  msg += " batteryMv=";
-  msg += String(snapshot.batteryMv);
-  msg += " age=";
-  if (snapshot.sampleTick == 0) {
-    msg += "NONE";
-  } else {
-    const TickType_t ageTicks = xTaskGetTickCount() - snapshot.sampleTick;
-    msg += String(static_cast<uint32_t>(ageTicks * portTICK_PERIOD_MS));
-    msg += "ms";
-  }
-  msg += " samples=";
-  msg += String(snapshot.sampleCount);
-  return msg;
-}
-
 void reportSystemRtStatus() {
   SystemDiagSnapshot snapshot{};
   if (!systemDiagGetSnapshot(snapshot)) {
@@ -1455,9 +1425,7 @@ bool handleSessionCommand(const String& command, const String& args) {
 bool handleCommsCommand(const String& command, const String& args) {
   if (command.equalsIgnoreCase("comms.status")) {
     PiCommsRxSnapshot snapshot{};
-    PiCommsBatteryTxSnapshot batterySnapshot{};
     piCommsGetRxSnapshot(snapshot);
-    piCommsGetBatteryTxSnapshot(batterySnapshot);
     String msg = "[PI][STATUS] driver=";
     msg += snapshot.driverReady ? "READY" : "NOT_READY";
     msg += " lastFrame=";
@@ -1497,24 +1465,7 @@ bool handleCommsCommand(const String& command, const String& args) {
     msg += snapshot.framesMalformed;
     msg += " verErr=";
     msg += snapshot.framesVersionError;
-    msg += " battTx=";
-    if (batterySnapshot.hasFrame) {
-      const TickType_t ageTicks = xTaskGetTickCount() - batterySnapshot.lastFrameTick;
-      const uint32_t ageMs = ageTicks * portTICK_PERIOD_MS;
-      msg += String(static_cast<float>(batterySnapshot.batteryCentiVolts) / 100.0f, 2);
-      msg += "V/";
-      msg += batterySnapshot.adcPinMv;
-      msg += "mV age=";
-      msg += ageMs;
-      msg += "ms sampleAge=";
-      msg += String(static_cast<float>(batterySnapshot.sampleAgeDs) / 10.0f, 1);
-      msg += "s flags=0x";
-      msg += String(batterySnapshot.flags, HEX);
-      msg += " sent=";
-      msg += batterySnapshot.framesSent;
-    } else {
-      msg += "NONE";
-    }
+    msg += " battTx=DISABLED source=EXTERNAL_BMS";
     sendTelnet(msg);
     return true;
   }
@@ -1719,7 +1670,7 @@ bool handleSpeedCommand(const String& command, const String& args) {
 bool handleBatteryCommand(const String& command, const String& args) {
   (void)args;
   if (command.equalsIgnoreCase("battery.status")) {
-    sendTelnet(buildBatteryStatusMessage());
+    sendTelnet("[BAT][STATUS] source=EXTERNAL_BMS adc=DISABLED uart=DISABLED");
     return true;
   }
 

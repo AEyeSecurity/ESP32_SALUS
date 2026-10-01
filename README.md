@@ -71,7 +71,7 @@ Troubleshooting OTA rapido:
 | `taskRcMonitor`          | `src/fs_ia6.cpp`         | 2048 (~2 KB)         | 1    | 1      | 100 ms periodica (`vTaskDelay`)              | `debug::kEnableRcTask` (false) | Solo loguea el snapshot compartido; ideal para calibracion. |
 | `taskBridgeTest`         | `src/h_bridge.cpp`       | 4096 (~4 KB)         | 2    | 1      | Bucle cooperativo con rampas (80/60 ms)      | `debug::kEnableBridgeTask` (false) | Secuencia de prueba del puente H; no usar junto a `taskPidControl`. |
 | `taskPiCommsRx`          | `src/pi_comms.cpp`       | 3072 (~3 KB)         | 3    | 0      | ~1 kHz, `uart_read_bytes` + CRC              | Siempre                  | Ingresa frames `0xAA` v2 (7 bytes), valida versión/CRC y mantiene `PiCommsRxSnapshot` con `speed_cmd` firmado (`speed_cmd` + `REV_REQ`). |
-| `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~2 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía `[0x55 status speed steer brake crc]` a 100 Hz y una trama `[0x56 battery adc age crc]` a 1 Hz. |
+| `taskPiCommsTx`          | `src/pi_comms.cpp`       | 2048 (~2 KB)         | 3    | 0      | 10 ms periodica (`vTaskDelayUntil`)          | Siempre                  | Envía únicamente `[0x55 status speed steer brake crc]` a 100 Hz. |
 | `taskHazardLightControl` | `src/hazard_light.cpp`   | 2048 (~2 KB)         | 2    | 1      | 30 ms periodica (`vTaskDelayUntil`)          | Deshabilitada (`HAZARD_ENABLED=false`) | Código conservado; no se inicializa ni se crea la tarea. GPIO32 pertenece a FWD/REV. |
 | `loop()` de Arduino      | `src/main.cpp`           | N/A                  | N/A  | 1      | 50 ms (`vTaskDelay`)                         | Siempre                  | Supervisor liviano sin lógica de comunicaciones (solo `vTaskDelay`). |
 
@@ -103,11 +103,13 @@ Troubleshooting OTA rapido:
 - Seguridad: si el sensor no responde, no se destruye la tarea; simplemente reporta desconexion y reintenta en el siguiente ciclo.
 - Disparador: temporizado via `vTaskDelayUntil`. No emplea interrupciones I2C ni callbacks.
 
-### `taskBatteryMonitor` (src/battery_monitor.cpp)
-- Configuracion: `BatteryMonitorConfig` usa `GPIO34`, divisor `240k/10k`, `calibration_gain=0.8930`, `16` muestras y periodo de `1000 ms`.
-- Muestreo: cada ciclo toma `16` lecturas con `analogReadMilliVolts`, ordena, descarta extremos y publica un `trimmed mean` calibrado.
-- Alcance: esta tarea entrega un voltaje estable por ciclo (`battery_cv`), pero no hace suavizado temporal de varios segundos ni calcula porcentaje de batería.
-- Contrato: el suavizado temporal y el modelo de SOC final viven en ROS2; la ESP32 mantiene la medición calibrada y la exporta sin cambiar el protocolo UART.
+### Batería medida por el BMS externo
+- La ESP32 ya no inicializa ni lee el ADC de GPIO34 y no crea una tarea de batería.
+- Se retiró el módulo `battery_monitor`; el divisor/módulo de voltaje puede retirarse del cableado.
+- La Jetson obtiene los valores directamente del BMS Pylontech por RS485/USB mediante `salus_hardware`.
+- `battery.status` responde `source=EXTERNAL_BMS adc=DISABLED uart=DISABLED`; no informa mediciones externas que la ESP32 no posee.
+- Verificación sin hardware: `python3 tools/tests/uart_tx_no_battery_regression.py` ejecuta el bucle TX real con sensores/UART simulados durante 200 ciclos y comprueba formato `0x55`, CRC y centinelas. Requiere Python 3 y `g++`.
+- Compilación: `pio run -e esp32dev -e esp32dev-ota-sta -e esp32dev-ota-ap`. Estos comandos no flashean la placa; el cambio sólo queda activo después de cargar el firmware.
 
 ### `taskPidControl` (src/pid.cpp)
 - Calibracion: responde al comando Telnet `steer.calibrate` lanzando una FSM (mover izquierda → soltar → mover derecha → soltar) que barre los finales de carrera con un duty moderado y registra los angulos reales del AS5600.
@@ -150,12 +152,8 @@ Troubleshooting OTA rapido:
   - `steer_meas_i16` (`deg x100` centrado; `-32768` si N/A),
   - `brake_applied_u8` real,
   - `status_flags` (`READY`, `ESTOP_ACTIVE`, `FAILSAFE_ACTIVE`, `PI_FRESH`, `CONTROL_SOURCE`, `OVERSPEED_ACTIVE`).
-- Además envía una trama de batería de 8 bytes (`0x56 ... crc`) a baja tasa con:
-  - `battery_cv_u16` (`V x100`, ya calibrado en la ESP32 con `trimmed mean`),
-  - `adc_mv_u16` (`mV` del pin ADC),
-  - `sample_age_ds_u8` (edad de muestra en decisegundos),
-  - `battery_flags` (`READY`, `FRESH`, `SUSPECT`, `CAL`).
-  - El suavizado temporal y el cálculo final de SOC ocurren del lado ROS2; la semántica y tamaño de la trama no cambian.
+- La antigua trama de batería `0x56` dejó de emitirse. Las tramas de comando `0xAA` y telemetría de control `0x55` conservan tamaño, campos, CRC y versión 2.
+- El consumidor de batería debe usar el backend externo en Jetson. Un consumidor antiguo que espere el ADC debe señalar ausencia de datos; no se transmiten ceros ni valores ficticios.
 - `taskQuadDriveControl` consume el snapshot:  
   - `ESTOP` → freno completo y duty mínimo.  
   - `DRIVE_EN` + `speed_cmd_u16` + `REV_REQ` -> setpoint firmado (`m/s`) para PID Hall, clamp asimétrico `[-rev.max, +spid.max]` (default `rev.max=1.30 m/s`).  
@@ -164,7 +162,7 @@ Troubleshooting OTA rapido:
   - En REV clamped con error sostenido se activa anti-windup reforzado para descargar integrador más rápido.
   - con frame fresco de Pi, freno aplicado = `max(brake_u8_pi, brake_overspeed_auto)` (y `ESTOP` fuerza 100 %).  
 - `taskPidControl` usa `steer` de Pi cuando el frame está fresco (<=120 ms); si no, vuelve a steering RC.  
-- Para inspeccionar el estado usa Telnet (`comms.status`, `comms.reset`) o activa `debug::kLogPiComms`. `comms.status` ahora también resume la última trama de batería enviada por UART.  
+- Para inspeccionar el estado usa Telnet (`comms.status`, `comms.reset`) o activa `debug::kLogPiComms`. `comms.status` indica `battTx=DISABLED source=EXTERNAL_BMS`.
 - Documentación detallada, pasos de prueba y troubleshooting: **[PI_COMMS_README.md](PI_COMMS_README.md)**.
 
 ## Velocidad Hall (GPIO ISR IRAM)
