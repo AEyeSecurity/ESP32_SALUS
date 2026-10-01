@@ -13,7 +13,6 @@
 #include "hall_speed.h"
 #include "speed_pid.h"
 #include "system_diag.h"
-#include "battery_monitor.h"
 #include "hazard_light.h"
 
 constexpr uint16_t STACK_OTA = 8192;
@@ -24,7 +23,6 @@ constexpr uint16_t STACK_PID = 4096;
 constexpr uint16_t STACK_DRIVE = 4096;
 constexpr uint16_t STACK_PI_RX = 3072;
 constexpr uint16_t STACK_PI_TX = 2048;
-constexpr uint16_t STACK_BATTERY = 2048;
 constexpr uint16_t STACK_HAZARD = 2048;
 
 constexpr int AS5600_SDA_PIN = 25;
@@ -120,14 +118,6 @@ constexpr TickType_t AS5600_LOG_INTERVAL = pdMS_TO_TICKS(500);
 constexpr TickType_t PID_PERIOD = pdMS_TO_TICKS(30);
 constexpr TickType_t PID_LOG_INTERVAL = pdMS_TO_TICKS(200);
 constexpr TickType_t THROTTLE_PERIOD = pdMS_TO_TICKS(30);
-constexpr TickType_t BATTERY_PERIOD = pdMS_TO_TICKS(1000);
-constexpr TickType_t BATTERY_UART_PERIOD = pdMS_TO_TICKS(1000);
-
-constexpr uint8_t BATTERY_ADC_PIN = 34;
-constexpr uint8_t BATTERY_SAMPLE_COUNT = 16;
-constexpr uint32_t BATTERY_DIVIDER_UPPER_OHM = 240000;
-constexpr uint32_t BATTERY_DIVIDER_LOWER_OHM = 10000;
-constexpr float BATTERY_CALIBRATION_GAIN = 0.8930f;
 
 // Preserve the baliza implementation, but do not initialize or drive its former pin.
 constexpr bool HAZARD_ENABLED = false;
@@ -256,18 +246,9 @@ static PiCommsConfig g_piCommsConfig = {
     256,
     pdMS_TO_TICKS(2),
     pdMS_TO_TICKS(10),
-    BATTERY_UART_PERIOD,
     0,
     debug::kLogPiComms,
     debug::kLogPiComms};
-static BatteryMonitorConfig g_batteryMonitorConfig = {
-    BATTERY_ADC_PIN,
-    BATTERY_SAMPLE_COUNT,
-    BATTERY_DIVIDER_UPPER_OHM,
-    BATTERY_DIVIDER_LOWER_OHM,
-    BATTERY_CALIBRATION_GAIN,
-    BATTERY_PERIOD,
-};
 static HazardLightConfig g_hazardLightConfig = {
     HAZARD_RELAY_PIN,
     HAZARD_RELAY_ACTIVE_LOW,
@@ -293,7 +274,6 @@ static TaskHandle_t g_taskPidHandle = nullptr;
 static TaskHandle_t g_taskDriveHandle = nullptr;
 static TaskHandle_t g_taskPiRxHandle = nullptr;
 static TaskHandle_t g_taskPiTxHandle = nullptr;
-static TaskHandle_t g_taskBatteryHandle = nullptr;
 static TaskHandle_t g_taskHazardHandle = nullptr;
 
 void setup() {
@@ -371,18 +351,6 @@ void setup() {
 
   if (!hallSpeedInit(g_hallSpeedConfig)) {
     broadcastIf(true, "[SPD][HALL] Error inicializando backend Hall");
-  }
-
-  if (!batteryMonitorInit(g_batteryMonitorConfig)) {
-    broadcastIf(true, "[BAT][MON] Error inicializando monitor de bateria");
-  } else if (startTaskPinned(taskBatteryMonitor,
-                             "Battery",
-                             STACK_BATTERY,
-                             &g_batteryMonitorConfig,
-                             1,
-                             &g_taskBatteryHandle,
-                             1)) {
-    systemDiagRegisterTask(SystemDiagTaskId::kBattery, "Battery", g_taskBatteryHandle);
   }
 
   if (HAZARD_ENABLED) {
