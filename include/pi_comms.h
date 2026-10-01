@@ -56,6 +56,44 @@ bool piCommsGetRxSnapshot(PiCommsRxSnapshot& snapshot);
 bool piCommsGetBatteryTxSnapshot(PiCommsBatteryTxSnapshot& snapshot);
 void piCommsResetStats();
 
+// Diagnostic-only sideband. It never changes the binary UART protocol or drive control.
+void piCommsSetHallTelemetryTraceEnabled(bool enabled);
+bool piCommsGetHallTelemetryTraceEnabled();
+
+// Binary RAM capture for post-run Hall diagnostics. This is sideband-only: the
+// trigger preserves evidence but never rejects or changes speed telemetry.
+struct PiHallTelemetryCaptureRecord {
+  uint32_t sequence;
+  uint32_t txTimestampUs;
+  uint16_t speedCentiMps;
+  uint32_t transitionPeriodUs;
+  uint32_t lastTransitionUs;
+  uint32_t eventAgeUs;
+  uint32_t transitionsOk;
+  uint32_t transitionsInvalidState;
+  uint32_t transitionsInvalidJump;
+  uint32_t isrCount;
+  uint8_t hallMask;
+  uint8_t flags;
+};
+
+struct PiHallTelemetryCaptureStatus {
+  bool armed;
+  bool triggered;
+  bool frozen;
+  uint16_t count;
+  uint16_t capacity;
+  uint16_t postTriggerRemaining;
+  uint32_t triggerSequence;
+  uint16_t triggerSpeedCentiMps;
+};
+
+void piCommsArmHallTelemetryCapture();
+void piCommsClearHallTelemetryCapture();
+bool piCommsGetHallTelemetryCaptureStatus(PiHallTelemetryCaptureStatus& status);
+bool piCommsReadHallTelemetryCaptureRecord(size_t oldestIndex,
+                                           PiHallTelemetryCaptureRecord& record);
+
 void taskPiCommsRx(void* parameter);
 void taskPiCommsTx(void* parameter);
 
