@@ -266,3 +266,9 @@ Estos valores se inyectan en los `*_TaskConfig` y definen la cadencia con la que
 
 Con esta descripcion puedes ajustar periodos, prioridades o flags con plena visibilidad del impacto en la programacion de FreeRTOS y en la interaccion con el hardware.
 
+
+## Calibración individual de frenos (2026-10-09)
+
+Telnet ofrece `drive.brake servo A|B <deg>`, extremos individuales `release/apply A|B <deg>` y `done`. La calibración inhibe tracción y cede a cualquier demanda normal de freno; termina al desconectar Telnet. Los extremos son temporales y vuelven a los valores del firmware al reiniciar. Ver `OTA_TELNET.md` para el procedimiento. Validación física pendiente; la compilación y las pruebas host no calibran el mecanismo real.
+
+Ángulos predeterminados desde 2026-10-09: A liberado 15° / frenado 110°; B liberado 130° / frenado 25°. El extremo de frenado B queda incorporado al firmware y se conserva tras reiniciar una vez cargada esta versión.

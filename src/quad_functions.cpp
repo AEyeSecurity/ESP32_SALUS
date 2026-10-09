@@ -34,6 +34,8 @@ struct BrakeServoAngles {
 };
 
 BrakeServoAngles g_brakeCurrentAngles{0, 0};
+bool g_brakeCalibrationEnabled = false;
+BrakeServoAngles g_brakeCalibrationAngles{0, 0};
 
 // Filtro simple con offset auto-calibrado para el acelerador
 volatile int g_filteredThrottleValue = 0;
@@ -690,6 +692,52 @@ void quadBrakeApplyPercent(uint8_t percent) {
   applyBrakeAngles(targetAngleA, targetAngleB);
 }
 
+bool quadBrakeSetCalibrationAngle(bool servoB, int angleDeg) {
+  if (!g_brakeInitialized || angleDeg < 0 || angleDeg > 180) return false;
+  portENTER_CRITICAL(&g_brakeMux);
+  if (!g_brakeCalibrationEnabled) g_brakeCalibrationAngles = g_brakeCurrentAngles;
+  if (servoB) g_brakeCalibrationAngles.servoB = angleDeg;
+  else g_brakeCalibrationAngles.servoA = angleDeg;
+  g_brakeCalibrationEnabled = true;
+  portEXIT_CRITICAL(&g_brakeMux);
+  return true;
+}
+
+void quadBrakeEndCalibration() {
+  portENTER_CRITICAL(&g_brakeMux);
+  g_brakeCalibrationEnabled = false;
+  portEXIT_CRITICAL(&g_brakeMux);
+}
+
+// Returns true while calibration requires unconditional throttle inhibition.
+bool quadBrakeApplyControl(uint8_t appliedBrakePercent) {
+  portENTER_CRITICAL(&g_brakeMux);
+  const bool calibrationEnabled = g_brakeCalibrationEnabled;
+  const BrakeServoAngles angles = g_brakeCalibrationAngles;
+  portEXIT_CRITICAL(&g_brakeMux);
+  // Safety/RC/Pi/overspeed/manual brake demand always takes precedence.
+  if (calibrationEnabled && appliedBrakePercent == 0) {
+    applyBrakeAngles(angles.servoA, angles.servoB);
+  } else {
+    quadBrakeApplyPercent(appliedBrakePercent);
+  }
+  return calibrationEnabled;
+}
+
+bool quadBrakeSetServoEndpoint(bool servoB, bool apply, int angleDeg) {
+  if (!g_brakeInitialized || angleDeg < 0 || angleDeg > 180) return false;
+  portENTER_CRITICAL(&g_brakeMux);
+  if (servoB) {
+    if (apply) g_brakeConfig.brakeAngleServoBDeg = angleDeg;
+    else g_brakeConfig.releaseAngleServoBDeg = angleDeg;
+  } else {
+    if (apply) g_brakeConfig.brakeAngleServoADeg = angleDeg;
+    else g_brakeConfig.releaseAngleServoADeg = angleDeg;
+  }
+  portEXIT_CRITICAL(&g_brakeMux);
+  return true;
+}
+
 bool quadBrakeSetReleaseAngles(int servoADeg, int servoBDeg) {
   if (!g_brakeInitialized) {
     return false;
@@ -731,6 +779,7 @@ bool quadBrakeSetAngleRange(int releaseServoADeg,
 bool quadBrakeGetDebugSnapshot(QuadBrakeDebugSnapshot& out) {
   portENTER_CRITICAL(&g_brakeMux);
   out.initialized = g_brakeInitialized;
+  out.calibrationEnabled = g_brakeCalibrationEnabled;
   out.overrideEnabled = g_brakeOverrideEnabled;
   out.overridePercent = g_brakeOverridePercent;
   out.releaseAngleServoADeg = g_brakeConfig.releaseAngleServoADeg;
@@ -1753,7 +1802,7 @@ void taskQuadDriveControl(void* parameter) {
     if (appliedBrakePercent > 0 || inhibitReason != DriveThrottleInhibitReason::kNone || directionSwitching) {
       throttleInhibit = true;
     }
-    quadBrakeApplyPercent(appliedBrakePercent);
+    if (quadBrakeApplyControl(appliedBrakePercent)) throttleInhibit = true;
 
     const QuadDriveRuntimeSnapshot driveRuntime = makeDriveRuntimeSnapshot(commandFromPwmOverride,
                                                                            speedControlSource,

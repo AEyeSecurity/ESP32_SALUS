@@ -54,6 +54,7 @@ struct QuadBrakeDebugSnapshot {
   bool initialized;
   bool overrideEnabled;
   uint8_t overridePercent;
+  bool calibrationEnabled;
   int releaseAngleServoADeg;
   int brakeAngleServoADeg;
   int releaseAngleServoBDeg;
@@ -74,6 +75,10 @@ bool quadBrakeSetReleaseAngles(int servoADeg, int servoBDeg);
 bool quadBrakeSetApplyAngles(int servoADeg, int servoBDeg);
 bool quadBrakeSetAngleRange(int releaseServoADeg, int applyServoADeg, int releaseServoBDeg, int applyServoBDeg);
 bool quadBrakeGetDebugSnapshot(QuadBrakeDebugSnapshot& out);
+// Calibration holds both angles, inhibits throttle, and yields to normal braking.
+bool quadBrakeSetCalibrationAngle(bool servoB, int angleDeg);
+void quadBrakeEndCalibration();
+bool quadBrakeSetServoEndpoint(bool servoB, bool apply, int angleDeg);
 
 struct QuadDriveTaskConfig {
   QuadThrottleConfig throttle;

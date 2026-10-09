@@ -385,6 +385,7 @@ void resetTelnetSession() {
     g_telnetClient.stop();
   }
   piCommsSetHallTelemetryTraceEnabled(false);
+  quadBrakeEndCalibration();
   clearTelnetLogQueue();
   // Return to low-noise operation when a Telnet session ends.
   quadDriveSetLogEnabled(false);
@@ -914,6 +915,8 @@ void reportDriveBrakeStatus() {
   }
   String msg = "[DRIVE][BRAKE] ";
   msg += snapshot.initialized ? "READY" : "NOINIT";
+  msg += " calibration=";
+  msg += snapshot.calibrationEnabled ? "ON" : "OFF";
   msg += " override=";
   msg += snapshot.overrideEnabled ? "ON" : "OFF";
   msg += " pct=";
@@ -2848,12 +2851,49 @@ bool handleDriveCommand(const String& command, const String& args) {
     normalized.toLowerCase();
     normalized.trim();
 
+    if (normalized == "help") {
+      sendTelnet("drive.brake servo <A|B> <0..180> | release <A|B> <deg> | apply <A|B> <deg> | done | status | on [pct] | off");
+      sendTelnet("servo: mantiene el otro angulo e inhibe throttle; freno normal tiene prioridad. done/off: vuelve al control normal. Ajustes temporales, no NVS.");
+      return true;
+    }
+    if (normalized == "done") {
+      quadBrakeEndCalibration();
+      reportDriveBrakeStatus();
+      return true;
+    }
+    // Per-servo calibration and endpoints; preserve legacy numeric pairs below.
+    const bool servoCommand = normalized.startsWith("servo ");
+    const bool releaseCommand = normalized.startsWith("release ");
+    const bool applyCommand = normalized.startsWith("apply ");
+    if (servoCommand || releaseCommand || applyCommand) {
+      const int prefixLength = servoCommand ? 6 : (releaseCommand ? 8 : 6);
+      String values = normalized.substring(prefixLength);
+      values.trim();
+      const int separator = values.indexOf(' ');
+      const String servo = separator >= 0 ? values.substring(0, separator) : values;
+      if (servoCommand || servo == "a" || servo == "b") {
+        int angle = 0;
+        String angleText = separator >= 0 ? values.substring(separator + 1) : String("");
+        angleText.trim();
+        if ((servo != "a" && servo != "b") || !parseIntArg(angleText, angle) || angle < 0 || angle > 180) {
+          sendTelnet("[DRIVE][BRAKE] Uso: drive.brake servo|release|apply <A|B> <deg> (0..180)");
+          return true;
+        }
+        const bool ok = servoCommand ? quadBrakeSetCalibrationAngle(servo == "b", angle)
+                                     : quadBrakeSetServoEndpoint(servo == "b", applyCommand, angle);
+        if (!ok) sendTelnet("[DRIVE][BRAKE] Freno no inicializado");
+        reportDriveBrakeStatus();
+        return true;
+      }
+    }
+
     if (normalized == "status") {
       reportDriveBrakeStatus();
       return true;
     }
 
     if (normalized == "off" || normalized == "0" || normalized == "release") {
+      quadBrakeEndCalibration();
       quadDriveSetBrakeOverride(false, 0);
       sendTelnet("[DRIVE][BRAKE] OFF");
       reportDriveBrakeStatus();

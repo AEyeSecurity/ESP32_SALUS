@@ -222,7 +222,15 @@ Backend activo por ISR Hall en `GPIO26/27/14` (active-low), con dirección por s
 - `drive.brake release <servoA_deg> <servoB_deg>`: ajusta el angulo start/release runtime de ambos servos (`0..180`).
 - `drive.brake apply <servoA_deg> <servoB_deg>`: ajusta el angulo end/apply runtime de ambos servos (`0..180`).
 - `drive.brake range <relA> <applyA> <relB> <applyB>`: ajusta start/end de ambos servos en una sola linea.
-- Valores por defecto del firmware: A reposo `25°` / freno `110°`; B reposo `130°` / freno `80°`.
+- `drive.brake help`: muestra los comandos de calibración.
+- `drive.brake servo A <deg>` / `drive.brake servo B <deg>`: mueve sólo el servo elegido (`0..180°`) y mantiene el otro en el ángulo que tenía al iniciar la calibración. Los movimientos posteriores conservan ambos ángulos de prueba.
+- `drive.brake release A <deg>` / `release B <deg>`: ajusta sólo el extremo liberado del servo elegido.
+- `drive.brake apply A <deg>` / `apply B <deg>`: ajusta sólo el extremo frenado del servo elegido.
+- `drive.brake done`: termina la calibración y devuelve los servos al control normal. `off` también termina calibración y quita el override manual.
+- La calibración inhibe el acelerador incluso en el ángulo liberado. Cualquier demanda normal de freno (RC, Pi, E-stop, safety lock, overspeed u override manual) tiene prioridad y actúa sobre ambos servos; al desaparecer, se retoman los ángulos de prueba.
+- Al desconectar Telnet termina la calibración. Al terminar puede volver a actuar una consigna RC/Pi vigente: hacer la calibración con tracción físicamente inhabilitada y E-stop accesible. No enviar consignas de velocidad.
+- Para conservar un ángulo probado como extremo, indicar su valor explícitamente, por ejemplo `drive.brake release A 30`. Los comandos de extremos no activan calibración; fuera de ella, el control normal usa los extremos nuevos inmediatamente.
+- Valores por defecto del firmware: A reposo `15°` / freno `110°`; B reposo `130°` / freno `25°`.
 - Los ajustes Telnet son runtime para debug: no se guardan en NVS y al reiniciar vuelven a los valores por defecto del firmware.
 
 ## Prueba de banco del cambio a GPIO32
